@@ -1,0 +1,13 @@
+# 由 scripts/derive_requirements.py 从 vendor/_upstream/pyproject.toml 派生，勿手改
+
+# AstrBot 宿主已提供（声明性清单，不重复安装）
+aiofiles>=23.2.1
+anyio>=4.0.0,<5.0.0
+beautifulsoup4>=4.12.0,<5.0.0
+cryptography>45.0.0
+httpx[http2]>=0.20.0,<1.0.0
+pydantic>=2.10.0,<3.0.0
+qrcode>=8.0,<9.0
+rich>=15.0.0,<16.0.0
+typing-extensions>=4.12.0
+yarl>=1.9.0,<2.0.0

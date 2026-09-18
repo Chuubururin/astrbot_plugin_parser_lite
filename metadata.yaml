@@ -1,0 +1,37 @@
+name: astrbot_plugin_parser_lite
+# 字段口径依 AstrBot StarMetadata：必填 name/desc/version/author；可选
+# display_name/short_desc/repo/astrbot_version/support_platforms。
+# 展示文案（display_name/desc/short_desc）与桥身份（author/repo）为手写面，
+# 与 usage/README 桥接说明同为面向 AstrBot 用户的中文；上游 pyproject 的
+# description 与 license 不再混入展示字段，仅逐字留作溯源注释（第一层注入，
+# 随 roll 再生），逐字节透传由 generate_config 的汇点断言守护。
+# 上游 description：Standalone social-media link parser
+desc: 自动解析 B 站/抖音/小红书等平台分享链接与 JSON 卡片并转发为内容卡片；nonebot-plugin-parser-lite 的 AstrBot 桥接版
+short_desc: 自动解析社交平台分享链接并转发内容
+display_name: 链接解析 Lite
+# 版本直接沿用上游 nonebot-plugin-parser-lite（当前 v1.3.7-pre-release.4），
+# 由两层注入流水线随 roll 自动再生；release tag 必须与本字段锁步（release.yml
+# 校验）。version 行保持裸值、无引号——release 工作流的正则解析依赖此格式契约。
+version: v1.3.7-pre-release.4
+author: Chuubururin
+repo: https://github.com/Chuubururin/astrbot_plugin_parser_lite
+# 宿主版本范围：文档要求 PEP 440 且无 v 前缀；以 > 开头裸写会被 YAML 当作
+# 折叠块标量，故整体加引号；| safe 是因为模板环境开了 autoescape（代码生成
+# 注入防线），而 < > 会被转义为 HTML 实体——取值是手写常量，非注入数据。
+astrbot_version: ">=4.28,<5"
+# 只背书真实验证过的平台（aiocqhttp = OneBot v11）；键位取文档
+# ADAPTER_NAME_2_TYPE
+support_platforms:
+  - aiocqhttp
+# 插件市场分类与搜索（官方发布文档字段；宿主 StarMetadata 不解析，
+# 由市场侧消费）
+tags:
+  - 工具
+# logo 不在本文件声明：AstrBot 只认插件根目录下的 logo.png（PNG，1:1，
+# 推荐 256x256），star_manager 加载时强制覆写 metadata.logo_path，
+# 在此写 logo_path 无效。
+# 上游许可证 MIT：vendor 零修改，发布物随上游条款分发
+help:
+  usage:
+    - 群内发送 B 站/抖音/小红书等分享链接或 JSON 卡片，自动解析并转发内容
+    - 配置项请在 AstrBot WebUI 插件页中调整

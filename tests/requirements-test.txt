@@ -1,0 +1,60 @@
+# 测试期额外依赖（手工维护，非两层注入生成物）。
+#
+# ── astrbot 本体不在本文件 ───────────────────────────────────────────────
+# astrbot 由 CI 以 `pip install --no-deps "astrbot>=4.28,<5"` 单独安装（见
+# .github/workflows/ci.yml 的 test job）；本地调试请照做。
+# 它声明 63 个运行依赖（faiss-cpu / pandas / py-cord / python-telegram-bot /
+# dashscope / xinference-client / quart …），带依赖装 CI 不可承受。
+#
+# 为何必须打真实框架：桥接层业务逻辑测试（tests/test_sender_chain.py、
+# tests/test_event_stop.py、tests/test_json_card_urls.py）验证的是
+# 「ParseResult → AstrBot 组件」的翻译契约。2026-09-17 评审已证实，手写替身会
+# 接受真实库拒绝的参数（tests/test_ssrf.py 的 _FakeCurlSession 曾掩盖 curl_cffi
+# 的高危签名不符缺陷），故此处刻意使用真实包而非 stub。
+#
+# ── 为何 --no-deps 之后还要补这么一长串 ─────────────────────────────────
+# astrbot/core/__init__.py 在**导入期即执行副作用**：建 SQLite 库、初始化
+# logger / 偏好存储 / t2i 渲染器。因此任何 `import astrbot.core.*` 都会拉起大半个
+# 框架。缺口有两个来源，**必须两者都做才能收敛**：
+#
+#   ① 静态导入闭包 —— 从本仓实际触达的 10 个 astrbot 模块出发，沿模块级 import
+#      递归，收集所有非 stdlib 顶层名（stdlib 判定用 sys.stdlib_module_names）。
+#   ② 导入期副作用的运行时依赖 —— 这类需求**没有任何 import 语句可查**，静态分析
+#      永远拿不到（典型：SQLAlchemy 根据 URL 字符串动态加载 sqlite+aiosqlite 方言）。
+#      只能用真实环境实测：scripts/check_test_deps.py 迭代到绿。
+#
+# 两组都**不带 --no-deps** 安装，故各自的传递依赖交给 pip 解析
+# （mcp → starlette/uvicorn/sse-starlette；aiohttp → multidict/frozenlist/attrs；
+# google-genai → 其自有依赖链 …）。
+#
+# 上游 astrbot 若新增模块级 import 或新的导入期副作用，CI 的「断言 astrbot
+# 导入链完整」步骤会明确报出缺哪个包，按提示补进本文件即可。
+
+# —— ① 静态导入闭包所需 ——
+# 右侧注释标注该包被闭包中哪个模块引入（便于下次升级时重新推导）
+aiohttp>=3.11.18              # astrbot.core.utils.metrics
+anthropic>=0.51.0             # astrbot.core.provider.entities
+apscheduler>=3.11.0           # astrbot.core.utils.shared_preferences
+deprecated>=1.2.18            # astrbot.core.db / core.agent.tool
+google-genai>=1.56.0          # astrbot.core.provider.entities
+jsonschema>=4.4.0             # astrbot.core.agent.tool
+loguru>=0.7.2                 # astrbot.core.log
+mcp<2,>=1.8.0                 # astrbot.core.agent.tool
+openai>=1.78.0                # astrbot.core.provider.entities
+packaging>=24.2               # astrbot.core.utils.requirements_utils
+pillow>=11.2.1                # astrbot.core.utils.io
+psutil<7.2.0,>=5.8.0          # astrbot.core.utils.io
+sqlalchemy[asyncio]>=2.0.41   # astrbot.core.db.po
+sqlmodel>=0.0.24              # astrbot.core.db.po
+
+# —— ② 导入期副作用的运行时依赖（静态分析拿不到）——
+aiosqlite>=0.21.0             # SQLAlchemy 按 DATABASE_URL 动态加载 sqlite+aiosqlite
+                              # 方言（astrbot/core/db/sqlite.py:79）——无对应 import 语句
+jieba>=0.42.1                 # astrbot.core.knowledge_base.retrieval.tokenizer
+pypdf>=6.1.1                  # astrbot.core.knowledge_base.parsers.pdf_parser
+PyYAML>=6.0                   # astrbot.core.star.star_manager / updater 的配置与元数据解析。
+                              # 注意：这是 astrbot 侧的需要，与本仓 scripts/ 刻意
+                              # 不依赖 PyYAML 的约定无关，勿混为一谈
+
+# audioop 在 Python 3.13 被移出 stdlib；astrbot 自身也用同一 marker 声明
+audioop-lts; python_full_version >= "3.13"

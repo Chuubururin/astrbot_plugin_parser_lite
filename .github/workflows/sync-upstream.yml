@@ -1,0 +1,442 @@
+name: sync-upstream
+
+# 滚动同步协议（Skia AutoRoll 派生）：
+# - 单 roll 在途：concurrency=1 且不取消在途 roll；
+# - dry-run → auto-merge：roll job 内先跑全套确定性检查，PR 分支再由 CI
+#   required checks 把关后才允许 auto-merge；
+# - revert-first：roll commit 固定携带 revert/停用页脚（见 commit message）；
+# - LKG：roll 前把当前 HEAD（上一已验证快照）force-push 到 lkg 分支留档，
+#   回滚 = checkout lkg 或以 lkg 为基线重建（release tag 为次级基线）；
+# - 熔断：连续 3 次运行失败 → cron 空转（dispatch + force 可恢复，无需改文件）；
+# - 祖先校验门：standalone 的构建源必须 ∈ 远端 main（ls-remote 真值）祖先——
+#   未合入 PR 的预览构建只跟进平面、不 roll vendor（state 留痕 last_skipped_build）；
+#   解析失败或校验失败一律拒绝 roll（响亮失败，不兜底）；
+# - 通知三级：成功静默 / 失败 issue（含 playbook）/ 滞后 issue（追平自动关）。
+# - 节奏：每日一滚（cron 17 17 * * *）；版本策略：metadata.yaml 直接沿用
+#   上游版本号，由两层注入流水线随 roll 再生（release tag = v{metadata 版本}，
+#   锁步校验）。
+# 网络说明：runner 直连 github.com；本地开发经镜像（见 doc/AGENTS.md）。
+# SYNC_PAT（可选 secret）：配置后 PR 分支能触发 CI → auto-merge 可用；
+#   缺省时回退 GITHUB_TOKEN（PR 不触发检查，需人工合并）。
+
+on:
+  schedule:
+    - cron: "17 17 * * *" # 每日一次（UTC 17:17 = 北京 01:17，避开整点）；手动 dispatch 不受影响
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "忽略熔断标记强制执行（修复后恢复滚子用）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false # 在途 roll 不打断（AutoRoll "one active roll"）
+
+jobs:
+  roll:
+    name: roll upstream standalone snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # 推 sync 分支与 keepalive 提交
+      pull-requests: write # 开 PR / auto-merge
+      issues: write # 熔断与滞后告警
+      actions: read # 熔断检查读 gh run list（/actions/workflows）——缺此权限将 403
+    env:
+      UPSTREAM_REPO: sokoko-org/nonebot-plugin-parser-lite
+      UPSTREAM_BRANCH: standalone
+      STATE_FILE: .github/sync-state.json
+      BREAKER_THRESHOLD: "3" # 连续失败熔断阈值（可调）
+      STALENESS_HOURS: "48" # 上游领先超过 2 个同步周期（日滚 → 2×24h）即告警
+      FORCE: ${{ github.event.inputs.force }}
+      GH_TOKEN: ${{ github.token }}
+      SYNC_PAT: ${{ secrets.SYNC_PAT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements/host-provided.txt
+
+      - name: 熔断检查（连续失败达阈值 → cron 空转）
+        id: breaker
+        run: |
+          set -euo pipefail
+          # 只看最近 ${BREAKER_THRESHOLD} 次「已完结」运行（排除当前 in_progress
+          # 这次）；判据用失败计数而非拼接串字面量比对——阈值可调（env 注释承诺），
+          # 拼接串比较在阈值 ≠ 3 时恒不等、熔断永不触发
+          fails="$(gh run list --workflow=sync-upstream --status completed \
+            --limit "${BREAKER_THRESHOLD}" --json conclusion \
+            --jq '[.[]|select(.conclusion=="failure")]|length')"
+          if [ "$fails" -ge "${BREAKER_THRESHOLD}" ] && [ "$FORCE" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::熔断生效：最近 ${BREAKER_THRESHOLD} 次运行中失败 ${fails} 次。恢复：gh workflow run sync-upstream -f force=true"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 克隆上游 standalone 并检测变化
+        id: detect
+        if: steps.breaker.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          UPSTREAM_DIR=".sync-work/upstream"
+          git clone --branch "$UPSTREAM_BRANCH" "https://github.com/${UPSTREAM_REPO}.git" "$UPSTREAM_DIR"
+          NEW_STANDALONE="$(git -C "$UPSTREAM_DIR" rev-parse HEAD)"
+          # 上游自动发布提交形如 "auto: publish standalone for <main_sha>"；解析
+          # 失败响亮失败（不再兜底 unknown——兜底值会被祖先校验门误判为 PR 预览
+          # 构建，未合入代码反而滞留 vendor）；语义与 scripts/roll_local.py 同源
+          SUBJECT="$(git -C "$UPSTREAM_DIR" log -1 --format=%s)"
+          NEW_MAIN="$(python scripts/pipeline_common.py --repo "$UPSTREAM_DIR" \
+            parse-subject --subject "$SUBJECT")"
+          # 远端 main 真值（ls-remote，共用 scripts/pipeline_common.py 的同一实现）：
+          # git fetch 的 pack 路径可能被本地网络缓存钉在旧值（origin/main 长期停在
+          # 201ebe8 而远端已到 adc5403）；带全历史的 fetch 供祖先校验取对象
+          git -C "$UPSTREAM_DIR" fetch origin main
+          REMOTE_MAIN="$(python scripts/pipeline_common.py --repo "$UPSTREAM_DIR" remote-main)"
+          PLANE_REF="$(python scripts/pipeline_common.py --repo "$UPSTREAM_DIR" plane-ref)"
+          OLD_STANDALONE="$(python -c "import json;print(json.load(open('${STATE_FILE}', encoding='utf-8'))['standalone_sha'])")"
+          {
+            echo "new_standalone=${NEW_STANDALONE}"
+            echo "new_main=${NEW_MAIN}"
+            echo "remote_main=${REMOTE_MAIN}"
+            echo "plane_ref=${PLANE_REF}"
+            echo "old_standalone=${OLD_STANDALONE}"
+          } >> "$GITHUB_OUTPUT"
+          # 祖先校验门（H5，与 scripts/roll_local.py 的 _is_ancestor 同一语义）：
+          # standalone 分支除随 main 发布外还会发布未合入 PR 的预览构建（实证
+          # f9e8c67 = PR #306 中间态 adc5403 的预览）——构建源不在远端 main 祖先
+          # 内即 PR 预览，跳过 vendor roll（平面照常跟进、state 留痕 last_skipped_build）
+          set +e
+          python scripts/pipeline_common.py --repo "$UPSTREAM_DIR" is-ancestor \
+            --candidate "$NEW_MAIN" --tip "$REMOTE_MAIN"
+          ancestor_rc=$?
+          set -e
+          case "$ancestor_rc" in
+            0) echo "ancestor_ok=true" >> "$GITHUB_OUTPUT" ;;
+            1)
+              echo "ancestor_ok=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::standalone 构建源 ${NEW_MAIN} 不在远端 main (${REMOTE_MAIN}) 祖先内——上游未合入 PR 的预览构建，跳过 vendor roll，仅跟进平面"
+              ;;
+            *)
+              echo "::error::祖先校验失败（退出码 ${ancestor_rc}）：无法判定构建源是否为 PR 预览，拒绝 roll"
+              exit 1
+              ;;
+          esac
+          if [ "$NEW_STANDALONE" = "$OLD_STANDALONE" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: keepalive（仓库 50 天无活动时触碰，防调度工作流被自动停用）
+        if: steps.detect.outputs.changed == 'false'
+        run: |
+          set -euo pipefail
+          last_commit="$(git log -1 --format=%ct)"
+          now="$(date +%s)"
+          if [ $((now - last_commit)) -gt $((50 * 24 * 3600)) ]; then
+            git config user.name "parser-lite-sync-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git commit --allow-empty -m "chore(sync): keepalive [skip ci]"
+            if ! git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+              echo "::warning::keepalive 直推被分支保护拦截，改为开提醒 issue"
+              gh issue create --title "keepalive：仓库长期无活动，调度工作流将停用" \
+                --body "距上次提交已超过 50 天。GitHub 将在 60 天无活动后停用 sync-upstream 的定时触发。请合并任意变更或手动重新启用。" || true
+            fi
+          fi
+
+      - name: 无变化空退出
+        if: steps.detect.outputs.changed == 'false'
+        run: |
+          echo "::notice::上游无变化，30s 空退出"
+          sleep 30
+
+      - name: LKG 留档（上一已验证快照 → lkg 分支）
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.ancestor_ok == 'true'
+        run: |
+          set -euo pipefail
+          # 当前 HEAD = 最近一次通过全套校验并入 main 的快照；roll 改写工作树
+          # 之前先留档，回滚有逐字节基线（Tree-hygiene：先恢复绿）
+          if ! git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/lkg" --force; then
+            echo "::warning::LKG 留档推送失败（不阻断本次 roll；回滚退回最近 release tag 基线）"
+          fi
+
+      # vendor 面四步（重建 → 派生 requirements → 三层校验 → 契约测试）以祖先
+      # 校验门为前置：构建源不在远端 main 祖先内（PR 预览）时整段跳过，只让平面
+      # （两层注入 + PR）跟进——否则未合入代码进入生产
+      - name: 整树重建 vendor（唯一升级方式，禁止 merge/patch）
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.ancestor_ok == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf vendor/nonebot_plugin_parser_lite vendor/_upstream
+          mkdir -p vendor/nonebot_plugin_parser_lite vendor/_upstream
+          cp -a .sync-work/upstream/src/nonebot_plugin_parser_lite/. vendor/nonebot_plugin_parser_lite/
+          cp -a .sync-work/upstream/pyproject.toml .sync-work/upstream/requirements.txt \
+                .sync-work/upstream/README.md .sync-work/upstream/LICENSE vendor/_upstream/
+
+      - name: 派生 requirements
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.ancestor_ok == 'true'
+        run: python scripts/derive_requirements.py
+
+      - name: 两层注入单命令（提取 → 分析 → 生成）
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          # 平面提取源取远端 main 真值（detect 已解析并 fetch）：本地 ref 可能被
+          # 镜像缓存钉在旧值，直取 sha 绕开竞态（与 scripts/roll_local.py 同源）
+          PLITE_SYNC_REF: ${{ steps.detect.outputs.plane_ref }}
+        run: |
+          set -euo pipefail
+          python scripts/run_injection.py | tee injection.log
+          # 候选扫描（advisory）同步到 Step Summary：锚点表维护入口
+          if grep -q "上游文案候选" injection.log; then
+            {
+              echo "### 上游文案候选（advisory，供锚点表复核）"
+              echo '```'
+              sed -n '/上游文案候选/,/两层注入完成/p' injection.log | sed '$d'
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+          rm -f injection.log
+
+      - name: vendor 三层校验（含与上游产物逐字节比对）
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.ancestor_ok == 'true'
+        run: python scripts/verify_vendor.py
+
+      - name: dry-run 全量契约测试
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.ancestor_ok == 'true'
+        run: python -m pytest -c config/pyproject.toml --rootdir=. -q
+
+      - name: 维护清单求值（advisory：把判定送进 PR 评审，不阻断 roll）
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          SUMMARY_JSON: ${{ runner.temp }}/maintenance.json
+          SUMMARY_MD: ${{ runner.temp }}/maintenance-summary.md
+        run: |
+          set -euo pipefail
+          # 本步是 **advisory 而非门禁**：清单的红条目是刻意设置的 tripwire
+          # （新可匹配平台 / 正则漂移 / vendor 公共 API 变更），升级路径是
+          # 「开 PR + 关闭 automerge 交人工评审」。若在此硬失败，roll 根本走不到
+          # 开 PR 那一步，tripwire 连送达评审的通道都没有。故恒 exit 0，
+          # 判定只写进 Step Summary 与 roll PR 正文（maintenance-summary.md）。
+          # 渲染逻辑在 scripts/maintenance_check.py 内（可单测），不在 YAML 里写
+          # heredoc —— YAML 块标量会缩进正文，Python 读到首行缩进直接 IndentationError。
+          set +e
+          python scripts/maintenance_check.py --json --summary-md "$SUMMARY_MD" > "$SUMMARY_JSON" 2> "$SUMMARY_JSON.err"
+          mc_rc=$?
+          set -e
+          if [ ! -s "$SUMMARY_JSON" ]; then
+            echo "::warning::维护清单求值无输出（退出码 ${mc_rc}）：$(tail -3 "$SUMMARY_JSON.err" 2>/dev/null || true)"
+            exit 0
+          fi
+          if [ -f "$SUMMARY_MD" ]; then
+            cat "$SUMMARY_MD" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+          if [ "$mc_rc" -eq 0 ]; then
+            echo "::notice::维护清单全绿（退出码 0）"
+          else
+            echo "::warning::维护清单有非绿条目（退出码 ${mc_rc}）——已写入 PR 正文，交人工评审，不阻断 roll"
+          fi
+
+      - name: 提交 + 开 PR + 分层 automerge
+        id: roll_pr
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          NEW_STANDALONE: ${{ steps.detect.outputs.new_standalone }}
+          NEW_MAIN: ${{ steps.detect.outputs.new_main }}
+          OLD_STANDALONE: ${{ steps.detect.outputs.old_standalone }}
+          ANCESTOR_OK: ${{ steps.detect.outputs.ancestor_ok }}
+          # ${{ }} 必须经 env 传递：直接写进 run: 块会被 zizmor 判为模板注入
+          # （template-injection，audit confidence High）——展开结果会成为 shell 代码。
+          SUMMARY_MD: ${{ runner.temp }}/maintenance-summary.md
+        run: |
+          set -euo pipefail
+          BRANCH="sync/standalone-$(echo "$NEW_STANDALONE" | cut -c1-12)"
+          OLD_SHORT="$(echo "$OLD_STANDALONE" | cut -c1-12)"
+          NEW_SHORT="$(echo "$NEW_STANDALONE" | cut -c1-12)"
+
+          # 分层判据的基线：本步开始时 HEAD = 检出的 main（roll 尚未提交）
+          BASE_SHA="$(git rev-parse HEAD)"
+
+          NEW_VERSION="$(python -c "import tomllib;print(tomllib.load(open('vendor/_upstream/pyproject.toml','rb'))['project']['version'])")"
+          # advisory 的跨越区间基准：必须在 state 覆写前取旧版本
+          OLD_VERSION="$(python -c "import json;print(json.load(open('$STATE_FILE', encoding='utf-8'))['upstream_version'])")"
+          N_COMMITS="$(git -C .sync-work/upstream rev-list "${OLD_STANDALONE}..${NEW_STANDALONE}" --count 2>/dev/null || echo '?')"
+
+          python - "$STATE_FILE" "$NEW_VERSION" "$NEW_MAIN" "$NEW_STANDALONE" "$ANCESTOR_OK" <<'PYEOF'
+          import datetime as dt, json, sys
+          path, version, main_sha, standalone_sha, ancestor_ok = sys.argv[1:6]
+          state = json.load(open(path, encoding="utf-8"))
+          if ancestor_ok == "true":
+              state.update(
+                  upstream_version=version,
+                  main_sha=main_sha,
+                  standalone_sha=standalone_sha,
+                  synced_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                  consecutive_failures=0,
+              )
+          else:
+              # PR 预览构建：vendor 基线未动（standalone_sha/synced_at 保持上一已 roll
+              # 快照），只留痕跳过记录（同 roll_local 的 last_skipped_build）
+              state["last_skipped_build"] = {
+                  "sha": standalone_sha,
+                  "version": version,
+                  "main_sha": main_sha,
+                  "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+              }
+          # 尾换行必须与 scripts/roll_local.py 的 _state_write 逐字节一致：state
+          # 受版本控制且不在 pre-commit 的 exclude 内，缺尾换行会让
+          # end-of-file-fixer 在 sync PR 上变红 → required check 失败 →
+          # automerge 永不满足（2026-09-18 复核）
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump(state, fh, ensure_ascii=False, indent=2)
+              fh.write("\n")
+          PYEOF
+
+          git config user.name "parser-lite-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          # 提交清单 = vendor + 派生清单 + 两层注入全部生成工件（bridge/texts.py/
+          # bridge/render_params.py/README.md/templates 由注入步骤再生；漏加会导致
+          # roll PR 带旧桥工件配新 vendor——由 tests/test_codegen.py 钉扎）
+          git add vendor/ requirements.txt requirements/host-provided.txt metadata.yaml \
+            _conf_schema.json bridge/gen_config.py bridge/texts.py \
+            bridge/render_params.py README.md templates "$STATE_FILE"
+          git commit -m "sync: roll parser-lite standalone ${OLD_SHORT}..${NEW_SHORT} (${N_COMMITS} commits)" \
+            -m "上游版本 ${NEW_VERSION}；main sha ${NEW_MAIN}。
+
+          变更范围：vendor/nonebot_plugin_parser_lite（整树替换）+ vendor/_upstream 标记
+          + 派生 requirements + 两层注入工件再生（配置 schema/字段清单/插件元数据，
+          metadata.yaml 版本随上游；分析数据为管线临时产物，不入库）。
+          roll 前 dry-run：vendor 三层校验 + 全量确定性契约测试通过。" \
+            -m "若本 PR 造成故障（Tree-hygiene：先恢复绿，再排查坏因）：
+          1. revert 本 PR（页面 Revert 按钮或 git revert --mainline 1 <merge-sha>）
+          2. 恢复 LKG：checkout lkg 分支（上一已验证快照）；无 lkg 时以最近 release tag（v*）为基线重新发布
+          3. 停用滚子：gh workflow disable sync-upstream
+          4. 修复后恢复：gh workflow enable sync-upstream && gh workflow run sync-upstream -f force=true
+          坏因在上游时无需长停滚子：下个 roll 会自动带上上游修复。"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}"
+
+          UPSTREAM_LOG="$(git -C .sync-work/upstream log --oneline --no-decorate \
+            "${OLD_STANDALONE}..${NEW_STANDALONE}" 2>/dev/null | head -20 || true)"
+          PR_BODY="$(printf '滚动同步上游 standalone 快照 %s → %s（%s commits，v%s）。详见 commit message 与 revert 页脚。\n\n## 上游变更摘要（最近 20 条）\n\n%s' \
+            "$OLD_SHORT" "$NEW_SHORT" "$N_COMMITS" "$NEW_VERSION" \
+            "${UPSTREAM_LOG:-（无提交区间）}")"
+          # 更新规律匹配：1.3.2+ release notes 机器可读，跨越区（OLD,NEW] 的
+          # 💥/🚀/📦 节自动呈现；advisory 抓取失败不阻断 roll（辅助通道），但会
+          # 保守关闭 automerge（无法判定是否跨越 💥 时不得自动合并）
+          # 三态判定：0 = 有内容 / 2 = 抓取失败 / 其他 = 本次未跨越 release。
+          # 此前 `|| true` 把抓取失败吞成空串，与「未跨越」不可区分 → automerge
+          # 照常开启；抓取失败必须保守关闭 automerge（fail-closed）
+          set +e
+          ADVISORY="$(python scripts/release_advisory.py --old "$OLD_VERSION" --new "$NEW_VERSION" 2>/dev/null)"
+          advisory_rc=$?
+          set -e
+          if [ -n "$ADVISORY" ]; then
+            PR_BODY="${PR_BODY}
+
+          ${ADVISORY}"
+          fi
+
+          # 维护清单判定随 roll 一起呈现：tripwire 的升级路径是「人工评审本 PR」，
+          # 判定必须落在 PR 正文才送达评审人（Step Summary 在 PR 页面不可见）。
+          if [ -f "$SUMMARY_MD" ]; then
+            PR_BODY="${PR_BODY}
+
+          $(cat "$SUMMARY_MD")"
+          fi
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "sync: roll parser-lite standalone ${OLD_SHORT} → ${NEW_SHORT}" \
+            --body "$PR_BODY"
+
+          # 分层判据 = 本 PR 的真实变更集（BASE_SHA..HEAD，即本次 roll 实际提交了什么）。
+          # 此前用 git status --porcelain 且排除清单恰等于 roll 的全部写入路径，
+          # 判据构造性恒 0，分层门形同虚设（2026-09-17 评审 M2）。排除清单 = vendor
+          # + 派生清单 + 两层注入工件（generate_config 工件全集；由
+          # tests/test_codegen.py 的 sync workflow 钉扎测试守护）——新加工件时须同步扩展。
+          # 模板**不在**排除清单内：模板是卡面渲染的字节权威，doc/CONTEXT.md「分层
+          # automerge」要求其变更转人工审阅（此前 ':!templates' 使代码与文档相反）。
+          infra_changed="$(git diff --name-only "$BASE_SHA" HEAD -- \
+            ':!.github/sync-state.json' ':!vendor' ':!requirements.txt' ':!requirements/host-provided.txt' \
+            ':!metadata.yaml' ':!_conf_schema.json' ':!bridge/gen_config.py' \
+            ':!bridge/texts.py' ':!bridge/render_params.py' ':!README.md' \
+            | wc -l)"
+          if [ "$SYNC_PAT" = "" ]; then
+            echo "::warning::未配置 SYNC_PAT：GITHUB_TOKEN 推的分支不触发 PR 检查，auto-merge 不可用，请人工合并"
+          elif [ "$infra_changed" != "0" ]; then
+            echo "::warning::检测到 vendor/派生清单之外的变更（${infra_changed} 个文件），按分层策略仅开 PR 不 automerge"
+            gh pr comment "$BRANCH" --body "⚠️ 本次 roll 触碰了 vendor 之外的文件，已按分层策略关闭 automerge，请人工审阅。" || true
+          elif [ "$ANCESTOR_OK" != "true" ]; then
+            echo "::warning::standalone 构建源不在远端 main 祖先内（上游未合入 PR 的预览构建），已跳过 vendor roll，仅开 PR 待人工处理"
+            gh pr comment "$BRANCH" --body "⚠️ 本次 standalone 构建源不在远端 main 祖先内（上游未合入 PR 的预览构建）：vendor 未 roll（平面照常跟进，state 已留痕 last_skipped_build），按分层策略关闭 automerge。上游合入后随 main 构建自动追平。" || true
+          elif [ "$advisory_rc" -eq 2 ]; then
+            echo "::warning::release advisory 抓取失败（退出码 2）：无法判定本次是否跨越含 💥 破坏性变更节的上游 release，按保守策略关闭 automerge"
+            gh pr comment "$BRANCH" --body "⚠️ release advisory 抓取失败（上游 releases API 不可达），无法判定本次 roll 是否跨越 💥 破坏性变更节。契约测试门已全绿，但按保守策略关闭 automerge，请人工确认桥接面影响。" || true
+          elif printf '%s' "$ADVISORY" | grep -q '需人工确认桥接面影响'; then
+            echo "::warning::本次 roll 跨越含 💥 破坏性变更节的上游 release——advisory 已写入 PR 正文，按分层策略关闭 automerge"
+            gh pr comment "$BRANCH" --body "⚠️ 本 roll 跨越了含「💥 破坏性变更」节的上游 release（详见 PR 正文 advisory）。契约测试门已全绿，但按更新规律对齐策略转人工确认桥接面影响。" || true
+          else
+            gh pr merge --auto --squash "$BRANCH" || echo "::warning::auto-merge 未能启用（检查仓库 Allow auto-merge 与 required checks 配置）"
+          fi
+
+      - name: 追平后自动关闭滞后告警
+        if: steps.roll_pr.outcome == 'success' && steps.detect.outputs.ancestor_ok == 'true'
+        env:
+          NEW_STANDALONE: ${{ steps.detect.outputs.new_standalone }}
+        run: |
+          set -euo pipefail
+          for n in $(gh issue list --search "upstream lagging in:title state:open" --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "已追平：standalone $(echo "$NEW_STANDALONE" | cut -c1-12) 入库" || true
+          done
+
+      - name: 滞后告警（上次成功同步距今超过 STALENESS_HOURS 且仍未追平）
+        if: >-
+          ${{ !cancelled() && steps.detect.outputs.changed == 'true' &&
+              steps.roll_pr.outcome != 'success' }}
+        run: |
+          set -euo pipefail
+          # 读 origin/main 基线而非工作树副本：失败路径上 STATE_FILE 已被本 run
+          # 刷新（synced_at=now），从它算 age 恒为 0、会错误抑制滞后告警
+          age_hours="$(git show "origin/main:${STATE_FILE}" | python -c "import datetime as dt,json,sys;print((dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(json.load(sys.stdin)['synced_at'])).total_seconds()//3600)")"
+          if [ "${age_hours%%.*}" -ge "$STALENESS_HOURS" ]; then
+            gh issue create --title "upstream lagging：同步超过 ${STALENESS_HOURS}h 未追平" \
+              --body "上游 standalone 已领先但快照未入库（上次成功同步于 ${age_hours}h 前）。
+          playbook：
+          1. 日志：gh run view --log-failed \${run_id}
+          2. 手动重跑：gh workflow run sync-upstream -f force=true
+          3. 回滚：见最近 sync PR 页脚（revert → lkg 分支/release tag）
+          4. 升级：vendor 失联 >24h 或熔断时人工介入" || true
+          fi
+
+      - name: 失败告警（含 playbook）
+        if: failure()
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --search "sync-upstream roll failed in:title state:open" --json number --jq 'length')"
+          if [ "${existing:-0}" != "0" ]; then
+            echo "已有在案失败 issue，跳过重复创建"
+            exit 0
+          fi
+          gh issue create --title "sync-upstream roll failed（run ${RUN_ID}）" \
+            --body "同步流水线失败，连续 ${BREAKER_THRESHOLD} 次将熔断（cron 空转）。
+          playbook：
+          1. 看日志：gh run view ${RUN_ID} --log-failed
+          2. 手动重跑：gh workflow run sync-upstream -f force=true
+          3. 回滚：lkg 分支 = 上一已验证快照（无则用最近 release tag）；revert 最近 sync PR（页脚含完整序列）
+          4. 升级条件：连续 3 次熔断、上游失联 >24h → 人工介入并通知上游" || true

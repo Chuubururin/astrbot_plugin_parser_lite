@@ -1,0 +1,22 @@
+# serializer version: 1
+# name: test_parse_snapshot[id=bilibili-av]
+  dict({
+    'author': '冰封.虾子',
+    'content': list([
+      dict({
+        'cover': 'http://i2.hdslb.com/bfs/archive/1ada8c32a9d168e4b2ee3e010f24789ba3353785.jpg',
+        'duration': 199,
+        'kind': 'VideoContent',
+        'need_send': True,
+        'path_task': 'https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/86/97/279786/279786_da3-1-30016.m4s',
+        'size_bytes': 6910165,
+      }),
+      dict({
+        'kind': 'str',
+        'text': '简介: sina 保加利亚超级天王 Azis1999年出道。他的音乐融合保加利亚名族曲风chalga和pop、rap等元素，不过他惊艳的易装秀与浮夸的角色诠释才是他最为出名的地方 Azis与众多保加利亚天王天后级歌手都有过合作.06年，他作为Mariana Popova的伴唱，在欧洲半决赛上演唱了他们的参赛曲Let Me Cry 06年他被Velikite Balgari评为保加利亚有史以来最伟大的名人之一',
+      }),
+    ]),
+    'platform': 'bilibili',
+    'title': '【MV】保加利亚妖王AZIS视频合辑 | 分集 - Хоп',
+  })
+# ---

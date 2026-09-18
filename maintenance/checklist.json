@@ -1,0 +1,501 @@
+{
+  "_readme": [
+    "维护清单 —— agent 维护场景的单一事实源（SSOT）。",
+    "",
+    "目的：让 agent 在人工维护场景下能「自主识别需求 → 定位根因 → 执行修复 → 自验」，",
+    "而不是等人告诉它哪里坏了。",
+    "",
+    "为什么是 JSON 而非 YAML：scripts/ 的惯例是只用 stdlib（generate_config.py 零第三方",
+    "导入），且 JSON 是本仓既有的机器格式先例（.github/sync-state.json、_conf_schema.json、",
+    "vendor_analysis.json）。引入 PyYAML 会多一个在 sync 工作流里不存在的依赖。",
+    "人类可读的设计说明与渲染见 maintenance/checklist.md。",
+    "",
+    "消费方 = scripts/maintenance_check.py：",
+    "    python scripts/maintenance_check.py             # 人类可读总览",
+    "    python scripts/maintenance_check.py --json      # 机器可读（agent 主入口）",
+    "    python scripts/maintenance_check.py --id MC-07  # 单条深挖",
+    "    python scripts/maintenance_check.py --list      # 只列条目不执行",
+    "退出码：0 = 全绿；1 = 有红条目；2 = 清单过时或环境不可用（响亮失败）",
+    "",
+    "设计约束：所有 detector 必须复用仓库既有的关卡（测试/脚本），不得另起一套判据。",
+    "否则「清单绿」与「仓库绿」会分裂成两个事实。",
+    "",
+    "清单自身的活性由 tests/test_maintenance_checklist.py 守护：条目 id 唯一、",
+    "必填字段齐备、每个 pytest detector 的 node 必须在真实套件中可收集、",
+    "scope 路径必须存在——防止清单随代码演进而静默过时。",
+    "",
+    "命令占位符：清单中所有可执行命令用 {py} 指代当前解释器，由 maintenance_check.py",
+    "替换为 sys.executable。CI 与开发机的解释器名不一致（python vs python3），",
+    "硬编码任一个都会在另一侧响亮失败。"
+  ],
+  "schema_version": 1,
+  "definition_of_done": [
+    {
+      "id": "DOD-01",
+      "kind": "pytest_all",
+      "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q",
+      "expect_exit": 0,
+      "note": "全量契约测试（本机 450 passed / 3 skipped；无上游克隆时 446 / 7）"
+    },
+    {
+      "id": "DOD-02",
+      "kind": "cmd",
+      "cmd": "{py} -m ruff check --config config/pyproject.toml .",
+      "expect_exit": 0,
+      "note": "lint（含 tests/ 与 scripts/）"
+    },
+    {
+      "id": "DOD-03",
+      "kind": "cmd",
+      "cmd": "{py} scripts/verify_vendor.py",
+      "expect_exit": 0,
+      "note": "vendor 三层校验（含与上游产物逐字节比对）"
+    }
+  ],
+  "prohibited_actions": [
+    {
+      "id": "P-01",
+      "rule": "不得修改 vendor/ 下任何文件",
+      "why": "vendor 是字节级等同上游的只读快照，唯一升级路径是整树替换（ADR-0001/0002）",
+      "caught_by": "scripts/verify_vendor.py 第三层逐字节比对"
+    },
+    {
+      "id": "P-02",
+      "rule": "不得手工编辑任何生成工件",
+      "covers": [
+        "_conf_schema.json",
+        "bridge/gen_config.py",
+        "bridge/texts.py",
+        "bridge/render_params.py",
+        "metadata.yaml",
+        "README.md",
+        "templates/"
+      ],
+      "why": "它们是两层注入的产物；手改会在下次 roll 被覆盖并触发幂等断言",
+      "correct": "改规则层（scripts/analyze_vendor.py 或 scripts/generate_config.py）后重跑 run_injection.py"
+    },
+    {
+      "id": "P-03",
+      "rule": "不得删除、跳过、xfail 或弱化任何断言来让测试变绿",
+      "why": "测试即契约；弱化断言等价于删除防护",
+      "correct": "断言确实过时时，走 class=escalate 路径显式声明并交人工评审"
+    },
+    {
+      "id": "P-04",
+      "rule": "不得 git push --force、不得改写已推送历史、不得直接推 main",
+      "why": "分支保护与 required checks 依赖历史不可变；改写历史会让已合并的 sync PR 与 lkg 回滚基线失去可比性，回滚路径静默失效"
+    },
+    {
+      "id": "P-05",
+      "rule": "不得修改 .github/workflows/ 中的 required checks 或分支保护配置",
+      "why": "这等于让 agent 自己决定「什么算通过」——自证式绕过防护，是最典型的 reward hacking。改进门只能由人改"
+    },
+    {
+      "id": "P-06",
+      "rule": "不得在未跑 verify_vendor.py 的情况下提交任何 vendor 相关改动",
+      "why": "vendor 是字节级快照，误改会静默改变解析行为；三层校验是唯一的机械防线"
+    }
+  ],
+  "loop_guard": {
+    "max_attempts_per_entry": 2,
+    "on_exceed": "escalate",
+    "note": "同一 entry 修复后仍红 >=2 次，说明根因判断错误，必须停手上报而非继续试错"
+  },
+  "entries": [
+    {
+      "id": "MC-01",
+      "title": "生成工件与上游快照不同步（注入产物漂移）",
+      "family": "plane",
+      "class": "auto",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_injection_runner.py::test_runner_offline_check_fresh",
+          "tests/test_codegen.py::test_repo_artifacts_are_fresh"
+        ]
+      },
+      "scope": [
+        "scripts/run_injection.py",
+        "scripts/generate_config.py",
+        "scripts/analyze_vendor.py"
+      ],
+      "diagnosis": "读断言消息里的漂移清单，形如「生成工件漂移：['_conf_schema.json']」",
+      "action": [
+        "{py} scripts/run_injection.py --offline"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} scripts/run_injection.py --offline --check",
+          "expect_exit": 0,
+          "note": "幂等复检，diff 必须为 0"
+        }
+      ],
+      "forbidden": [
+        "P-02"
+      ],
+      "escalate_if": "漂移清单包含 bridge/gen_config.py 或 templates/（规则层或模板层变更，可能掩盖上游语义变化，需人读 diff）",
+      "evidence": "附 run_injection 日志 + git diff --stat 生成工件清单",
+      "doc_ref": "doc/CONTEXT.md"
+    },
+    {
+      "id": "MC-02",
+      "title": "_conf_schema.json 平台选项与 PlatformEnum 不同步",
+      "family": "platform",
+      "class": "auto",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_codegen.py::test_enum_options_match_enum_members"
+        ]
+      },
+      "scope": [
+        "scripts/analyze_vendor.py",
+        "scripts/generate_config.py"
+      ],
+      "root_cause_candidates": [
+        "MC-07",
+        "MC-08"
+      ],
+      "diagnosis": "断言会给出缺失或多出的枚举值；先查是否属于 MC-07/MC-08 的真因",
+      "action": [
+        "{py} scripts/run_injection.py --offline"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_codegen.py",
+          "expect_exit": 0
+        }
+      ],
+      "forbidden": [
+        "P-02"
+      ],
+      "escalate_if": "重跑注入后仍不同步（说明 _shape() 的派生规则与枚举形态不匹配，属规则层缺陷）",
+      "doc_ref": "doc/CONTEXT.md"
+    },
+    {
+      "id": "MC-03",
+      "title": "上游新增配置字段，分析或生成未覆盖",
+      "family": "plane",
+      "class": "auto",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_codegen.py::test_analysis_covers_all_vendor_fields",
+          "tests/test_codegen.py::test_schema_covers_all_vendor_fields"
+        ]
+      },
+      "scope": [
+        "scripts/analyze_vendor.py",
+        "scripts/generate_config.py"
+      ],
+      "diagnosis": "断言给出未覆盖的字段名；字段来自上游 pconfig 的 annotations",
+      "action": [
+        "{py} scripts/run_injection.py --offline"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_codegen.py",
+          "expect_exit": 0
+        }
+      ],
+      "forbidden": [
+        "P-02"
+      ],
+      "escalate_if": "新字段是动态默认值或未知类型（analyze_vendor 会响亮失败）→ 交人工在规则层显式声明",
+      "doc_ref": "doc/CONTEXT.md"
+    },
+    {
+      "id": "MC-04",
+      "title": "派生 requirements 与上游依赖不同步",
+      "family": "plane",
+      "class": "auto",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_requirements_sync.py::test_requirements_files_match_derivation"
+        ]
+      },
+      "scope": [
+        "scripts/derive_requirements.py",
+        "requirements.txt",
+        "requirements/host-provided.txt"
+      ],
+      "action": [
+        "{py} scripts/derive_requirements.py"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_requirements_sync.py",
+          "expect_exit": 0
+        }
+      ],
+      "forbidden": [
+        "P-02"
+      ],
+      "escalate_if": "test_two_manifests_partition_upstream_deps 也红（新依赖未分类到两份清单的哪一份）→ 交人工判定该依赖是否由宿主 AstrBot 提供",
+      "doc_ref": "doc/CONTEXT.md"
+    },
+    {
+      "id": "MC-05",
+      "title": "vendor 挂载点或 ffmpeg 签名被上游改名",
+      "family": "contract",
+      "class": "assisted",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_vendor_patches.py::test_mount_points_are_bridge_owned",
+          "tests/test_vendor_patches.py::test_mount_raises_loudly_when_anchor_renamed",
+          "tests/test_vendor_patches.py::test_ffmpeg_vendor_signature_contract",
+          "tests/test_import_contract.py::test_vendor_seam_exists"
+        ]
+      },
+      "scope": [
+        "bridge/vendor_patches.py",
+        "tests/test_vendor_patches.py",
+        "tests/test_import_contract.py"
+      ],
+      "diagnosis": "RuntimeError 消息含预期挂载点路径与实际形态，直接给出改名前后差异",
+      "action": [
+        "在上游新快照里定位被改名的模块、属性或函数签名",
+        "更新 bridge/vendor_patches.py 里的挂载点常量",
+        "同步更新对应契约测试里的锚点断言"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_vendor_patches.py tests/test_import_contract.py",
+          "expect_exit": 0
+        }
+      ],
+      "forbidden": [
+        "P-01",
+        "P-03"
+      ],
+      "escalate_if": "上游把挂载目标整个删除（无替代挂载面）→ 交人工决定放弃该补丁还是换挂载点",
+      "doc_ref": "doc/CONTEXT.md"
+    },
+    {
+      "id": "MC-06",
+      "title": "vendor 公开 API 面发生变化（桥接消费面）",
+      "family": "contract",
+      "class": "escalate",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_api_contract.py::test_vendor_public_api_snapshot"
+        ]
+      },
+      "scope": [],
+      "action": [
+        "不改代码。输出 syrupy 快照 diff（新增/删除/改签名的 API）",
+        "标注哪些被桥接六模块消费（对照 tests/test_import_contract.py 的 VENDOR_IMPORT_WHITELIST）"
+      ],
+      "escalate_if": "总是（本条 class 即 escalate）",
+      "note": "快照 diff 必须人工评审，禁止「失败即重建」（doc/CONTEXT.md 明文）",
+      "doc_ref": "doc/CONTEXT.md「双轨契约」"
+    },
+    {
+      "id": "MC-07",
+      "title": "上游新增可命中平台，黄金样本未覆盖",
+      "family": "platform",
+      "class": "assisted",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_match_golden.py::test_golden_covers_every_matchable_platform"
+        ]
+      },
+      "scope": [
+        "tests/test_match_golden.py"
+      ],
+      "diagnosis": "断言右侧多出的键即新平台名；用 load_all() 反查对应 parser 类",
+      "action": [
+        "读新 parser 的 @handle 装饰器，取出 keyword（域名）与 pattern",
+        "由 pattern 构造必然命中的样本 URL：https://{keyword}/{pattern 的固定字面前缀}{占位值}",
+        "在 GOLDEN_MATCHES 里补一条「平台键: 样本 URL」，位置与文件既有排序一致",
+        "跑 acceptance"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_match_golden.py",
+          "expect_exit": 0
+        }
+      ],
+      "forbidden": [
+        "P-03"
+      ],
+      "escalate_if": "新 parser 的 pattern 含必需 query 参数或需要鉴权（无法离线构造必然命中的 URL）→ 交人工",
+      "evidence": "附新 parser 的 @handle 原文 + 新样本 URL + 实测命中输出",
+      "known_good": "2026-09 快照下 27 个平台的样本均按此法反推并逐条实测确认",
+      "doc_ref": "doc/CONTEXT.md「黄金样本」"
+    },
+    {
+      "id": "MC-08",
+      "title": "PlatformEnum 与已注册 parser 的差集偏离已知集合",
+      "family": "platform",
+      "class": "assisted",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_match_golden.py::test_schema_platform_options_track_matchable_parsers"
+        ]
+      },
+      "scope": [
+        "tests/test_match_golden.py"
+      ],
+      "diagnosis": "断言给出差集。左侧多出 = 上游新增未注册枚举成员；左侧变少 = 上游补齐了 ds/taptap 的注册",
+      "action": [
+        "情形 A（新增未注册成员）：确认 parsers/ 下确无对应 parser 后，把平台名加入 KNOWN_UNREGISTERED_ENUM_MEMBERS",
+        "情形 B（补齐注册）：从 KNOWN_UNREGISTERED_ENUM_MEMBERS 移除该平台，并按 MC-07 补黄金样本"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_match_golden.py",
+          "expect_exit": 0
+        }
+      ],
+      "forbidden": [
+        "P-03"
+      ],
+      "escalate_if": "枚举成员存在但 load_all() 未注册（上游发了枚举却没发 parser，属上游半成品状态）→ 交人工决定是否等待",
+      "doc_ref": "doc/CONTEXT.md「黄金样本」"
+    },
+    {
+      "id": "MC-09",
+      "title": "已有平台的正则行为漂移",
+      "family": "platform",
+      "class": "escalate",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_match_golden.py::test_golden_match"
+        ]
+      },
+      "scope": [],
+      "diagnosis": "失败用例的参数即平台与样本 URL；对比 vendor 里该 parser 的 @handle pattern 与基线",
+      "action": [
+        "不改代码。输出诊断报告：平台名、旧 pattern、新 pattern、样本 URL、失败原因"
+      ],
+      "escalate_if": "总是（本条 class 即 escalate）",
+      "note": "这是设计好的行为漂移信号。正则变宽松或变严格都可能改变实际解析范围，必须人读 diff 后决定更新样本还是上报上游",
+      "doc_ref": "doc/CONTEXT.md「黄金样本」"
+    },
+    {
+      "id": "MC-10",
+      "title": "本次 roll 跨越含破坏性变更的上游 release",
+      "family": "contract",
+      "class": "escalate",
+      "severity": "advisory",
+      "detector": {
+        "kind": "event",
+        "source": "sync PR 正文的 advisory 段",
+        "match": "💥"
+      },
+      "scope": [],
+      "action": [
+        "从 PR 正文抽出 advisory 的 💥 节条目清单",
+        "对照桥接六模块（main/sender/render/ssrf/config_sync/vendor_patches），逐条判断是否触及被改 API",
+        "必要时用 {py} scripts/release_advisory.py --old <旧版本> --new <新版本> 重算"
+      ],
+      "escalate_if": "总是（本条 class 即 escalate）",
+      "note": "工作树中无法判定，必须在 PR 上下文评估；属 roll-time 事件型条目",
+      "doc_ref": ".github/workflows/sync-upstream.yml「分层 automerge」"
+    },
+    {
+      "id": "MC-11",
+      "title": "同步流水线熔断（连续失败达阈值）",
+      "family": "ops",
+      "class": "assisted",
+      "severity": "blocking",
+      "detector": {
+        "kind": "gh_runs",
+        "workflow": "sync-upstream",
+        "limit": 3,
+        "red_when_failures_at_least": 3,
+        "optional": true,
+        "fallback": {
+          "kind": "cmd",
+          "cmd": "{py} -c \"import json,pathlib,sys; s=json.loads(pathlib.Path('.github/sync-state.json').read_text(encoding='utf-8')); sys.exit(1 if int(s.get('consecutive_failures',0))>=3 else 0)\"",
+          "expect_exit": 0
+        }
+      },
+      "scope": [],
+      "action": [
+        "定位根因：gh run view --log-failed 看最近一次失败的真实原因",
+        "按根因对应的其他条目（如 MC-07）完成修复",
+        "解除熔断：gh workflow run sync-upstream -f force=true"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q",
+          "expect_exit": 0,
+          "note": "本地全量绿是解除熔断的前置条件"
+        }
+      ],
+      "escalate_if": "熔断原因为上游失联 >24h 或上游仓库不可达 → 人工介入并通知上游",
+      "note": "连续 3 天未处理会导致同步整体停摆，连无关的上游更新也一起卡住"
+    },
+    {
+      "id": "MC-12",
+      "title": "发布 zip 白名单未覆盖新增桥接依赖",
+      "family": "ops",
+      "class": "auto",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_release_manifest.py::test_bridge_import_closure_is_exact",
+          "tests/test_release_manifest.py::test_release_cp_whitelist_covers_bridge_import_closure",
+          "tests/test_release_manifest.py::test_release_required_list_covers_bridge_import_closure",
+          "tests/test_release_manifest.py::test_release_whitelist_covers_non_py_entries"
+        ]
+      },
+      "scope": [
+        ".github/workflows/release.yml"
+      ],
+      "diagnosis": "断言给出未覆盖的条目路径",
+      "action": [
+        "把缺失条目加入 release.yml 的 zip 白名单",
+        "若缺的是非 .py 资源，同步核对 test_zip_required_list_covers_non_py_entries"
+      ],
+      "acceptance": [
+        {
+          "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q tests/test_release_manifest.py",
+          "expect_exit": 0
+        }
+      ],
+      "escalate_if": "缺失条目不在仓库内（外部资源）→ 交人工",
+      "doc_ref": ".github/workflows/release.yml"
+    },
+    {
+      "id": "MC-13",
+      "title": "桥接模块出现白名单外的 vendor 导入",
+      "family": "contract",
+      "class": "escalate",
+      "severity": "blocking",
+      "detector": {
+        "kind": "pytest",
+        "nodes": [
+          "tests/test_import_contract.py::test_import_surface_whitelisted",
+          "tests/test_import_contract.py::test_vendor_fan_in_is_one"
+        ]
+      },
+      "scope": [],
+      "action": [
+        "不改代码。输出越界导入的模块、符号与调用点",
+        "给出两条可选方案：回退该导入，或扩白名单（需契约评审）"
+      ],
+      "escalate_if": "总是（本条 class 即 escalate）",
+      "note": "fan-in=1 是本项目的架构不变量（ACL R1/R2）；扩白名单等于扩大被依赖行为清单，必须人工评审",
+      "doc_ref": "doc/CONTEXT.md"
+    }
+  ]
+}

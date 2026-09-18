@@ -1,0 +1,32 @@
+"""生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
+
+数据源：vendor nonebot_plugin_parser_lite {{ vendor_version }}（第一层
+分析数据 vendor_analysis.json，scripts/analyze_vendor.py 从上游快照现场
+再生，不入库）。
+消费方：main.py —— 区分上游字段与桥自有字段，并在启动时告警陈旧配置键。
+"""
+
+from __future__ import annotations
+
+# 上游 Config 的全部 plite_* 字段（上游演进时随 roll 自动再生）
+VENDOR_FIELDS: frozenset[str] = frozenset(
+    {
+{%- for name in vendor_fields %}
+        "{{ name }}",
+{%- endfor %}
+    },
+)
+# 桥自有配置键（不透传 vendor configure()；语义见 _conf_schema.json）
+BRIDGE_FIELDS: frozenset[str] = frozenset(
+    {
+{%- for name in bridge_fields %}
+        "{{ name }}",
+{%- endfor %}
+    },
+)
+# 桥自有配置默认值（main.py 统一从此取回退，避免默认字面量双份漂移）
+BRIDGE_DEFAULTS: dict[str, object] = {
+{%- for name in bridge_fields %}
+    "{{ name }}": {{ bridge_defaults[name] }},
+{%- endfor %}
+}

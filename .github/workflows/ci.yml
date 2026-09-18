@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Scorecard：顶层最小权限，写权限不下放（job 级亦无需写）
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    # required check ①：ruff（lint+format）+ actionlint + zizmor --pedantic
+    name: lint (ruff / actionlint / zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # pre-commit 的 actionlint 钩子是 language: system —— 二进制必须自备。
+      # 开发机上它在 ~/.local/bin（用户级安装），干净 runner 上并不存在。
+      # 版本与校验和固定，与仓库其余 action 的 SHA 钉扎策略一致。
+      - name: 安装 actionlint（system 钩子需自备二进制）
+        run: |
+          set -euo pipefail
+          V=1.7.7
+          curl -sSfL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${V}/actionlint_${V}_linux_amd64.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  /tmp/actionlint.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint -version
+      - name: Run pre-commit（与本地同构的静态门禁）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pre-commit
+          pre-commit run --config config/.pre-commit-config.yaml --all-files --show-diff-on-failure
+
+  typecheck:
+    name: typecheck (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements/host-provided.txt mypy
+          # mypy 的检查范围含 tests/（pyproject 仅排除 vendor/.research/.agents），
+          # 故测试期依赖必须在位：缺 pytest / syrupy 会产出 25 处 import-not-found。
+          python -m pip install pytest pytest-asyncio syrupy
+          # qrcode 无 py.typed，且不在 pyproject 的 ignore_missing_imports 名单里；
+          # 缺存根会报 bridge/render.py:25 import-untyped。
+          python -m pip install types-qrcode
+      - name: mypy
+        # 根目录无 __init__.py，mypy 需显式包基并在包父目录下运行（见脚本 docstring）。
+        run: python scripts/typecheck.py
+
+  test:
+    # required check ②：确定性三类契约 + 行为黄金样本（网络隔离区默认跳过）
+    name: test (pytest + vendor verify)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
+          # 宿主框架（真实 AstrBot 契约）：--no-deps 避开 63 个声明依赖
+          python -m pip install --no-deps "astrbot>=4.28,<5"
+          # 但 --no-deps 只省掉了「声明」，没省掉「实际用到」的：astrbot 的
+          # core/__init__ 在导入期即建库 / 初始化 logger，导入闭包仍需一批第三方包。
+          # 清单及推导方法见 tests/requirements-test.txt（带依赖装，传递依赖交给 pip）
+          python -m pip install -r tests/requirements-test.txt
+      # 环境守卫：缺依赖的失败形态是「收集期报错 + 其余模块静默 skip」——不守卫
+      # 就会以 cryptic traceback 收场，或干脆无声降级。
+      - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
+        run: python scripts/check_test_deps.py
+      - name: vendor 三层校验（本地无 .sync-work 时为第 1/2 层）
+        run: python scripts/verify_vendor.py
+      - name: pytest
+        run: python -m pytest -c config/pyproject.toml --rootdir=. -q --junit-xml=/tmp/pytest-junit.xml
+      # 原实现是「skip 数 > BUDGET(3) 即失败」。阈值按开发机标定（那里有
+      # .sync-work/upstream 克隆），而 CI 无克隆时 test_*_when_clone_present
+      # 家族会多出 4 条**设计内**skip（测试名即写明 when_clone_present），阈值
+      # 必然误报。改为按**原因**分类：只放行「网络隔离区」与「无上游克隆」两类，
+      # 其余任何 skip 一律失败——这才是原本想守的「整模块因缺依赖静默失效」，
+      # 且不再与「本地有没有克隆」耦合。
+      - name: 断言 skip 仅为已知原因（缺依赖导致的静默失效必须被门禁发现）
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          CLONE = os.path.join(".sync-work", "upstream")
+          # 恒允许：网络隔离区（设 RUN_NETWORK_TESTS=1 才启用）
+          ALWAYS = ("network 隔离区", "需要真实外网")
+          # 仅当无上游克隆时允许：test_*_when_clone_present 家族
+          CLONE_GATED = ("无上游 main 引用（CI 无克隆）", "无上游克隆（CI 无克隆）")
+
+          root = ET.parse("/tmp/pytest-junit.xml").getroot()
+          total = 0
+          known = 0
+          clone_skips = []
+          unknown = []
+          for case in root.iter("testcase"):
+              for node in case.findall("skipped"):
+                  total += 1
+                  msg = (node.get("message") or "").strip()
+                  where = f"{case.get('classname')}::{case.get('name')}"
+                  if any(m in msg for m in ALWAYS):
+                      known += 1
+                  elif any(m in msg for m in CLONE_GATED):
+                      known += 1
+                      clone_skips.append(f"{where} — {msg}")
+                  else:
+                      unknown.append(f"{where} — {msg}")
+
+          print(f"skip 总数={total}（已知原因={known}）")
+          if unknown:
+              print("::error::出现未知原因的 skip——疑似整模块因缺依赖静默失效：")
+              for item in unknown:
+                  print(f"  {item}")
+              sys.exit(1)
+          if clone_skips and os.path.isdir(CLONE):
+              print(f"::error::存在 {CLONE} 克隆，却仍有 {len(clone_skips)} 条按「无克隆」跳过：")
+              for item in clone_skips:
+                  print(f"  {item}")
+              sys.exit(1)
+          print("skip 原因全部为已知项")
+          PY

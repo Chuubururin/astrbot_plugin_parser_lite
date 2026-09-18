@@ -1,0 +1,128 @@
+name: release
+
+# 发布信任链（SLSA 对标）：
+# tag v* → 确定性测试 → 构建 zip（显式白名单）→ actions/attest 生成
+# SLSA provenance（id-token 短期 Sigstore 证书）→ 受保护环境 → gh release。
+# 发布流程不恢复任何缓存（cache-poisoning 审计项）。
+# tag 规范：v{metadata.yaml 的 version}，直接沿用上游 nonebot-plugin-parser-lite
+# 版本号（如 v1.3.6）；版本由 sync PR 自动跟随，本 workflow 校验 tag 与之锁步。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build + attest + publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 受保护环境：required reviewer 硬门禁（secret 卫生 + 人工放行）
+    environment: release
+    permissions:
+      contents: write # 创建 Release
+      id-token: write # SLSA provenance（Sigstore 短期证书签名）
+      attestations: write # 写入 GitHub attestation store（gh attestation verify 可验）
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: tag 与 metadata 版本锁步校验
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF_NAME" in
+            */*) echo "::error::tag 名含 '/'（${GITHUB_REF_NAME}）会破坏发布物文件路径，请使用无斜杠 tag"; exit 1 ;;
+          esac
+          META_VERSION="$(python -c \
+            "import re;print(re.search(r'(?m)^version: (.+)$', open('metadata.yaml', encoding='utf-8').read()).group(1).strip())")"
+          # 版本直接沿用上游（去 v 前缀比对，容忍两侧前缀书写差异）
+          if [ "${GITHUB_REF_NAME#v}" != "${META_VERSION#v}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 metadata.yaml version ${META_VERSION} 不一致；版本由两层注入流水线随 roll 再生，tag 必须与其锁步"
+            exit 1
+          fi
+
+      - name: 确定性测试门禁
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
+          # 与 ci.yml 同构：不装 astrbot 时 test_event_stop / test_sender_chain /
+          # test_json_card_urls 会 pytest.importorskip 整模块静默跳过，而它们恰是
+          # 桥接层的行为契约（H6 同类缺陷在发布轨的残留，2026-09-18 复核）
+          python -m pip install --no-deps "astrbot>=4.28,<5"
+          python -m pip install -r tests/requirements-test.txt
+          python scripts/verify_vendor.py
+          python -m pytest -c config/pyproject.toml --rootdir=. -q
+
+      - name: 构建插件 zip（显式白名单，杜绝发布物混入）
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/astrbot_plugin_parser_lite"
+          # 白名单 = main.py 的桥接导入闭包全量（config_sync/vendor_patches/texts/
+          # render_params 均为运行时硬依赖，缺一即 ModuleNotFoundError）；
+          # 闭包与白名单的一致性由 tests/test_release_manifest.py 机械钉扎
+          cp -a metadata.yaml requirements.txt main.py bridge \
+                templates vendor _conf_schema.json README.md logo.png \
+                dist/astrbot_plugin_parser_lite/
+          cd dist
+          zip -qr "../astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip" astrbot_plugin_parser_lite
+          cd ..
+          sha256sum "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip"
+
+      - name: zip 结构断言（发布侧两层注入守卫）
+        run: |
+          set -euo pipefail
+          python - "$GITHUB_REF_NAME" <<'PYEOF'
+          import sys, zipfile
+          zip_path = f"astrbot_plugin_parser_lite-{sys.argv[1]}.zip"
+          names = zipfile.ZipFile(zip_path).namelist()
+          tops = {n.split("/")[0] for n in names}
+          # AstrBot zip_updater 期望 zip 内有且仅有一个顶层目录，其内容移入插件根
+          assert tops == {"astrbot_plugin_parser_lite"}, f"顶层目录必须唯一: {sorted(tops)}"
+          required = [
+              "astrbot_plugin_parser_lite/metadata.yaml",
+              "astrbot_plugin_parser_lite/main.py",
+              "astrbot_plugin_parser_lite/bridge/sender.py",
+              "astrbot_plugin_parser_lite/bridge/render.py",
+              "astrbot_plugin_parser_lite/bridge/ssrf.py",
+              "astrbot_plugin_parser_lite/bridge/config_sync.py",
+              "astrbot_plugin_parser_lite/bridge/vendor_patches.py",
+              "astrbot_plugin_parser_lite/bridge/texts.py",
+              "astrbot_plugin_parser_lite/bridge/render_params.py",
+              "astrbot_plugin_parser_lite/bridge/gen_config.py",
+              "astrbot_plugin_parser_lite/_conf_schema.json",
+              "astrbot_plugin_parser_lite/vendor/nonebot_plugin_parser_lite/__init__.py",
+              "astrbot_plugin_parser_lite/logo.png",
+          ]
+          missing = [r for r in required if r not in names]
+          assert not missing, f"发布物缺关键文件: {missing}"
+          print(f"zip 结构 OK（{len(names)} 个条目）")
+          PYEOF
+
+      - name: Generate SLSA provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "astrbot_plugin_parser_lite-*.zip"
+
+      - name: 创建 Release（附 zip 与校验和）
+        run: |
+          set -euo pipefail
+          sha256sum "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip" \
+            > "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.sha256"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip" \
+            "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.sha256"
+          echo "验证：gh attestation verify <zip> -R ${GITHUB_REPOSITORY}"

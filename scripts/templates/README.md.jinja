@@ -1,0 +1,43 @@
+{# 生成模板：README 正文全部来自上游（第一层注入 upstream_meta.readme），
+   手写面仅「桥接说明」一节固定文案（规则层）。readme 直通用 |safe：产物是
+   Markdown 文档（无代码/字符串字面量逃逸语境），autoescape 会破坏原文，
+   注入风险由第一层来源校验（存在/非空/尺寸上限）与快照逐字节比对把守。 #}
+<!-- 生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
+     手写面仅「桥接说明」一节；正文全部为上游 README（随 roll 再生）。 -->
+
+# astrbot_plugin_parser_lite
+
+nonebot-plugin-parser-lite 的 AstrBot 桥接插件：在 QQ 群聊中自动解析
+B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
+
+## 桥接说明（AstrBot 用户只需看本节）
+
+- **安装**：AstrBot WebUI「插件」页上传发布 zip，或解压到 `data/plugins/` 后重启
+- **配置**：WebUI 插件页共 {{ vendor_count + bridge_count }} 个配置项（{{ bridge_count }} 桥接 + {{ vendor_count }} 上游），保存后自动重载
+- **版本与许可证**：随上游快照滚动自动再生（当前上游 v{{ upstream_version }}），与 release tag 锁步；许可证随上游（{{ upstream_meta.license }}），vendor 快照零修改
+- **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
+
+### 常见问题
+
+- **私聊收不到解析结果（`verify identify fail`）**：QQ 服务端拒绝非好友或未开通
+  临时会话的机器人私信（协议错误码 170019003），代码层无法绕过，解法在账号层：
+  加机器人为好友或开通临时会话权限；群聊不受影响。
+- **首次加载自动安装依赖**：AstrBot 依赖自恢复机制的一次性行为，无需处理。
+
+### 安全说明
+
+- **出站 SSRF 防护**：媒体下载出站经四层校验（scheme 白名单 → 端口规则 →
+  解析地址逐 IP 校验 → 「解析即连接」钉扎防 DNS rebinding）。唯一例外是
+  ffmpeg HLS 子进程出站：仅入口 URL 校验 + 启动后自毁监听，存在子进程无法
+  钉扎 IP 的 DNS TOCTOU 残窗（`bridge/vendor_patches.py` 头注如实声明）。
+- **TLS 校验姿态**：vendor 下载链继承上游 `verify=False`（CDN 证书链兼容的
+  既定取舍）；风险敞口与缓解见「安全说明」一节。
+- **渲染数据外发**：渲染经宿主 `html_render` 远程 t2i 服务截图——卡面 HTML
+  与内联媒体会发送到宿主配置的渲染端点。
+
+上游 README 原文附后——其中安装/配置说明面向 NoneBot 与「复制目录使用」场景，
+AstrBot 用户无需操作：
+
+---
+
+{{ upstream_meta.readme | safe }}

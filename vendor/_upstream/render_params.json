@@ -1,0 +1,51 @@
+{
+  "_provenance": "scripts/extract_render_params.py 生成（上游 main 渲染参数提取，勿手改）",
+  "params": {
+    "render_template_version": {
+      "value": "20260913",
+      "source": "render/__init__.py:RENDER_TEMPLATE_VERSION"
+    },
+    "viewport_width": {
+      "value": 620,
+      "source": "render/__init__.py:get_new_page viewport.width"
+    },
+    "viewport_height": {
+      "value": 1000,
+      "source": "render/__init__.py:get_new_page viewport.height"
+    },
+    "oversized_image_bytes": {
+      "value": 5242880,
+      "source": "render/__init__.py:cache_or_render_image st_size 阈值"
+    },
+    "qrcode_version": {
+      "value": 1,
+      "source": "render/__init__.py:qrcode.QRCode.version"
+    },
+    "qrcode_error_correction": {
+      "value": 1,
+      "source": "render/__init__.py:qrcode.QRCode.error_correction"
+    },
+    "qrcode_box_size": {
+      "value": 10,
+      "source": "render/__init__.py:qrcode.QRCode.box_size"
+    },
+    "qrcode_border": {
+      "value": 1,
+      "source": "render/__init__.py:qrcode.QRCode.border"
+    },
+    "max_forward_text_len": {
+      "value": 30000,
+      "source": "render/__init__.py:MAX_FORWARD_TEXT_LEN"
+    },
+    "max_forward_nodes": {
+      "value": 90,
+      "source": "render/__init__.py:MAX_FORWARD_NODES"
+    },
+    "text_split_punctuation": {
+      "value": "。！？!?；;，,、…",
+      "source": "render/__init__.py:TEXT_SPLIT_PUNCTUATION"
+    }
+  },
+  "source_revision": "8ac7f4aedd3b357902f991a191de2fe24895dfab",
+  "source_digest": "86cac99a2448dee3c0680093d388f745ebc35286853b857d24fe9810f2ea622e"
+}

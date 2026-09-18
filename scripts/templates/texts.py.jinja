@@ -1,0 +1,20 @@
+{#- 第五注入工件：桥显示文本模块。值逐字来自上游 main 分支显示
+文本提取（vendor/_upstream/display_texts.json），行首注释给出上游出处与
+占位符语义（占位符经 str.format 位置参数填充）。
+literal 由 build_texts 用 json.dumps（ensure_ascii=False）预渲染并标 |safe：
+产出完整合法的双引号 Python 字符串字面量（引号/换行/反斜杠全部转义、无法
+从字面量中逃逸，且与 ruff format 的双引号偏好一致）；autoescape 反而会把
+定界引号转义成 HTML 实体破坏字面量——与 README 上游直通同类的受控 safe。 -#}
+"""桥显示文本：由 scripts/generate_config.py 生成——勿手改。
+
+全部值逐字来自上游 main 分支（vendor/_upstream/display_texts.json，
+文本注入层），随上游 roll 自动再生；模板项用 ``str.format``
+位置参数填充。桥自有文案（如「解析失败：」前缀）不在此模块，见
+main.py/sender.py 的规则层声明。
+"""
+
+from __future__ import annotations
+
+{% for entry in entries %}# {{ entry.source }}{% if entry.placeholders %}；占位：{{ entry.placeholders }}{% endif %}
+{{ entry.name }} = {{ entry.literal | safe }}
+{% endfor %}

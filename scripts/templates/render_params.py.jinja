@@ -1,0 +1,18 @@
+{#- 第六注入工件：桥渲染参数模块。值逐字来自上游 main 分支渲染
+参数提取（vendor/_upstream/render_params.json），行首注释给出上游出处。
+literal 由 build_render_params 预渲染（str 经 json.dumps 完整转义、int 经
+repr）并标 |safe：autoescape 会把定界引号转义成 HTML 实体破坏字面量——
+与 bridge/texts.py 同类的受控 safe。 -#}
+"""桥渲染参数：由 scripts/generate_config.py 生成——勿手改。
+
+全部值逐字来自上游 main 分支渲染模块（vendor/_upstream/render_params.json，
+渲染参数注入层），随上游 roll 自动再生：渲染缓存键版本、远程 t2i
+视口适配基准、超大渲染图 img_seg/file_seg 分流阈值、二维码点阵参数。桥侧
+t2i 适配补丁等桥自有语义不在此模块，见 bridge/render.py 的规则层声明。
+"""
+
+from __future__ import annotations
+
+{% for entry in entries %}# {{ entry.source }}
+{{ entry.name }} = {{ entry.literal | safe }}
+{% endfor %}

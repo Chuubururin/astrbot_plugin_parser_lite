@@ -1,0 +1,84 @@
+# 工具链配置（非发布包）。插件发布物 = 仓库 zip + metadata.yaml；
+# 运行依赖见 requirements.txt（由 scripts/derive_requirements.py 从 vendor 派生）。
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["vendor", ".research", ".agents"]
+
+[tool.ruff.lint]
+# ASYNC：异步正确性（长驻事件循环插件的一等缺陷类）；C4/FURB/PERF/RET：
+# 惯用法与性能小改进，近零噪音。刻意不采纳：EM/TRY（与中文「响亮失败」长
+# 消息设计冲突）、PLC0415（tests/scripts 的延迟导入是架构需要）、A（AstrBot
+# 框架的 filter 模块命名）、DTZ（render 主题/时间戳用本地时间是语义）、
+# ARG（pytest fixture 与框架回调签名）、PL 复杂度族（ssrf 端口策略等处
+# 内联魔法值为协议语义常量）、COM812（与 ruff formatter 冲突，官方建议禁用）。
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "C4", "COM", "FURB", "PERF", "RET"]
+# RUF001/002/003：中文注释与文档字符串使用全角标点是有意为之
+ignore = ["RUF001", "RUF002", "RUF003", "COM812"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:astrbot_plugin_parser_lite.*"]
+markers = [
+    "network: 需要真实外网的隔离区测试（默认跳过；RUN_NETWORK_TESTS=1 启用）",
+]
+
+[tool.mypy]
+# 根目录已无 __init__.py：插件以 PEP 420 命名空间包被宿主导入，
+# mypy 无法再由文件路径反推包基目录，故显式声明 package base；
+# 统一经 scripts/typecheck.py 在包父目录下运行。
+python_version = "3.12"
+explicit_package_bases = true
+exclude = ["vendor/", ".research/", ".agents/", "docs/"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# vendor 视为不透明依赖：不跟入（Any 化）。vendor 字节级等同上游，其内部
+# 类型怪癖不属于本仓库修复范围；其对外 API 由契约测试（步骤 9）静态守护。
+# 模块名随 mypy 对包基的推断而变化（插件目录本身是个包），故用通配双匹配。
+module = ["vendor", "vendor.*", "*.vendor", "*.vendor.*"]
+follow_imports = "skip"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["msgspec.*", "curl_cffi.*", "puremagic.*", "ujson.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# 测试侧用 yaml.safe_load 解析生成的 metadata.yaml——与 AstrBot 读取插件
+# 元数据的入口同一个（star_manager._load_plugin_metadata）。PyYAML 已在
+# tests/requirements-test.txt 声明（astrbot 侧需要），但无类型桩。本仓
+# ``scripts/`` 刻意不依赖 PyYAML 的约定不受影响：该约定约束的是生成管线，
+# 测试侧「按宿主方式解析校验产物」是另一回事。
+module = ["yaml"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# scripts/ 非包，跨模块共享靠 sys.path 垫片导入 pipeline_common（直接运行与
+# 按路径加载两态）；mypy 的包基推断无法同时容纳该顶层名，视为幻影依赖
+# Any 化——pipeline_common.py 本体仍作为 scripts 子模块全量受查
+module = ["pipeline_common"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# 上游渲染对照探针（scripts/upstream_render_probe.py）只在容器独立 venv 运行，
+# 本仓类型环境不装 nonebot 栈
+module = [
+    "nonebot",
+    "nonebot.*",
+    "nonebot_plugin_parser_lite",
+    "nonebot_plugin_parser_lite.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# 桥以 AstrBot 运行时为宿主，类型环境里不安装 astrbot（Any 化），
+# 平台契约由运行时行为测试与 vendored 契约测试守护
+module = ["astrbot", "astrbot.*"]
+ignore_missing_imports = true

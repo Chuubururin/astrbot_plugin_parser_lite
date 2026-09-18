@@ -1,0 +1,170 @@
+# serializer version: 1
+# name: test_vendor_public_api_snapshot
+  dict({
+    'Config_fields': dict({
+      'plite_append_qrcode': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_append_url': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_bili_cdn_domain': dict({
+        'annotation': 'str | None',
+        'default': 'None',
+        'required': False,
+      }),
+      'plite_bili_cdn_region': dict({
+        'annotation': "<class 'str'>",
+        'default': "'zh'",
+        'required': False,
+      }),
+      'plite_bili_video_codes': dict({
+        'annotation': 'list[astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.utils.bilibili.video.BiliVideoCodecs]',
+        'default': "[<BiliVideoCodecs.AVC: 'avc'>, <BiliVideoCodecs.AV1: 'av01'>, <BiliVideoCodecs.HEV: 'hev'>, <BiliVideoCodecs.UNKNOWN: 'unknown'>]",
+        'required': False,
+      }),
+      'plite_bili_video_quality': dict({
+        'annotation': "<enum 'BiliVideoQuality'>",
+        'default': '<BiliVideoQuality._1080P: 80>',
+        'required': False,
+      }),
+      'plite_blacklist_users': dict({
+        'annotation': 'list[str]',
+        'default': '[]',
+        'required': False,
+      }),
+      'plite_day_range': dict({
+        'annotation': 'list[str]',
+        'default': "['6:00', '19:00']",
+        'required': False,
+      }),
+      'plite_disabled_platforms': dict({
+        'annotation': 'list[astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.constants.PlatformEnum]',
+        'default': '[]',
+        'required': False,
+      }),
+      'plite_download_command': dict({
+        'annotation': 'list[str]',
+        'default': "['xz', '下载']",
+        'required': False,
+      }),
+      'plite_embed_url': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_forward_text_threshold': dict({
+        'annotation': "<class 'int'>",
+        'default': '1000',
+        'required': False,
+      }),
+      'plite_lazy_download': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_lazy_download_timeout': dict({
+        'annotation': "<class 'int'>",
+        'default': '30',
+        'required': False,
+      }),
+      'plite_lazy_download_tip': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_linuxdo_ck': dict({
+        'annotation': 'str | None',
+        'default': 'None',
+        'required': False,
+      }),
+      'plite_live_photo': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'True',
+        'required': False,
+      }),
+      'plite_max_comments': dict({
+        'annotation': "<class 'int'>",
+        'default': '5',
+        'required': False,
+      }),
+      'plite_max_retries': dict({
+        'annotation': "<class 'int'>",
+        'default': '3',
+        'required': False,
+      }),
+      'plite_max_size': dict({
+        'annotation': "<class 'int'>",
+        'default': '90',
+        'required': False,
+      }),
+      'plite_need_forward_contents': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'True',
+        'required': False,
+      }),
+      'plite_need_upload': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_need_upload_audio': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_need_upload_video': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_use_base64': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_zhihu_ck': dict({
+        'annotation': 'str | None',
+        'default': 'None',
+        'required': False,
+      }),
+    }),
+    'MatchResult_surface': list([
+      'cache_key',
+      'keyword',
+      'params',
+      'parser_type',
+      'searched',
+      'text',
+      'url',
+    ]),
+    'Parser': dict({
+      '__init__': "(self, parser_types: 'Sequence[type[BaseParser]] | None' = None)",
+      'aclose': "(self) -> 'None'",
+      'match': "(self, text: 'str') -> 'MatchResult'",
+      'parse': "(self, text: 'str', *, until: 'ParseStep | str' = <ParseStep.PARSE: 'parse'>) -> 'Any'",
+    }),
+    'module_exports': list([
+      'Config',
+      'MatchResult',
+      'ParseStep',
+      'Parser',
+      'clear_result_cache',
+      'configure',
+      'match',
+      'parse',
+      'shutdown_runtime',
+    ]),
+    'module_level': dict({
+      'clear_result_cache': "() -> 'None'",
+      'configure': '(config: astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.config.Config | None = None, **overrides: Any) -> astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.config.Config',
+      'match': "(text: 'str', parser_types: 'Sequence[type[BaseParser]] | None' = None) -> 'MatchResult'",
+      'parse': "(text: 'str', *, until: 'ParseStep | str' = <ParseStep.PARSE: 'parse'>, parser_types: 'Sequence[type[BaseParser]] | None' = None) -> 'Any'",
+      'shutdown_runtime': "() -> 'None'",
+    }),
+  })
+# ---

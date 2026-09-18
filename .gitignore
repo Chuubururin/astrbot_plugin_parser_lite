@@ -1,0 +1,38 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 本地数据（勿入库：运行时缓存/配置/快照工作区）
+data/
+.parser-lite/
+.scratch/
+.research/
+.v2c/
+.video_agent/
+.mimosa/
+out/
+
+# sync 工作区（上游克隆的临时目录）
+.sync-work/
+
+# agent skills：安装器本地产物，不入库
+# （.agents/skills/ 由 skills-lock.json 按需安装；agent/ .claude/ .zcode/
+# 是安装器落在各 agent 目录的副本/软链与会话产物）
+node_modules/
+.agents/
+skills-lock.json
+agent/
+.claude/
+.zcode/
+
+# 内部设计文档与流程声明不入库：面向贡献者的声明见 CONTRIBUTING.md 与
+# CODE_OF_CONDUCT.md，术语与系统设计见 doc/CONTEXT.md
+docs/
+
+# 两层注入管线的临时分析数据：上游元信息不由本仓库维护，由第一层
+# scripts/analyze_vendor.py 从 vendor（上游快照）随时现场再生
+/vendor_analysis.json
