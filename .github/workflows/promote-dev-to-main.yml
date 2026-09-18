@@ -177,9 +177,12 @@ jobs:
           # 合并提交进入发布线。必须人先处理。
           echo "::error::main 存在 dev 之外的提交，无法快进提权。先把这些提交落回 dev，或确认后重置 main。"
           echo "main 独有的提交："
-          git log --oneline --no-walk $(
-            git cherry origin/dev origin/main | awk '/^\+/ { print $2 }'
-          ) || true
+          # 这里刻意不用 `git log --no-walk $(git cherry ...)`：未加引号的命令替换
+          # 会被 actionlint 的 shellcheck 判为 SC2046（word splitting）。用 while read
+          # 逐行消费，语义相同且没有引号陷阱；--no-walk 也不需要了（每行单独 show）。
+          git cherry origin/dev origin/main | awk '/^\+/ { print $2 }' | while read -r sha; do
+            [ -n "$sha" ] && git log --oneline -1 "$sha"
+          done || true
           exit 1
 
       - name: 快进 main 到 dev
@@ -209,7 +212,10 @@ jobs:
             echo ""
             echo "\`main\` → \`${DEV_SHA}\`（原 \`${MAIN_SHA}\`）"
             echo ""
-            printf '发布 tag：\`git tag v<metadata 版本> %s && git push origin <tag>\`\n' "${DEV_SHA}"
+            # 不用 printf + 单引号格式串：actionlint 的 shellcheck 会把
+            # '发布 tag：`git push ...`' 里的 $ 相关文本判为 SC2016（单引号内不展开）。
+            # 直接把变量放进双引号 echo，语义相同且无歧义。
+            echo "发布 tag：\`git tag v<metadata 版本> ${DEV_SHA} && git push origin <tag>\`"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: 汇总

@@ -36,8 +36,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "::error::本 PR 的 base 是 main（head: ${HEAD_REF}）。请改为向 dev 开 PR；main 只由 promote-dev-to-main 工作流推进。"
-          echo "### ❌ PR base 必须是 \`dev\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          echo "" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          echo "分支模型：贡献者 → \`dev\`（PR + CI）→ \`main\`（promote 工作流）。" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          echo "重开方式：\`gh pr edit --base dev\`，或关闭本 PR 后以 \`dev\` 为 base 重开。" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          # 合并重定向（SC2129）：连续 `>> file` 会被 actionlint/shellcheck 判为
+          # 风格问题；花括号分组是仓库其余工作流的既有写法。
+          {
+            echo "### ❌ PR base 必须是 \`dev\`"
+            echo ""
+            echo "分支模型：贡献者 → \`dev\`（PR + CI）→ \`main\`（promote 工作流）。"
+            echo "重开方式：\`gh pr edit --base dev\`，或关闭本 PR 后以 \`dev\` 为 base 重开。"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           exit 1
