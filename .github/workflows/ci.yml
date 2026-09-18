@@ -1,9 +1,14 @@
 name: CI
 
+# 分支模型（CONTRIBUTING.md 第 8 节）：dev 是工作分支，main 是发布指针。
+# - pull_request 无分支过滤：**任何** base 都跑，包括误打到 main 的 PR（那时
+#   main-pr-target-guard 会额外报红，两道信号互不遮蔽）；
+# - push 只跟 dev：main 由 promote-dev-to-main 推进，promote job 内自带同构门禁
+#   （GITHUB_TOKEN 推的提交不触发本工作流，故不能依赖这里兜底）。
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [dev]
 
 # Scorecard：顶层最小权限，写权限不下放（job 级亦无需写）
 permissions:

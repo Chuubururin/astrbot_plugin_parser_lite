@@ -26,8 +26,9 @@ AST 白名单（`VENDOR_CONSUMERS` 常量即本清单的真值源，增删模块
 
 **LKG（Last Known Good）**
 最后一次确认可用的状态，具体化为 `lkg` 分支——sync 工作流在每次 roll 改写
-工作树之前 force-push 当前 HEAD（上一已验证快照）留档；最近 `v*` release
-tag 为次级基线。回滚序列（sync PR 页脚）：revert sync PR → checkout lkg
+工作树之前 force-push 当前 HEAD（上一已验证快照，即 roll 起点 dev）留档；
+最近 `v*` release tag 为次级基线。lkg 是独立分支，不属 main/dev 任何一条线，
+每次覆写是语义正确的。回滚序列（sync PR 页脚）：revert sync PR → checkout lkg
 （或以 LKG tag 为基线重新发布）。
 
 ## 同步
@@ -35,17 +36,19 @@ tag 为次级基线。回滚序列（sync PR 页脚）：revert sync PR → chec
 **roll（滚动同步）**
 sync-upstream 工作流的一次执行（每日 cron 一次）：克隆上游 standalone →
 比对 sha → 整树重建 vendor → 派生 requirements → 显示文本提取（fetch 上游
-main）→ vendor 三层校验 → 契约测试 → 开 sync PR。单 roll 在途
-（concurrency=1，不取消在途）。metadata.yaml 版本随 roll 直接沿用上游版本号。
+main）→ vendor 三层校验 → 契约测试 → 开 sync PR（base = **dev**）。单 roll
+在途（concurrency=1，不取消在途）。metadata.yaml 版本随 roll 直接沿用上游
+版本号。roll 只改 dev，改 main 是 promote 的事（节奏由人决定）。
 
 **sync PR / roll commit**
 vendor 快照的升级 PR。commit message 固定携带 SHA 区间、上游摘要与
 revert/停用滚子页脚（Tree-hygiene：先恢复绿，再排查坏因）。
 
 **分层 automerge**
-vendor 代码与派生清单变更 + 全绿 → 自动 squash 合并；触碰桥/CI/模板
+vendor 代码与派生清单变更 + 全绿 → 自动 squash 合并到 **dev**；触碰桥/CI/模板
 的变更 → 仅 PR + 告警人工审阅。前提：`SYNC_PAT` secret（GITHUB_TOKEN
-推的分支不触发 CI）。
+推的分支不触发 CI）。注意 automerge 只作用于 dev，**不涉及 main**——
+main 的推进永远是显式的 promote。
 
 **熔断（circuit breaker）**
 连续 3 次同步运行失败 → cron 自动空转（读 run 历史判定，不回写文件）。
@@ -116,9 +119,33 @@ macros 宏、CSS）逐字节来自上游 main 分支 render/templates（2026-09-
 `scripts/upstream_render_probe.py`（单命令：出图 + HTML 截获 +
 `--verify-digest` 自校验）。见 `tests/test_render_templates.py`。
 
+## 分支模型
+
+**dev（工作分支）**
+所有变更的落点：feature 分支与 `sync/standalone-*` 的 PR 都以 dev 为 base，
+`ci.yml` 的三个 required check 在这里把关。dev 的每个提交都可能成为 main。
+历史不可改写（本地 `pre-push` 护栏拦非快进推送）——它是 promote 的输入，
+历史可变会让两条线失去可比性。
+
+**main（发布指针）**
+不承载开发，永远等于某个已通过全量门禁的 dev 快照。唯一推进通道是
+`promote-dev-to-main`（见「提权」）。「main 上出现 dev 没有的提交」视为
+有人绕过工作流直推，promote 会响亮失败而不是静默 merge。
+
+**提权（promote）**
+`promote-dev-to-main` 工作流：job 内跑全套门禁（lint / mypy / vendor 三层 /
+全量 pytest）→ 校验 main 是 dev 的祖先 → `--force-with-lease` 把 main
+快进到 dev 的 sha。提权**不产生新提交**，故 main 上每个提交逐字节等于一个
+已过 CI 的 dev 提交。用内置 `GITHUB_TOKEN` 推（无需 App/PAT），代价是推上去
+后不触发后续工作流——门禁结论由 promote run 自身承载（CONTRIBUTING.md 8.4）。
+
+**PR 目标守卫（main-pr-target-guard）**
+对 base=main 的 PR 直接 exit 1。存在的原因：本仓库 private 且无 GitHub Pro，
+远端分支保护与 rulesets 不可用（REST 返回 403），强制力只能做进 CI。
+
 **keepalive**
 上游无变化时防 GitHub 60 天自动停用调度工作流的触碰提交（50 天阈值，
-`[skip ci]`；被分支保护拦截则降级为提醒 issue）。
+`[skip ci]`；推 **dev**，失败则降级为提醒 issue）。
 
 **本地滚动同步（local roll）**
 仓库未推远端期间对 sync-upstream 工作流的本地替代：

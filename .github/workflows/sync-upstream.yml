@@ -8,6 +8,11 @@ name: sync-upstream
 # - LKG：roll 前把当前 HEAD（上一已验证快照）force-push 到 lkg 分支留档，
 #   回滚 = checkout lkg 或以 lkg 为基线重建（release tag 为次级基线）；
 # - 熔断：连续 3 次运行失败 → cron 空转（dispatch + force 可恢复，无需改文件）；
+# - 分支模型：本工作流 checkout 的是 **dev**（工作分支），roll PR 的 base 也是
+#   dev；keepalive 与 LKG 同样落在 dev。main 是发布指针，只由
+#   promote-dev-to-main 推进——roll 永不直接触碰 main（CONTRIBUTING.md 第 8 节）。
+#   后果：若 dev 已有本地之外的推进，roll 分支从「当时的 dev」切出，最后
+#   `gh pr merge --auto` 会因 base 落后而被拒——这是正确行为（转人工），不是缺陷。
 # - 祖先校验门：standalone 的构建源必须 ∈ 远端 main（ls-remote 真值）祖先——
 #   未合入 PR 的预览构建只跟进平面、不 roll vendor（state 留痕 last_skipped_build）；
 #   解析失败或校验失败一律拒绝 roll（响亮失败，不兜底）；
@@ -60,6 +65,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          # 工作分支是 dev：roll 要把新快照叠在「正在开发的那条线」上，
+          # 而不是叠在已发布的 main 上（否则 roll PR 会与 dev 上的在途改动打架）
+          ref: dev
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -151,8 +159,11 @@ jobs:
             git config user.name "parser-lite-sync-bot"
             git config user.email "actions@users.noreply.github.com"
             git commit --allow-empty -m "chore(sync): keepalive [skip ci]"
-            if ! git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
-              echo "::warning::keepalive 直推被分支保护拦截，改为开提醒 issue"
+            # 触碰 dev 而非 main：main 只由 promote-dev-to-main 推进，
+            # 直推 main 会被分支模型拒绝（且本仓库 private 无 GitHub Pro，
+            # 远端分支保护不可用——拒绝来自工作流约定而非 GitHub）
+            if ! git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:dev; then
+              echo "::warning::keepalive 直推 dev 失败，改为开提醒 issue"
               gh issue create --title "keepalive：仓库长期无活动，调度工作流将停用" \
                 --body "距上次提交已超过 50 天。GitHub 将在 60 天无活动后停用 sync-upstream 的定时触发。请合并任意变更或手动重新启用。" || true
             fi
@@ -168,8 +179,10 @@ jobs:
         if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.ancestor_ok == 'true'
         run: |
           set -euo pipefail
-          # 当前 HEAD = 最近一次通过全套校验并入 main 的快照；roll 改写工作树
-          # 之前先留档，回滚有逐字节基线（Tree-hygiene：先恢复绿）
+          # 当前 HEAD = 最近一次通过全套校验的 dev 快照；roll 改写工作树
+          # 之前先留档，回滚有逐字节基线（Tree-hygiene：先恢复绿）。
+          # lkg 是**独立分支**，不属于 main/dev 任何一条线——它是回滚锚点，
+          # 故此处 force 推送是语义正确的（每次 roll 覆写为最新的已验证点）。
           if ! git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "HEAD:refs/heads/lkg" --force; then
             echo "::warning::LKG 留档推送失败（不阻断本次 roll；回滚退回最近 release tag 基线）"
@@ -268,7 +281,7 @@ jobs:
           OLD_SHORT="$(echo "$OLD_STANDALONE" | cut -c1-12)"
           NEW_SHORT="$(echo "$NEW_STANDALONE" | cut -c1-12)"
 
-          # 分层判据的基线：本步开始时 HEAD = 检出的 main（roll 尚未提交）
+          # 分层判据的基线：本步开始时 HEAD = 检出的 dev（roll 尚未提交）
           BASE_SHA="$(git rev-parse HEAD)"
 
           NEW_VERSION="$(python -c "import tomllib;print(tomllib.load(open('vendor/_upstream/pyproject.toml','rb'))['project']['version'])")"
@@ -359,7 +372,7 @@ jobs:
           $(cat "$SUMMARY_MD")"
           fi
 
-          gh pr create --base main --head "$BRANCH" \
+          gh pr create --base dev --head "$BRANCH" \
             --title "sync: roll parser-lite standalone ${OLD_SHORT} → ${NEW_SHORT}" \
             --body "$PR_BODY"
 
@@ -409,9 +422,11 @@ jobs:
               steps.roll_pr.outcome != 'success' }}
         run: |
           set -euo pipefail
-          # 读 origin/main 基线而非工作树副本：失败路径上 STATE_FILE 已被本 run
-          # 刷新（synced_at=now），从它算 age 恒为 0、会错误抑制滞后告警
-          age_hours="$(git show "origin/main:${STATE_FILE}" | python -c "import datetime as dt,json,sys;print((dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(json.load(sys.stdin)['synced_at'])).total_seconds()//3600)")"
+          # 读 origin/dev 基线而非工作树副本：失败路径上 STATE_FILE 已被本 run
+          # 刷新（synced_at=now），从它算 age 恒为 0、会错误抑制滞后告警。
+          # 基线取 dev 而非 main：state 由 roll 提交进 dev，main 只在 promote 时
+          # 才拿到它——取 main 会把「已同步但未 promote」误报成滞后。
+          age_hours="$(git show "origin/dev:${STATE_FILE}" | python -c "import datetime as dt,json,sys;print((dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(json.load(sys.stdin)['synced_at'])).total_seconds()//3600)")"
           if [ "${age_hours%%.*}" -ge "$STALENESS_HOURS" ]; then
             gh issue create --title "upstream lagging：同步超过 ${STALENESS_HOURS}h 未追平" \
               --body "上游 standalone 已领先但快照未入库（上次成功同步于 ${age_hours}h 前）。

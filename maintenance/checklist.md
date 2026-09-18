@@ -13,8 +13,8 @@
 ## 1. 它解决什么问题
 
 本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`）：roll → 两层注入 →
-契约测试 → PR → 分层 automerge。绝大多数上游演进（新增配置字段、新增依赖、schema
-选项变化）零人工。
+契约测试 → PR（base=`dev`）→ 分层 automerge。绝大多数上游演进（新增配置字段、新增依赖、
+schema 选项变化）零人工。
 
 但有一类变化**故意**被设计成红的：新增可命中平台、平台正则漂移、vendor 公开 API 变化、
 破坏性变更跨越。这些关卡不是缺陷，而是刻意的 tripwire——它们要求有人读 diff 后做判断。
@@ -26,6 +26,10 @@
 
 清单把这两件事都交给 agent：一次命令输出全部关卡状态，每条状态自带操作步骤、改动
 白名单、停手条件与验收标准。
+
+**分支模型与清单的关系**：roll 只改 `dev`，`main` 由 `promote-dev-to-main` 显式提权
+（CONTRIBUTING.md 第 8 节）。所以「同步完成」不等于「已发布」——MC-11 绿只说明滚子
+没熔断，要不要 promote 是人的决定。清单**不**替人做这个决定。
 
 ---
 
@@ -253,5 +257,9 @@ MC-02 红往往是 MC-07/MC-08 的症状，直接修 MC-02 是治标。
   注意权威判据是 `gh run list`，state 字段只是降级近似。
 - **动态导入无法静态守护。** P-01 的机械防线是 `verify_vendor.py` 的逐字节比对，
   但 `importlib.import_module` 类写法不在其覆盖面内。
+- **MC-14 需要刷新过的远端引用。** 判据读 `origin/main` 与 `origin/dev`，本地
+  未 `git fetch` 时结论可能过时；且远端**没有**分支保护（private 且无 GitHub Pro），
+  所以它是信号而非阻断——绕过 promote 直推 main 在服务端不会失败，只会在下一次
+  跑清单时被 MC-14 抓到。
 - **清单不代替判断。** `auto` 类条目可以无人值守执行；`escalate` 类**永远**要人。
   把 `escalate` 改成 `auto` 来让流水线变绿，是比 P-03 更隐蔽的作弊——不要做。

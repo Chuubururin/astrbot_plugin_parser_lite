@@ -4,6 +4,7 @@
 # 顶层 exclude：vendor/ 与 .sync-work/ 是上游快照（零修改铁律），
 # templates/ 是上游 main render/templates 快照（逐字节对齐），
 # 一律排除在改写类钩子之外（repo 级 exclude 不是合法键，勿下沉）。
+# 分支模型见 CONTRIBUTING.md 第 8 节：dev 是工作分支、main 是发布指针。
 exclude: ^vendor/|^\.sync-work/|^templates/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -37,7 +38,7 @@ repos:
         language: system
         files: ^\.github/workflows/.*\.ya?ml$
       - id: no-force-push-main
-        name: block non-fast-forward (forced) push to main
+        name: block non-fast-forward (forced) push to main/dev
         entry: bash scripts/no-force-push-main.sh
         language: system
         stages: [pre-push]

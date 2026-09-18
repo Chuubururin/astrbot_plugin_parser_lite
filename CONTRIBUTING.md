@@ -33,6 +33,7 @@ B 站/抖音/小红书等平台的分享链接并转发为内容卡片。
 ```bash
 git clone https://github.com/Chuubururin/astrbot_plugin_parser_lite.git
 cd astrbot_plugin_parser_lite
+git switch dev            # 工作分支；直接改 main 的 PR 会被 main-pr-target-guard 判红
 
 python3 -m venv .venv && . .venv/bin/activate        # Python 3.12
 pip install -r requirements.txt -r requirements/host-provided.txt
@@ -140,20 +141,50 @@ Issue 与规格以本地 markdown 形式存放于 `.scratch/`（该目录不入�
 
 ---
 
-## 8. 分支保护与必需检查
+## 8. 分支模型与必需检查
 
-`main` 分支保护（Settings → Branches）应保持：
+### 8.1 两条长期分支
 
-| 配置项 | 值 | 依据 |
+```
+feature 分支 ──PR(base=dev)──▶ dev ──promote-dev-to-main──▶ main
+                              ↑                              ↑
+                        工作分支：所有变更                 发布指针：
+                        在这里被评审与验证                 永远等于某个
+                                                          已验证的 dev 快照
+```
+
+| 分支 | 角色 | 谁可以推进 | 历史可否改写 |
+|---|---|---|---|
+| `dev` | **工作分支**。所有 PR（含 `sync-upstream` 的 roll PR）以此为 base | 合并 PR；`sync-upstream` 的 roll PR 与 keepalive | ❌ 禁止（本地 `pre-push` 拦截） |
+| `main` | **发布指针**。只承载「已通过全量门禁、可发布」的快照 | **仅** `promote-dev-to-main` 工作流 | ❌ 禁止（同上） |
+| `lkg` | 回滚锚点。每次 roll 前留档上一已验证快照 | `sync-upstream`（每次覆写） | ✅ 允许 force（语义即覆写） |
+
+**贡献者请一律向 `dev` 开 PR。** 打到 `main` 的 PR 会被
+`main-pr-target-guard` 工作流直接判红（见 8.3）。
+
+### 8.2 远端没有分支保护 —— 门禁在工作流里
+
+本仓库是 **private 且未开通 GitHub Pro**，GitHub 的分支保护与 rulesets 对私有仓库
+仅对付费计划开放：`GET /repos/{owner}/{repo}/branches/main/protection` 与
+`/rulesets` 均返回 `403 Upgrade to GitHub Pro`。
+
+所以这里的强制力**不在 GitHub 侧**，而由三件事共同构成：
+
+| 强制点 | 机制 | 拦截什么 |
 |---|---|---|
-| Require a pull request before merging | ✅ | 所有变更（含自动同步）走 PR，保证可 revert |
-| Required status checks | ✅ | required checks 硬门禁（见下） |
-| ↳ 要求分支先更新（up-to-date） | ✅ | 同步 PR 必须基于最新 main，防语义冲突 |
-| Allow auto-merge | ✅ | 分层 automerge 的前提 |
-| Require linear history | ✅ | revert-first 语义干净 |
-| Do not allow force pushes / deletions | ✅ | 与本地 `pre-push` 护栏一致 |
+| `main-pr-target-guard` 工作流 | 对 base=main 的 PR 直接 `exit 1` | 把变更绕过 dev 直接提给 main |
+| `promote-dev-to-main` 的 job 内门禁 | promote 前自带 lint / mypy / vendor 校验 / 全量 pytest，任一红即不推 main | 把未验证的快照推上 main |
+| 本地 `pre-push` 钩子（`scripts/no-force-push-main.sh`） | 拒绝对 `main`/`dev` 的非快进推送 | 就地改写两条长期分支的历史 |
 
-**Required status checks**（与 `.github/workflows/ci.yml` 的 job name 一致）：
+> **知道的边界**：以上都不阻止**有写权限的人**用 `git push` 直接推 `main`
+> （GitHub 侧没有规则可拦）。这条护栏防的是误操作与自动化，不是恶意。真需要
+> 硬隔离时，把仓库转 public 或升级计划后启用分支保护即可——届时本节的三个
+> 强制点仍应保留（纵深防御）。
+
+### 8.3 必需检查（required checks）
+
+CI（`.github/workflows/ci.yml`）在**每个** PR 上运行，三个 job 即 required checks
+（名字必须与 job `name` 逐字一致）：
 
 - `lint (ruff / actionlint / zizmor)`
 - `typecheck (mypy)`
@@ -162,6 +193,40 @@ Issue 与规格以本地 markdown 形式存放于 `.scratch/`（该目录不入�
 「确定性三类契约」（import 面 AST 白名单 / API 签名快照 / requirements 派生一致性）
 包含在 `test` job 中；网络隔离区快照（`network` 标记）默认跳过，不作为 required。
 
+`push` 触发只跟 `dev`：`main` 由 promote 工作流推进，而 `GITHUB_TOKEN` 推的提交
+**不触发**工作流——所以 promote 的 job 内必须自带同构门禁，不能指望 CI 在 main 上
+兜底（8.4）。
+
+### 8.4 提权：`promote-dev-to-main`
+
+```bash
+# 手动提权（推荐；先看 dry-run 预演）
+gh workflow run promote-dev-to-main -f dry_run=true
+gh workflow run promote-dev-to-main
+
+# 或：向 dev 推一个带 [promote] 前缀的提交，自动触发
+git commit --allow-empty -m "[promote] release v1.3.7"
+```
+
+流程：**job 内跑全套门禁** → 校验 `main` 是 `dev` 的祖先（可快进）→
+`git push --force-with-lease` 把 `main` 推到 `dev` 的 sha。
+
+两个刻意的设计决定：
+
+1. **提权 = 快进，不产生新提交。** 因此 `main` 上每个提交都逐字节等于 `dev` 上
+   某个已过 CI 的提交，两者可比对。若 `main` 存在 `dev` 没有的提交（有人绕过
+   工作流直推），工作流**响亮失败**并列出那些提交——不做静默 merge，因为那会
+   把一个 dev 从未验证过的合并提交送进发布线。
+2. **`main` 上不会出现新的 CI 运行。** `GITHUB_TOKEN` 推的提交不触发工作流。
+   这不是缺陷：「main 是绿的」这一结论由 promote run 自身承载，它跑的就是
+   `ci.yml` 的同构命令集。
+
+### 8.5 发布 tag 与提权的关系
+
+`release` 工作流由 `v*` tag 触发，tag 必须与 `metadata.yaml` 的 `version` 锁步。
+推荐顺序：**先 promote，再在 `main` 的 sha 上打 tag**（promote 的 Step Summary
+会打印现成命令），这样 tag 指向的提交必定已经过门禁。
+
 ---
 
 ## 9. Secret 与受保护环境
@@ -169,11 +234,16 @@ Issue 与规格以本地 markdown 形式存放于 `.scratch/`（该目录不入�
 ### `SYNC_PAT`（Settings → Secrets and variables → Actions）
 
 - **用途**：`sync-upstream` 用它推 `sync/standalone-*` 分支 —— 用 PAT 推送的分支
-  才会触发 CI required checks，auto-merge 才能生效。用 `GITHUB_TOKEN` 推的分支
-  不触发工作流，PR 只能人工合并（工作流会打印 warning 并降级）。
+  才会触发 CI required checks，auto-merge（合并到 **`dev`**）才能生效。用
+  `GITHUB_TOKEN` 推的分支不触发工作流，PR 只能人工合并（工作流会打印 warning
+  并降级）。
 - **类型**：Classic PAT，scope 仅 `repo`，绑定维护者个人账号；设过期提醒。
 - 一值一 secret，不打包进 JSON（掩码对结构化数据失效）。
 - **缺省行为**：不配置也能跑，同步降级为「开 PR + 人工合并」。
+
+> `promote-dev-to-main` **不需要** `SYNC_PAT`：它推 `main` 用的是内置
+> `GITHUB_TOKEN`（`contents: write`），代价是推上去后不触发后续工作流——
+> 门禁已在 promote job 内跑过（8.4）。
 
 ### 受保护环境 `release`（Settings → Environments）
 
@@ -200,6 +270,16 @@ Issue 与规格以本地 markdown 形式存放于 `.scratch/`（该目录不入�
 
   升级 action 时：改到新 tag 并更新 SHA，走 PR 人工审阅。
 
+- **工作流清单**（`.github/workflows/`）：
+
+  | 文件 | 触发 | 作用 |
+  | --- | --- | --- |
+  | `ci.yml` | PR（任意 base）+ push 到 `dev` | 三道 required checks |
+  | `release.yml` | tag `v*` | 构建 zip + SLSA attestation + 发布 |
+  | `sync-upstream.yml` | 每日 cron + 手动 | 滚动同步上游快照 → PR(base=dev) |
+  | `main-pr-target-guard.yml` | PR(base=main) | 拒绝打到 `main` 的 PR（见 8.2） |
+  | `promote-dev-to-main.yml` | push 到 `dev`（`[promote]` 前缀）+ 手动 | 门禁后把 `main` 快进到 `dev` |
+
 ---
 
 ## 11. 发布与回滚
@@ -208,6 +288,9 @@ Issue 与规格以本地 markdown 形式存放于 `.scratch/`（该目录不入�
 
 `release` 工作流由 `v*` tag 触发：确定性测试 → 构建 zip（**显式白名单**）→
 `actions/attest` 生成 SLSA provenance → 受保护环境人工放行 → `gh release create`。
+
+推荐顺序：**先在 `dev` 上验证 → promote 到 `main` → 在 `main` 的 sha 上打 tag**。
+这样 tag 指向的提交必定经过 promote 的门禁（8.4），且 `main` 不会落后于发布物。
 
 tag 必须与 `metadata.yaml` 的 `version` 锁步（工作流会校验并拒绝不一致）。
 版本号直接沿用上游 `nonebot-plugin-parser-lite`，由 sync PR 自动跟随，
@@ -220,11 +303,15 @@ tag 必须与 `metadata.yaml` 的 `version` 锁步（工作流会校验并拒绝
 ### 回滚
 
 ```
-revert 最近的 sync PR
+revert 最近的 sync PR（base=dev）
   → 以最近 release tag（v*）为 LKG 重新发布
 ```
 
 `revert-first`：先恢复绿，再排查坏因。
+
+回滚**不要求**改写 `main`：`main` 只由 promote 推进，把修复合回 `dev` 后重新
+promote 即可。已发布的 tag 永不移动（`--verify-tag`），故障版本的 zip 与
+SLSA attestation 保留在 Release 里可追溯。
 
 ---
 
@@ -237,6 +324,9 @@ gh run view <run_id> --log-failed
 gh workflow run sync-upstream -f force=true
 # 停用滚子
 gh workflow disable sync-upstream
+# 提权 dev → main（预演 / 实际）
+gh workflow run promote-dev-to-main -f dry_run=true
+gh workflow run promote-dev-to-main
 ```
 
 **熔断**：`sync-upstream` 连续 3 次失败 → cron 自动空转（读 run 历史判定，
@@ -247,7 +337,13 @@ gh workflow disable sync-upstream
 
 **keepalive**：GitHub 对 60 天无活动的仓库自动停用 scheduled workflow。
 `sync-upstream` 在「上游无变化」时会检查仓库最近提交时间，超过 50 天自动推一个
-空 keepalive 提交（`[skip ci]`）；若被分支保护拦截则降级为开提醒 issue。
+空 keepalive 提交（`[skip ci]`）到 **`dev`**（不是 `main`——`main` 只由 promote
+推进）；推送失败则降级为开提醒 issue。
+
+**daily roll 与 promote 的关系**：`sync-upstream` 每日把新快照以 PR 形式合入
+`dev`（分层 automerge 可用时自动合）。**它不会自动改 `main`** —— 何时发布由人
+决定：`gh workflow run promote-dev-to-main`。故意如此：上游更新与对外发布是两件
+节奏不同的事。
 
 ---
 

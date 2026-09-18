@@ -1,0 +1,227 @@
+name: promote-dev-to-main
+
+# 把**已验证的 dev** 提为 main——main 是纯粹的发布指针，永远等于某个已通过
+# 全量门禁的 dev 快照。这是分支模型的唯一一条「向 main 写」通道。
+#
+# 为什么不是 merge PR：本仓库 private 且未开通 GitHub Pro，远端没有分支保护与
+# 必需检查可用（/rulesets 与 /branches/*/protection 均 403）。PR 合并路径上，
+# 「合并按钮何时可按」没有任何强制力——所以把门禁做进工作流本身：promote job
+# 在推 main 之前**自带**全套确定性门禁（lint / typecheck / 全量契约测试）。
+#
+# 为什么用 GITHUB_TOKEN 而不是 GitHub App / PAT：零配置即可用，且 GITHUB_TOKEN
+# 推的提交**不会**触发后续工作流——这恰是我们要的：门禁已在 promote job 内跑过，
+# main 上再跑一遍 CI 是冗余的。代价如实声明：main 推上去之后不会出现新的 CI 运行，
+# 「main 是绿的」这一事实由 promote run 自身承载（它的结论即 main 的门禁结论）。
+#
+# dev 的推进方式（与 main 的关系）：
+#   feature 分支 → PR（base=dev）→ CI required checks → squash 合入 dev
+#   dev ──promote-dev-to-main──▶ main（fast-forward，不产生新提交）
+# 因此 main 的每个提交都**逐字节等于** dev 上某个已过 CI 的提交。
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只做校验与预演，不推 main"
+        type: boolean
+        default: false
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-dev-to-main
+  cancel-in-progress: false # 提权不打断在途提权（半个 main 比没 main 糟）
+
+jobs:
+  decide:
+    name: decide whether to promote
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      - name: 判定门（前缀 / 手动放行）
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # 手动 dispatch 一律放行（人已经显式表达了意图）
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=手动触发（workflow_dispatch）" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # push 到 dev：只有带 [promote] 前缀的提交才自动提为 main。
+          # 前缀是**显式意图**——dev 上绝大多数提交（feature 合入、每日 sync roll）
+          # 都不该自动改 main，否则 main 的移动就失去了「人决定何时发」的语义。
+          first_line="$(printf '%s' "$HEAD_MSG" | head -1)"
+          case "$first_line" in
+            *"[promote]"*)
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              echo "reason=提交信息含 [promote] 前缀：${first_line}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              echo "reason=提交信息无 [promote] 前缀，跳过（dev 照常推进，main 不动）" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: 判定摘要
+        env:
+          RUN_PROMOTE: ${{ steps.gate.outputs.run }}
+          REASON: ${{ steps.gate.outputs.reason }}
+        run: |
+          {
+            echo "### promote 判定"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 是否提权 | \`${RUN_PROMOTE}\` |"
+            echo "| 依据 | ${REASON} |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  promote:
+    name: promote dev → main
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # 唯一向 main 写的通道；zizmor 要求 job 级显式声明
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 需要全历史：后面的 git cherry / merge-base 祖先判定要跨 dev/main 取对象
+          fetch-depth: 0
+          ref: dev
+          # 凭据不留在 .git/config 里：推 main 时在「校验」步骤内显式注入
+          # （zizmor artipacked；与 ci.yml / release.yml 的既有约定一致）
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # ---- 门禁：与 ci.yml 的 test job 同构 -------------------------------------
+      # 为什么在 promote 里重跑一遍而不是复用 dev 上的 CI 结论：GITHUB_TOKEN 有
+      # 能力推 main，而 main 的唯一防线就是这一步。dev 上的 CI 绿是「必要条件」，
+      # 但 promote 是**不可逆的发布动作**，独立复算比信任上游信号更便宜
+      # （全量契约测试 ~25s）。刻意与 ci.yml 保持同一组命令，避免两套门禁漂移。
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
+          python -m pip install --no-deps "astrbot>=4.28,<5"
+          python -m pip install -r tests/requirements-test.txt
+
+      - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
+        run: python scripts/check_test_deps.py
+
+      - name: lint（ruff check）
+        run: python -m ruff check --config config/pyproject.toml .
+
+      - name: 格式（ruff format --check）
+        run: python -m ruff format --config config/pyproject.toml --check .
+
+      - name: 类型（mypy）
+        run: python scripts/typecheck.py
+
+      - name: vendor 三层校验
+        run: python scripts/verify_vendor.py
+
+      - name: pytest
+        run: python -m pytest -c config/pyproject.toml --rootdir=. -q
+
+      # ---- 关系校验：main 必须能被 dev 快进 -----------------------------------
+      - name: 校验 main 可快进到 dev（防 main 出现 dev 没有的提交）
+        id: relation
+        env:
+          # ${{ }} 必须经 env 传递：直接写进 run: 块会被 zizmor 判为模板注入
+          # （template-injection，audit confidence High）——展开结果会成为 shell 代码。
+          # sync-upstream.yml 的同类步骤遵循同一约定。
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --quiet origin dev main
+          dev_sha="$(git rev-parse origin/dev)"
+          main_sha="$(git rev-parse origin/main)"
+          dev_short="$(git rev-parse --short origin/dev)"
+          {
+            echo "dev_sha=${dev_sha}"
+            echo "main_sha=${main_sha}"
+            echo "dev_short=${dev_short}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$dev_sha" = "$main_sha" ]; then
+            echo "::notice::main 已等于 dev（${dev_short}），无需提权"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$main_sha" "$dev_sha"; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::main 是 dev 的祖先，可快进提权"
+            exit 0
+          fi
+
+          # main 有 dev 之外的历史 → 快进不可能。响亮失败：这是「有人绕过工作流
+          # 直接写 main」的信号，若静默改用 merge，就会造出一个 dev 从未验证过的
+          # 合并提交进入发布线。必须人先处理。
+          echo "::error::main 存在 dev 之外的提交，无法快进提权。先把这些提交落回 dev，或确认后重置 main。"
+          echo "main 独有的提交："
+          git log --oneline --no-walk $(
+            git cherry origin/dev origin/main | awk '/^\+/ { print $2 }'
+          ) || true
+          exit 1
+
+      - name: 快进 main 到 dev
+        if: steps.relation.outputs.skip == 'false'
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAIN_SHA: ${{ steps.relation.outputs.main_sha }}
+          DEV_SHA: ${{ steps.relation.outputs.dev_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::dry_run=true —— 门禁与关系校验均通过，跳过实际推送"
+            {
+              echo "### promote 预演（dry-run）"
+              echo ""
+              echo "门禁全绿，\`main\` 可快进至 \`dev\` @ \`${DEV_SHA}\`。未推送。"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          fi
+          # --force-with-lease 而非裸 push：快进语义下两者等价，但 lease 钉住
+          # 「我校验过的那个 main」——若有人在校验与推送之间动了 main，推送被拒
+          # 而不是把对方的提交抹掉（race-free 的提权）。
+          git push --force-with-lease="refs/heads/main:${MAIN_SHA}" \
+            origin "origin/dev:refs/heads/main"
+          {
+            echo "### promote 完成"
+            echo ""
+            echo "\`main\` → \`${DEV_SHA}\`（原 \`${MAIN_SHA}\`）"
+            echo ""
+            printf '发布 tag：\`git tag v<metadata 版本> %s && git push origin <tag>\`\n' "${DEV_SHA}"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: 汇总
+        env:
+          DECIDE_REASON: ${{ needs.decide.outputs.reason }}
+          SKIP: ${{ steps.relation.outputs.skip }}
+        run: |
+          {
+            echo "### promote-dev-to-main 汇总"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 触发依据 | ${DECIDE_REASON} |"
+            echo "| main 已等于 dev | \`${SKIP:-false}\` |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

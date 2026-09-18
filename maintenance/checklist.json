@@ -83,7 +83,8 @@
     {
       "id": "P-04",
       "rule": "不得 git push --force、不得改写已推送历史、不得直接推 main",
-      "why": "分支保护与 required checks 依赖历史不可变；改写历史会让已合并的 sync PR 与 lkg 回滚基线失去可比性，回滚路径静默失效"
+      "why": "两条长期分支历史不可变：main 是发布指针、dev 是提权输入；改写历史会让 promote 的祖先校验失败（main 不再是 dev 的祖先），也让已合并的 sync PR 与 lkg 回滚基线失去可比性，回滚路径静默失效。本地 pre-push 钩子 scripts/no-force-push-main.sh 对 refs/heads/main 与 refs/heads/dev 拦截",
+      "correct": "dev 上要重整历史（rebase/squash）时走「新分支 + PR」；回滚用 revert 而非 force。lkg / sync/standalone-* / feature 分支不受此约束"
     },
     {
       "id": "P-05",
@@ -496,6 +497,28 @@
       "escalate_if": "总是（本条 class 即 escalate）",
       "note": "fan-in=1 是本项目的架构不变量（ACL R1/R2）；扩白名单等于扩大被依赖行为清单，必须人工评审",
       "doc_ref": "doc/CONTEXT.md"
+    },
+    {
+      "id": "MC-14",
+      "title": "main 存在 dev 之外的提交（有人绕过 promote 直推 main）",
+      "family": "ops",
+      "class": "escalate",
+      "severity": "blocking",
+      "detector": {
+        "kind": "cmd",
+        "cmd": "{py} -c \"import subprocess,sys; r=subprocess.run(['git','merge-base','--is-ancestor','origin/main','origin/dev']); sys.exit(0 if r.returncode==0 else 1)\"",
+        "expect_exit": 0
+      },
+      "scope": [],
+      "diagnosis": "git log --oneline origin/dev..origin/main 看 main 独有的提交；gh run list --workflow=promote-dev-to-main 看最近提权是否失败",
+      "action": [
+        "不改代码。输出 main 独有的提交清单（sha + subject + author）",
+        "判断来源：是维护者手动 push，还是 promote 的 --force-with-lease 竞态被拒",
+        "给出两条方案交人工：① 把这些提交合回 dev；② 确认无误后用 promote 覆写 main"
+      ],
+      "escalate_if": "总是（本条 class 即 escalate）",
+      "note": "这是分支模型的核心不变量：main 必须恒为 dev 的祖先，否则 promote 无法快进，且「main 上每个提交都等于某个已过 CI 的 dev 提交」这一可比性失效。本仓库 remote 无分支保护（private 且无 GitHub Pro），此条目是唯一的机械信号",
+      "doc_ref": "CONTRIBUTING.md 第 8.2/8.4 节"
     }
   ]
 }

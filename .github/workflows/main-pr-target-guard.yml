@@ -1,0 +1,43 @@
+name: main-pr-target-guard
+
+# 分支模型守卫：main 是**受保护的发布指针**，只由 promote-dev-to-main 移动。
+# 所有贡献者 PR（含 sync roll PR）必须打在 dev 上——见 CONTRIBUTING.md 第 8 节。
+#
+# 为什么需要这个工作流：本仓库是 private 且未开通 GitHub Pro，远端**无法**配置
+# 分支保护规则（REST /rulesets 返回 403 "Upgrade to GitHub Pro"）。既然远端没有
+# 强制力，就把强制力做进 CI：打到 main 的 PR 一律红，构成事实上的门禁。
+# 本地侧另有一道：scripts/no-force-push-main.sh 拦「对 main/dev 的非快进推送」。
+#
+# 例外：本工作流自身与 promote-dev-to-main 的规则由维护者直接改（见第 10 节
+# 权限基线）——改门禁的 PR 必然打不到 main，也就不会触发本守卫，这是设计使然：
+# 改门禁必须由人来做，不能由门禁自己批准。
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# zizmor concurrency-limits：同一 PR 的新一轮推送取消上一轮判定
+concurrency:
+  group: main-pr-target-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reject:
+    name: reject PRs targeting main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 拒绝以 main 为基的分支
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          echo "::error::本 PR 的 base 是 main（head: ${HEAD_REF}）。请改为向 dev 开 PR；main 只由 promote-dev-to-main 工作流推进。"
+          echo "### ❌ PR base 必须是 \`dev\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "分支模型：贡献者 → \`dev\`（PR + CI）→ \`main\`（promote 工作流）。" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "重开方式：\`gh pr edit --base dev\`，或关闭本 PR 后以 \`dev\` 为 base 重开。" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit 1

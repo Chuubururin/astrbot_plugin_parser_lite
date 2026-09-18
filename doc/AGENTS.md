@@ -39,6 +39,12 @@ AstrBot 插件：`astrbot_plugin_parser_lite`。基于 nonebot-plugin-parser-lit
 
 琐碎修复可直接实施，但仍须过门禁。
 
+## 分支
+
+在 **`dev`** 上工作，PR 一律以 `dev` 为 base。`main` 是发布指针，只由
+`promote-dev-to-main` 工作流推进——**不要向 main 开 PR**（会被
+`main-pr-target-guard` 判红），也不要直接 push main。详见 `CONTRIBUTING.md` 第 8 节。
+
 ## 硬性约束（详见 CONTRIBUTING.md 第 4 节）
 
 - `vendor/` 是逐字节零修改的上游快照，**禁止任何工具格式化或手改**。
