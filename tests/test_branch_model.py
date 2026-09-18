@@ -269,3 +269,171 @@ def test_release_whitelist_still_present() -> None:
     """本次改动不得误伤 release.yml 的白名单（回归护栏）。"""
     text = RELEASE_PATH.read_text(encoding="utf-8")
     assert "cp -a metadata.yaml requirements.txt main.py bridge" in text
+
+
+# ---------------------------------------------------------------- 告警生命周期
+#
+# 背景：sync-upstream 会开两类告警 issue。原实现里
+#   - `upstream lagging`：关闭步骤只在 `steps.roll_pr.outcome == 'success'`
+#     时运行，失败路径永远到不了 → issue 永久滞留；且创建无去重 → 重复堆积
+#   - `sync-upstream roll failed`：**完全没有关闭路径** → 永久 OPEN
+# 实测仓库里 3 条 issue 全部滞留（两条 lagging 互为重复）。
+# 下列断言把「自动关闭」钉死，并防止退回「挂某个步骤 outcome」的写法。
+
+
+def _sync_steps() -> list[dict]:
+    return _load(SYNC_PATH)["jobs"]["roll"]["steps"]
+
+
+def _find_step(keyword: str) -> dict:
+    for s in _sync_steps():
+        if keyword in str(s.get("name", "")):
+            return s
+    raise AssertionError(f"sync-upstream 里找不到步骤：{keyword}")
+
+
+def test_alert_reconcile_step_exists_and_runs_always() -> None:
+    """必须有一个「对账」步骤，且它与**成功/失败无关**地运行。
+
+    这是本组断言的核心：关闭动作若挂在某个步骤的 outcome 上，失败路径就到不了，
+    issue 必然滞留。判定依据必须是「整条流水线的健康结论」，而非某一个步骤。
+    """
+    step = _find_step("告警对账")
+    cond = str(step.get("if", ""))
+    assert "always()" in cond, (
+        f"对账步骤必须用 always() 运行（否则又回到「只在某分支关闭」）：{cond}"
+    )
+
+
+def test_alert_reconcile_closes_both_alert_types() -> None:
+    """对账必须同时覆盖两类告警标题。"""
+    body = str(_find_step("告警对账").get("run", ""))
+    assert "sync-upstream roll failed" in body, "对账未覆盖失败告警"
+    assert "upstream lagging" in body, "对账未覆盖滞后告警"
+    assert "gh issue close" in body, "对账里没有关闭动作"
+
+
+def test_alert_reconcile_treats_cancelled_as_unhealthy() -> None:
+    """job 被取消时**不得**判为健康。
+
+    取消 = 没有验证过任何东西。若此判健康，就会误关告警、把真实问题掩盖掉。
+    该分支由真值表验证时发现（11 例里唯一失败的一例）。
+
+    断言必须**锚定 JOB_STATUS 那一行**：早先只写 `'"cancelled"' in body` 是无效的
+    ——`cancelled` 在更上面的步骤 outcome 循环里也出现，于是把 JOB_STATUS 的
+    cancelled 判定删掉后断言照绿（反向验证实测）。必须精确到行。
+    """
+    body = str(_find_step("告警对账").get("run", ""))
+    # 找到 job.status 兜底那一行的 if 判断
+    lines = [
+        ln.strip()
+        for ln in body.splitlines()
+        if "JOB_STATUS" in ln and ln.strip().startswith("if ")
+    ]
+    assert lines, "找不到 job.status 兜底判定行"
+    job_if = lines[0]
+    assert '"failure"' in job_if, f"job.status 兜底未认 failure：{job_if}"
+    assert '"cancelled"' in job_if, (
+        f"job.status 兜底未认 cancelled——取消时会被误判为健康并关闭告警：{job_if}"
+    )
+
+
+def test_alert_reconcile_has_no_set_e_landmine() -> None:
+    """不得使用 `cond && assign` 形态的条件赋值。
+
+    在 `set -e` 下，条件为假时复合命令返回 1 → 脚本被静默中止，
+    `healthy` 永远写不进 GITHUB_OUTPUT → 后续步骤恒判「不健康」
+    → 自动关闭被永久锁死。必须用显式 if 块。
+    """
+    body = str(_find_step("告警对账").get("run", ""))
+    # 排除注释行后，检查是否存在 `[ ... ] && 变量=值` 这种形态
+    code_lines = [ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    offenders = [
+        ln.strip()
+        for ln in code_lines
+        if re.search(r"^\s*\[.*\]\s*&&\s*\w+=", ln) or re.search(r";\s*\[.*\]\s*&&\s*\w+=", ln)
+    ]
+    assert not offenders, f"存在 set -e 陷阱式的条件赋值（会锁死自动关闭）：{offenders}"
+
+
+def test_alert_reconcile_declares_healthy_output_in_all_paths() -> None:
+    """两条分支都必须写出 healthy，否则下游 `!= 'true'` 判断会退化。"""
+    body = str(_find_step("告警对账").get("run", ""))
+    assert "healthy=false" in body and "healthy=true" in body, (
+        "对账步骤必须在健康与不健康两条分支上都写 healthy 输出"
+    )
+    # 且这两次写入都要落到 GITHUB_OUTPUT
+    assert body.count('>> "$GITHUB_OUTPUT"') >= 2, "healthy 的两条分支都应写入 $GITHUB_OUTPUT"
+
+
+def test_lagging_alert_has_dedup_guard() -> None:
+    """滞后告警的创建必须有去重（原实现缺此步 → 实测产生重复 issue）。"""
+    body = str(_find_step("滞后告警").get("run", ""))
+    assert "in:title state:open" in body, "滞后告警缺去重查询"
+    assert "跳过重复创建" in body, "滞后告警缺去重短路"
+
+
+def test_alerts_are_gated_on_reconcile_health_not_step_outcome() -> None:
+    """创建告警的条件必须依赖对账结论，而不是某一步的 outcome。
+
+    这样「健康就不开、不健康才开」与「健康就关」共用同一个判据，
+    不会出现两个判据漂移（一边认为健康关了告警，另一边又开一条）。
+    """
+    for keyword in ("滞后告警", "失败告警"):
+        cond = str(_find_step(keyword).get("if", ""))
+        assert "steps.reconcile.outputs.healthy" in cond, f"{keyword} 的条件未依赖对账结论：{cond}"
+
+
+def test_alert_creation_is_ordered_after_reconcile() -> None:
+    """对账步骤必须排在两个创建步骤**之前**。
+
+    先关后开：若创建在前，同一轮里刚创建的告警会被紧随其后的对账关掉
+    （当本轮健康时），反而丢失信号。
+    """
+    names = [str(s.get("name", "")) for s in _sync_steps()]
+    idx_reconcile = next(i for i, n in enumerate(names) if "告警对账" in n)
+    for keyword in ("滞后告警", "失败告警"):
+        idx = next(i for i, n in enumerate(names) if keyword in n)
+        assert idx_reconcile < idx, (
+            f"「{keyword}」排在对账之前（第 {idx} 步 vs 第 {idx_reconcile} 步）——先开后会自关"
+        )
+
+
+def test_alert_reconcile_outcome_refs_are_real_step_ids() -> None:
+    """对账里引用的 `steps.<id>.outcome` 必须是**真实存在**的步骤 id。
+
+    踩过的坑：早先写了 `O_ROLL: ${{ steps.roll.outcome }}`，而工作流里根本没有
+    `id: roll`（真正干活的步骤 id 是 `roll_pr`）。PyYAML 读得进来、pytest 全绿，
+    只有 actionlint 的表达式检查会红——**本地测试没覆盖的盲区靠 CI 兜**。
+    所以这里主动做一遍静态校验。
+    """
+    steps = _sync_steps()
+    defined = {str(s["id"]) for s in steps if "id" in s}
+    assert defined, "sync-upstream 的步骤没有任何 id，解析可能出错"
+
+    body = str(_find_step("告警对账").get("run", ""))
+    env = _find_step("告警对账").get("env", {}) or {}
+
+    # env 值里的 ${{ steps.X.outcome }} / ${{ steps.X.outputs.Y }}
+    for key, val in env.items():
+        for ref in re.findall(r"steps\.([A-Za-z_][A-Za-z0-9_-]*)\.", str(val)):
+            assert ref in defined, (
+                f"对账 env {key} 引用了不存在的步骤 id `{ref}`"
+                f"（已定义：{sorted(defined)}）——actionlint 会判红"
+            )
+
+    # run 脚本里若出现 ${{ steps.X.outcome }} 同样校验
+    for ref in re.findall(r"steps\.([A-Za-z_][A-Za-z0-9_-]*)\.", body):
+        assert ref in defined, f"对账 run 引用了不存在的步骤 id `{ref}`"
+
+
+def test_alert_reconcile_env_lists_every_gating_step() -> None:
+    """`detect` 与 `roll_pr` 是本工作流仅有的两个「失败即 roll 失败」的步骤。
+
+    对账必须把它们的 outcome 都抓进 env，否则该步骤失败时对账看不到，
+    会把不健康的 run 判成健康 → 误关告警。
+    """
+    env = _find_step("告警对账").get("env", {}) or {}
+    vals = " ".join(str(v) for v in env.values())
+    assert "steps.detect.outcome" in vals, "对账未采集 detect 的 outcome"
+    assert "steps.roll_pr.outcome" in vals, "对账未采集 roll_pr 的 outcome"

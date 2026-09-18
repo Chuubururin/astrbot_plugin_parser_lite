@@ -406,20 +406,89 @@ jobs:
             gh pr merge --auto --squash "$BRANCH" || echo "::warning::auto-merge 未能启用（检查仓库 Allow auto-merge 与 required checks 配置）"
           fi
 
-      - name: 追平后自动关闭滞后告警
-        if: steps.roll_pr.outcome == 'success' && steps.detect.outputs.ancestor_ok == 'true'
+      # ---- 告警生命周期：先对账关闭、再按需创建 -------------------------------
+      # 设计要点：**关闭不挂在某个步骤的 outcome 上，而挂在整条流水线的健康结论上。**
+      # 原实现把关闭挂在 `steps.roll_pr.outcome == 'success'`，于是失败路径永远
+      # 到不了关闭分支 → lagging issue 永久滞留；而 failed issue 干脆没有任何
+      # 关闭路径。两者都会让「有哪些在案问题」这个信号逐渐失真。
+      #
+      # 健康判据（保守）：本 run **跑完且成功**才算健康。
+      # 熔断跳过（breaker.skip=true）**不算**健康——那是「根本没验证」，
+      # 关掉告警只会掩盖问题。
+      - name: 告警对账（本 run 健康 → 关闭在案告警）
+        id: reconcile
+        # always()：健康路径与失败路径都要执行对账，否则又回到「关闭只在成功分支」
+        if: ${{ always() && steps.breaker.outputs.skip != 'true' }}
         env:
-          NEW_STANDALONE: ${{ steps.detect.outputs.new_standalone }}
+          RUN_ID: ${{ github.run_id }}
+          ROLL_OUTCOME: ${{ steps.roll_pr.outcome }}
+          # 逐步骤结论：GitHub 在步骤级给出 outcome（success/failure/cancelled/
+          # skipped），比在 shell 里猜可靠。**新增会阻断 roll 的步骤时须同步加进
+          # 这里**，否则该步骤的失败不会阻止自动关闭（漏判 = 误关告警）。
+          # 注意：id 必须是**真实存在**的步骤 id —— actionlint 会校验
+          # `steps.<id>.outcome` 里的 id 是否已定义，写错会直接判红。
+          O_BREAKER: ${{ steps.breaker.outcome }}
+          O_DETECT: ${{ steps.detect.outcome }}
+          O_ROLL_PR: ${{ steps.roll_pr.outcome }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
-          for n in $(gh issue list --search "upstream lagging in:title state:open" --json number --jq '.[].number'); do
-            gh issue close "$n" --comment "已追平：standalone $(echo "$NEW_STANDALONE" | cut -c1-12) 入库" || true
+          # 健康 ⇔ 没有任何前置步骤失败/取消。
+          # 注意几个**不是**失败的形态：
+          #   - skipped：条件未满足而跳过（合法，如上游无变化时跳过 roll）
+          #   - changed == 'false'：上游无变化空转（正常工作）
+          # 故判据是「存在 failure/cancelled」而非「不是全 success」。
+          #
+          # 写法纪律：**绝不用 `cond && assign`** —— set -e 下条件为假时整个
+          # 复合命令返回 1，会静默中止脚本（healthy 写不出去 → 自动关闭被永久
+          # 锁死）。一律用显式 if 块。
+          unhealthy=false
+          for outcome in "$O_BREAKER" "$O_DETECT" "$O_ROLL_PR"; do
+            if [ "$outcome" = "failure" ] || [ "$outcome" = "cancelled" ]; then
+              unhealthy=true
+            fi
           done
+          # job.status 兜底：任何未被上面列举到的步骤失败/取消时，它会变成
+          # failure/cancelled。这一步只用于**判定不健康**（保守方向），
+          # 不会误关告警。
+          # 为什么 cancelled 也要算：工作流被中途取消 = 没有验证过任何东西，
+          # 此时若判健康就会**误关告警**，把真实问题掩盖掉。
+          if [ "$JOB_STATUS" = "failure" ] || [ "$JOB_STATUS" = "cancelled" ]; then
+            unhealthy=true
+          fi
+
+          if [ "$unhealthy" = "true" ]; then
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::本 run 不健康（job=${JOB_STATUS}，roll_pr=${ROLL_OUTCOME}）——保留在案告警，等待修复"
+            exit 0
+          fi
+          echo "healthy=true" >> "$GITHUB_OUTPUT"
+
+          # 本 run 健康 → 关闭所有在案告警。
+          # 两个标题前缀都要扫：一次修复可能同时解掉「失败」与「滞后」两个信号。
+          closed=0
+          for prefix in "sync-upstream roll failed" "upstream lagging"; do
+            # 命令替换放进 for 列表前先落变量：gh 失败时 set -e 会捕获，
+            # 而不是被 for 的空列表静默吞掉
+            nums="$(gh issue list --search "${prefix} in:title state:open" \
+                    --json number --jq '.[].number')"
+            for n in $nums; do
+              if gh issue close "$n" \
+                   --comment "已解决：sync-upstream run ${RUN_ID} 全绿（上游快照已追平）。本告警由工作流自动关闭。"; then
+                echo "已关闭 #${n}（${prefix}）"
+                closed=$((closed + 1))
+              else
+                echo "::warning::关闭 issue #${n} 失败（权限或 API 波动），留待下轮对账"
+              fi
+            done
+          done
+          echo "::notice::对账完成：关闭 ${closed} 条在案告警"
 
       - name: 滞后告警（上次成功同步距今超过 STALENESS_HOURS 且仍未追平）
         if: >-
-          ${{ !cancelled() && steps.detect.outputs.changed == 'true' &&
-              steps.roll_pr.outcome != 'success' }}
+          ${{ !cancelled() && steps.breaker.outputs.skip != 'true' &&
+              steps.detect.outputs.changed == 'true' &&
+              steps.reconcile.outputs.healthy != 'true' }}
         run: |
           set -euo pipefail
           # 读 origin/dev 基线而非工作树副本：失败路径上 STATE_FILE 已被本 run
@@ -427,18 +496,25 @@ jobs:
           # 基线取 dev 而非 main：state 由 roll 提交进 dev，main 只在 promote 时
           # 才拿到它——取 main 会把「已同步但未 promote」误报成滞后。
           age_hours="$(git show "origin/dev:${STATE_FILE}" | python -c "import datetime as dt,json,sys;print((dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(json.load(sys.stdin)['synced_at'])).total_seconds()//3600)")"
-          if [ "${age_hours%%.*}" -ge "$STALENESS_HOURS" ]; then
-            gh issue create --title "upstream lagging：同步超过 ${STALENESS_HOURS}h 未追平" \
-              --body "上游 standalone 已领先但快照未入库（上次成功同步于 ${age_hours}h 前）。
+          if [ "${age_hours%%.*}" -lt "$STALENESS_HOURS" ]; then
+            exit 0
+          fi
+          # 去重：与失败告警对齐。原实现缺这一步，实测已产生 2 条重复的 lagging。
+          existing="$(gh issue list --search "upstream lagging in:title state:open" --json number --jq 'length')"
+          if [ "${existing:-0}" != "0" ]; then
+            echo "已有在案滞后告警（${existing} 条），跳过重复创建"
+            exit 0
+          fi
+          gh issue create --title "upstream lagging：同步超过 ${STALENESS_HOURS}h 未追平" \
+            --body "上游 standalone 已领先但快照未入库（上次成功同步于 ${age_hours}h 前）。
           playbook：
           1. 日志：gh run view --log-failed \${run_id}
           2. 手动重跑：gh workflow run sync-upstream -f force=true
           3. 回滚：见最近 sync PR 页脚（revert → lkg 分支/release tag）
           4. 升级：vendor 失联 >24h 或熔断时人工介入" || true
-          fi
 
       - name: 失败告警（含 playbook）
-        if: failure()
+        if: ${{ failure() && steps.reconcile.outputs.healthy != 'true' }}
         env:
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -454,4 +530,5 @@ jobs:
           1. 看日志：gh run view ${RUN_ID} --log-failed
           2. 手动重跑：gh workflow run sync-upstream -f force=true
           3. 回滚：lkg 分支 = 上一已验证快照（无则用最近 release tag）；revert 最近 sync PR（页脚含完整序列）
-          4. 升级条件：连续 3 次熔断、上游失联 >24h → 人工介入并通知上游" || true
+          4. 升级条件：连续 3 次熔断、上游失联 >24h → 人工介入并通知上游
+          5. 关闭：修复后下一次成功的 sync-upstream 会自动关闭本 issue" || true

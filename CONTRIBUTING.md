@@ -274,11 +274,23 @@ git commit --allow-empty -m "[promote] release v1.3.7"
 
   | 文件 | 触发 | 作用 |
   | --- | --- | --- |
-  | `ci.yml` | PR（任意 base）+ push 到 `dev` | 三道 required checks |
-  | `release.yml` | tag `v*` | 构建 zip + SLSA attestation + 发布 |
-  | `sync-upstream.yml` | 每日 cron + 手动 | 滚动同步上游快照 → PR(base=dev) |
+  | `ci.yml` | PR（任意 base）+ push 到 `dev` | 三道 required checks：`lint` / `typecheck` / `test` |
   | `main-pr-target-guard.yml` | PR(base=main) | 拒绝打到 `main` 的 PR（见 8.2） |
   | `promote-dev-to-main.yml` | push 到 `dev`（`[promote]` 前缀）+ 手动 | 门禁后把 `main` 快进到 `dev` |
+  | `release.yml` | push tag `v*` | 构建 zip + SLSA attestation + 发布 |
+  | `sync-upstream.yml` | 每日 cron（`17 17 * * *`）+ 手动 | 滚动同步上游快照 → PR(base=dev) |
+
+  依赖关系（谁等谁）：
+
+  ```
+  PR → dev ──ci.yml（必过）──┬── promote-dev-to-main.yml ──→ main ──→ tag v* ──→ release.yml
+                            └──（PR 合入 dev 后）sync-upstream.yml 的产出也走同一条 ci 门
+  ```
+
+  `main` 不被任何工作流直接推：唯一的写入者是 `promote-dev-to-main.yml`；
+  `main-pr-target-guard.yml` 保证没有 PR 能以 `main` 为 base。
+  注意 **用 `GITHUB_TOKEN` 推的提交不会再触发工作流**，所以 promote 自己也带
+  全套门禁，而不是「推完等 CI」。
 
 ---
 
@@ -332,9 +344,6 @@ gh workflow run promote-dev-to-main
 **熔断**：`sync-upstream` 连续 3 次失败 → cron 自动空转（读 run 历史判定，
 不回写文件）。修复后 `force=true` 手动恢复。
 
-**staleness**：上游已领先但上次成功同步距今超过 2 个同步周期 → 自动开 issue；
-追平后自动关闭。
-
 **keepalive**：GitHub 对 60 天无活动的仓库自动停用 scheduled workflow。
 `sync-upstream` 在「上游无变化」时会检查仓库最近提交时间，超过 50 天自动推一个
 空 keepalive 提交（`[skip ci]`）到 **`dev`**（不是 `main`——`main` 只由 promote
@@ -344,6 +353,40 @@ gh workflow run promote-dev-to-main
 `dev`（分层 automerge 可用时自动合）。**它不会自动改 `main`** —— 何时发布由人
 决定：`gh workflow run promote-dev-to-main`。故意如此：上游更新与对外发布是两件
 节奏不同的事。
+
+### 12.1 告警 issue 的生命周期
+
+`sync-upstream` 只有两类自动开 issue 的告警，**两类都会在问题解决后自动关闭**：
+
+| 标题前缀 | 含义 | 开启条件 |
+| --- | --- | --- |
+| `sync-upstream roll failed` | 本轮 run 自身失败（vendor / 注入 / 契约测试红） | `failure()`，带排查 playbook |
+| `upstream lagging` | 上游已领先，但上次成功同步距今超过 `STALENESS_HOURS`（48h） | 变化已检出却长期追不平 |
+
+关闭由 **第 16 步「告警对账」**（`id: reconcile`，`if: always() && breaker 未 skip`）
+统一负责。它先给本 run 算一个**健康度**，健康才关闭：
+
+- **不健康**（保守判定，宁可漏关不可误关）：任一关键步骤（`detect` / `roll_pr` /
+  `roll`）结果为 `failure` 或 `cancelled`；或 `job.status` 为 `failure` /
+  `cancelled`。
+- **健康**：上述都不成立。注意 **`skipped` 与「上游无变化空退出」都算健康** ——
+  幂等收敛的 run 本来就不该动告警。
+
+健康时，按标题前缀查 `state:open` 并逐条 `gh issue close` + 留言指认关闭它的
+`run_id`；单条关闭失败只发 `::warning::`，留待下一轮对账（不会因一个 API 抖动
+把整轮 run 判红）。
+
+**先关后开**：对账（第 16 步）刻意排在两个开 issue 的步骤（17 / 18）**之前**，
+否则本轮新开的告警会被同一轮立刻关掉。
+
+**为什么以前不自动关**（已修）：旧实现把「关闭」写在 `roll_pr` 的**成功分支**
+里，而告警恰恰只在失败分支产生 —— 关闭代码永远不可达；`roll failed` 这类更是
+压根没有关闭路径。两处叠加后，告警一旦开出就是**永久 OPEN**（仓库里同时出现过
+2 条重复的 `upstream lagging`，因为创建侧也没有去重）。现在创建侧已加去重守卫
+（开前先查同名 open issue），关闭侧改由对账统一负责。
+
+**人工处置**：确属误报可直接关；下次成功 run 的对账不会重开。若想强制刷新，
+`gh workflow run sync-upstream -f force=true` 会跳过熔断跑一轮完整对账。
 
 ---
 
