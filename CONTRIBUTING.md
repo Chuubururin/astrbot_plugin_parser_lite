@@ -336,9 +336,9 @@ gh run view <run_id> --log-failed
 gh workflow run sync-upstream --ref dev -f force=true
 # 停用滚子
 gh workflow disable sync-upstream
-# 提权 dev → main（预演 / 实际）
-gh workflow run promote-dev-to-main -f dry_run=true
-gh workflow run promote-dev-to-main
+# 提权 dev → main（预演 / 实际）——**必须带 --ref dev**，理由见 12.2
+gh workflow run promote-dev-to-main --ref dev -f dry_run=true
+gh workflow run promote-dev-to-main --ref dev
 ```
 
 **熔断**：`sync-upstream` 连续 3 次失败 → cron 自动空转（读 run 历史判定，
@@ -390,11 +390,18 @@ gh workflow run promote-dev-to-main
 
 ### 12.2 手动触发时必须带 `--ref dev`
 
-`main` 是默认分支，而 **`schedule` 与不带 ref 的 `workflow_dispatch` 取的是
-默认分支上的 workflow 定义**——两者都会读到 `main` 那份（即**上一次 promote
-时的**旧版本），而不是 `dev` 上刚改完的新版本。
+`main` 是默认分支，而**不同事件读的是不同 ref 上的 workflow 定义**。
+把这条规则记牢，本节的其余内容都是它的推论：
 
-实测（同一修复已推到 `dev` 之后）：
+| 事件 | 读哪个 ref 的定义 | 文件必须在默认分支上？ |
+| --- | --- | --- |
+| `push` | **被推送的那个 ref** | 否（文档明说含未合入默认分支的工作流） |
+| `pull_request` | **PR 的合并提交**（head 并入 base 的结果） | 否 |
+| `schedule` | **默认分支的最新提交** | **是** |
+| `workflow_dispatch`（不带 `--ref`） | **默认分支** | **是** |
+| `workflow_dispatch --ref X` | **`X`** | 是（须先满足上一条） |
+
+实测证据：
 
 | 触发方式 | run 的 `headSha` | 取到的定义 |
 | --- | --- | --- |
@@ -402,19 +409,81 @@ gh workflow run promote-dev-to-main
 | `gh workflow run sync-upstream` | `main` 的 sha | 旧 |
 | `gh workflow run sync-upstream --ref dev` | `dev` 的 sha | **新** |
 
+**`promote-dev-to-main` 更严重：不带 `--ref` 直接报错**，不是「跑了旧版本」而是
+**根本跑不起来**：
+
+```
+$ gh workflow run promote-dev-to-main -f dry_run=true
+could not create workflow dispatch event: HTTP 422: Workflow does not have
+'workflow_dispatch' trigger
+$ gh workflow run promote-dev-to-main --ref dev -f dry_run=true     # ✓ 成功
+```
+
+原因：`main` 上**没有** `promote-dev-to-main.yml`（它是随本次分支模型才引入的，
+只在 `dev` / `lkg` 上）。默认分支上找不到带 `workflow_dispatch` 的文件，
+dispatch API 就判 422。同理，`main-pr-target-guard.yml` 也不在 `main` 上。
+
 所以：
 
 ```bash
 # 正确：立刻用 dev 上的最新定义跑
 gh workflow run sync-upstream --ref dev -f force=true
-# 错误：会用 main 上的（可能过时的）定义跑，你以为在验证新逻辑，其实没有
+gh workflow run promote-dev-to-main --ref dev -f dry_run=true
+# 错误 A：会用 main 上的（可能过时的）定义跑，你以为在验证新逻辑，其实没有
 gh workflow run sync-upstream -f force=true
+# 错误 B：直接 422 失败
+gh workflow run promote-dev-to-main -f dry_run=true
 ```
 
-**推论**：对 `sync-upstream` 这类「先合并进 `dev`、再 promote 到 `main`」的
-定时工作流，**改动只有在 promote 之后才对 cron 生效**。这是把强制力放在
-workflow 里的固有代价；调 `sync-upstream` 自身时务必用 `--ref dev` 验证，
+**推论一**：对这类「先合并进 `dev`、再 promote 到 `main`」的工作流，
+**改动只有在 promote 之后才对 cron 与无 ref 的 dispatch 生效**。
+这是把强制力放在 workflow 里的固有代价；调它们时务必用 `--ref dev`，
 不要因为 cron 表现还是旧的而误判改动无效。
+
+**推论二（安全）**：`pull_request` 读的是**合并提交**的定义，所以
+`main-pr-target-guard` 只在「PR 的 head 侧含该文件」时才生效。
+从 `dev` 拉的分支含它 → 守卫生效；**从 `main` 拉的分支不含它 → 守卫不触发**，
+该 PR 不会被拒。这个缺口会随**首次 promote**（`main` 拿到该文件）自动闭合。
+在此之前，若有人从 `main` 拉分支再开 base=main 的 PR，守卫拦不住。
+
+### 12.3 各分支上有哪些工作流
+
+工作流文件是**按分支存的**，某个分支上能不能跑某个工作流，先看该分支有没有这个文件：
+
+| 工作流文件 | `dev` | `lkg` | `main` |
+| --- | :-: | :-: | :-: |
+| `ci.yml` | ✓ | ✓ | ✓ |
+| `main-pr-target-guard.yml` | ✓ | ✓ | **✗** |
+| `promote-dev-to-main.yml` | ✓ | ✓ | **✗** |
+| `release.yml` | ✓ | ✓ | ✓ |
+| `sync-upstream.yml` | ✓ | ✓ | ✓ |
+
+**`main` 缺两个文件，是「尚未首次 promote」的必然结果** —— 这两个工作流随本次
+分支模型才引入，只在 `dev` / `lkg` 上；`main` 仍是引入前的基线提交。
+**首次 promote 之后 `main` 会补齐**。
+
+再叠加各工作流的 `on:` 过滤器，得到「实际会跑」的矩阵：
+
+| 工作流 | 触发 | `dev` | `lkg` | `main` | 其他分支 / tag |
+| --- | --- | :-: | :-: | :-: | --- |
+| `ci.yml` | PR（任意 base） | — | — | — | **任何 PR 都跑**（读合并提交） |
+| `ci.yml` | push | **✓** | ✗ | ✗ | ✗（过滤器只认 `dev`） |
+| `main-pr-target-guard.yml` | PR base=main | — | — | — | head 侧含该文件时跑 |
+| `promote-dev-to-main.yml` | push | **✓** | ✗ | ✗ | ✗ |
+| `promote-dev-to-main.yml` | 手动 | ✓（`--ref dev`） | ✓ | **✗ 422** | 需 `--ref` |
+| `release.yml` | push tag `v*` | ✓ | ✓ | ✓ | **任何 ref 的 tag** |
+| `sync-upstream.yml` | cron | **✓**（定义取自 `main`） | ✗ | ✓（旧定义） | ✗ |
+| `sync-upstream.yml` | 手动 | ✓（`--ref dev`） | ✓ | ✓（旧定义） | 需 `--ref` |
+
+三条要点：
+
+1. **`ci.yml` 的 push 触发只认 `dev`**，所以 `main` 上永远不会因 push 而跑 CI
+   —— 这不是缺陷，而是刻意为之（`GITHUB_TOKEN` 推的提交本就不触发工作流，
+   把 `main` 留在列表里只会制造「main 有 CI 保护」的错觉）。
+2. **`lkg` 上虽然五个文件都在，但它不该被用来跑任何东西** —— 它是回滚锚点，
+   不是工作分支。`lkg` 存在是为了 `checkout` 出「上一已验证快照」。
+3. **`sync-upstream` 的 cron 行是「定义取自 `main`」** —— 即改动要等 promote
+   才生效（见 12.2）。
 
 ---
 

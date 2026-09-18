@@ -120,6 +120,15 @@ jobs:
           python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
           python -m pip install --no-deps "astrbot>=4.28,<5"
           python -m pip install -r tests/requirements-test.txt
+          # 本 job 直接 `python -m ruff` / `scripts/typecheck.py`，**不走** pre-commit
+          # 的隔离环境，故 ruff / mypy 必须装进 venv。漏装会让门禁以
+          # `No module named ruff` 假红 —— 而那是环境缺失不是代码问题，
+          # 却会把**整条提权通道锁死**（门禁过不了 → main 永远推不动）。
+          # ruff 版本对齐 config/.pre-commit-config.yaml 的 rev，避免与 ci.yml
+          # 的 lint job（走 pre-commit）产生格式化判定分歧。
+          # types-qrcode：qrcode 无 py.typed 且不在 ignore_missing_imports 名单里，
+          # 缺存根会让 mypy 报 bridge/render.py import-untyped。
+          python -m pip install "ruff==0.16.7" mypy types-qrcode
 
       - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
         run: python scripts/check_test_deps.py

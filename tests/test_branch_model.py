@@ -292,6 +292,20 @@ def _find_step(keyword: str) -> dict:
     raise AssertionError(f"sync-upstream 里找不到步骤：{keyword}")
 
 
+def _install_lines(step: dict) -> str:
+    """取步骤 run 块里**可执行**的行，剥掉注释。
+
+    为什么必须剥注释：本仓库的步骤注释里大量提到包名（「漏装 pytest 会让…」
+    「types-qrcode：qrcode 无 py.typed」）。若直接对整段 run 做
+    `"pytest" in body`，**注释本身就能满足断言** —— 把安装行删掉测试照绿。
+    反向验证抓到过这个漏洞（去掉 mypy / types-qrcode 两个用例均 MISSED）。
+    """
+    body = str(step.get("run", ""))
+    return "\n".join(
+        ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")
+    )
+
+
 def test_alert_reconcile_step_exists_and_runs_always() -> None:
     """必须有一个「对账」步骤，且它与**成功/失败无关**地运行。
 
@@ -471,7 +485,7 @@ def test_sync_upstream_installs_test_deps_for_dry_run_pytest() -> None:
     steps = _sync_steps()
     install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
     assert install is not None, "sync-upstream 缺 Install deps 步骤"
-    body = str(install.get("run", ""))
+    body = _install_lines(install)
     for pkg in ("pytest", "pytest-asyncio", "syrupy"):
         assert pkg in body, f"Install deps 未装 {pkg}——dry-run 契约测试会假红"
     assert "astrbot" in body, "Install deps 未装 astrbot——导入链测试会假红"
@@ -496,3 +510,97 @@ def test_sync_upstream_still_runs_full_pytest_dry_run() -> None:
         assert not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", args), (
             f"dry-run 被窄化（出现 {flag}）：{body}"
         )
+
+
+def test_promote_installs_its_own_gate_tooling() -> None:
+    """promote 直接调 `python -m ruff` / mypy，就必须把它们装进 venv。
+
+    实测事故：`Install deps` 装了 pytest 却没装 ruff，于是提权门禁的第一步
+    `lint（ruff check）` 以 `No module named ruff` 假红 —— 门禁过不了，
+    **整条提权通道被锁死**（main 永远推不动）。dry-run run 35383666398 复现。
+
+    注意 promote 与 ci.yml 的 lint job 取 ruff 的方式不同：ci.yml 走 pre-commit
+    （ruff 在 pre-commit 的隔离环境里），promote 是裸 `python -m ruff`，
+    所以必须显式安装，且版本要与 pre-commit 的 rev 对齐以免格式化判定分歧。
+    """
+    doc = _load(PROMOTE_PATH)
+    steps = doc["jobs"]["promote"]["steps"]
+    install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
+    assert install is not None, "promote 缺 Install deps 步骤"
+    body = _install_lines(install)
+    for pkg in ("ruff", "mypy"):
+        assert pkg in body, f"promote 的 Install deps 未装 {pkg}——提权门禁会假红并锁死"
+    assert "types-qrcode" in body, "缺 types-qrcode 会让 mypy 报 import-untyped"
+
+    # ruff 版本必须与 pre-commit 配置的 rev 一致
+    precommit = (REPO_ROOT / "config" / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    m = re.search(r"ruff-pre-commit\s*\n\s*rev:\s*(v[\d.]+)", precommit)
+    assert m, "pre-commit 配置里找不到 ruff-pre-commit 的 rev"
+    rev = m.group(1).lstrip("v")
+    assert f"ruff=={rev}" in body, (
+        f"promote 装的 ruff 版本未与 pre-commit 的 rev v{rev} 对齐——"
+        f"两处 ruff 不一致会让格式化判定分歧"
+    )
+
+
+def test_promote_gate_commands_all_have_their_tooling() -> None:
+    """逐条对账：promote 跑什么门禁，就得装什么工具。
+
+    这条比上一条更耐用：新增门禁步骤时会自动暴露缺装。
+    """
+    doc = _load(PROMOTE_PATH)
+    steps = doc["jobs"]["promote"]["steps"]
+    install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
+    assert install is not None
+    installed = _install_lines(install)
+
+    # 命令里出现的「python -m <mod>」必须在 install 里有对应包
+    mod_to_pkg = {"ruff": "ruff", "pytest": "pytest", "mypy": "mypy"}
+    ran: set[str] = set()
+    for s in steps:
+        for mod in re.findall(r"python\s+-m\s+([a-z_]+)", str(s.get("run", ""))):
+            ran.add(mod)
+    for mod in sorted(ran):
+        pkg = mod_to_pkg.get(mod)
+        if pkg is None:
+            continue
+        assert pkg in installed, (
+            f"promote 跑了 `python -m {mod}` 但 Install deps 没装 {pkg}——会假红"
+        )
+
+
+def test_docs_document_ref_dev_for_both_manual_workflows() -> None:
+    """速查块里两个手动触发命令都必须带 `--ref dev`。
+
+    `promote-dev-to-main` 不带 ref 会直接 HTTP 422（main 上没有该文件），
+    实测确认；`sync-upstream` 不带 ref 会静默用 main 上的旧定义。
+    两种失败形态不同，但都源于「默认分支是 main」。
+    """
+    text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "gh workflow run sync-upstream --ref dev" in text, (
+        "速查块的 sync-upstream 手动触发未带 --ref dev"
+    )
+    assert "gh workflow run promote-dev-to-main --ref dev" in text, (
+        "速查块的 promote 手动触发未带 --ref dev——会 422"
+    )
+    # 速查块（§12 的第一个 bash 代码块）里不得留下裸调用形态。
+    # 注意不能全文搜：§12.2 的「所以：」块里**故意**展示了会 422 的错误写法
+    # 作为反例，全文搜会把那个反例当成违规（自己踩过）。
+    section = text.split("## 12. 运维速查", 1)[1]
+    block = section.split("```bash", 1)[1].split("```", 1)[0]
+    assert not re.search(r"gh workflow run promote-dev-to-main\s+-f", block), (
+        "速查块里仍有无 --ref 的 promote 调用（会 422）"
+    )
+
+
+def test_docs_contain_per_branch_workflow_matrix() -> None:
+    """§12.3 的分支×工作流矩阵是运维参考，别被删掉。
+
+    矩阵记录了「main 上缺 main-pr-target-guard / promote-dev-to-main」这一
+    非直观事实——它是「尚未首次 promote」的必然结果，也是守卫可被绕过的原因。
+    """
+    text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "12.3 各分支上有哪些工作流" in text, "缺 §12.3 分支×工作流矩阵"
+    for name in ("main-pr-target-guard.yml", "promote-dev-to-main.yml"):
+        assert name in text, f"矩阵未提及 {name}"
+    assert "首次 promote" in text, "未说明「main 缺文件是尚未首次 promote 的必然结果」"
