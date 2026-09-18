@@ -332,8 +332,8 @@ SLSA attestation 保留在 Release 里可追溯。
 ```bash
 # 看失败日志
 gh run view <run_id> --log-failed
-# 手动重跑同步（绕过熔断）
-gh workflow run sync-upstream -f force=true
+# 手动重跑同步（绕过熔断）——**必须带 --ref dev**，理由见 12.2
+gh workflow run sync-upstream --ref dev -f force=true
 # 停用滚子
 gh workflow disable sync-upstream
 # 提权 dev → main（预演 / 实际）
@@ -387,6 +387,34 @@ gh workflow run promote-dev-to-main
 
 **人工处置**：确属误报可直接关；下次成功 run 的对账不会重开。若想强制刷新，
 `gh workflow run sync-upstream -f force=true` 会跳过熔断跑一轮完整对账。
+
+### 12.2 手动触发时必须带 `--ref dev`
+
+`main` 是默认分支，而 **`schedule` 与不带 ref 的 `workflow_dispatch` 取的是
+默认分支上的 workflow 定义**——两者都会读到 `main` 那份（即**上一次 promote
+时的**旧版本），而不是 `dev` 上刚改完的新版本。
+
+实测（同一修复已推到 `dev` 之后）：
+
+| 触发方式 | run 的 `headSha` | 取到的定义 |
+| --- | --- | --- |
+| `schedule`（每日 cron） | `main` 的 sha | 旧 |
+| `gh workflow run sync-upstream` | `main` 的 sha | 旧 |
+| `gh workflow run sync-upstream --ref dev` | `dev` 的 sha | **新** |
+
+所以：
+
+```bash
+# 正确：立刻用 dev 上的最新定义跑
+gh workflow run sync-upstream --ref dev -f force=true
+# 错误：会用 main 上的（可能过时的）定义跑，你以为在验证新逻辑，其实没有
+gh workflow run sync-upstream -f force=true
+```
+
+**推论**：对 `sync-upstream` 这类「先合并进 `dev`、再 promote 到 `main`」的
+定时工作流，**改动只有在 promote 之后才对 cron 生效**。这是把强制力放在
+workflow 里的固有代价；调 `sync-upstream` 自身时务必用 `--ref dev` 验证，
+不要因为 cron 表现还是旧的而误判改动无效。
 
 ---
 

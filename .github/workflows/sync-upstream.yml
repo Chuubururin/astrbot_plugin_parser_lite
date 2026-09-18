@@ -77,6 +77,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements/host-provided.txt
+          # dry-run 契约测试要跑全量 pytest，故测试期依赖必须在位。
+          # 与 ci.yml 的 test job 保持一致：漏装 pytest 会让「dry-run 全量契约
+          # 测试」以 No module named pytest 直接红（曾连续 3 次失败并触发熔断），
+          # 而那是环境缺失、不是契约真的破了——假红会掩盖真红。
+          python -m pip install pytest pytest-asyncio syrupy
+          # astrbot 以 --no-deps 装：宿主提供的大件（httpx/pydantic 等）已在
+          # host-provided.txt 里，重复解析会拉进版本冲突。
+          python -m pip install --no-deps "astrbot>=4.28,<5"
+          python -m pip install -r tests/requirements-test.txt
 
       - name: 熔断检查（连续失败达阈值 → cron 空转）
         id: breaker

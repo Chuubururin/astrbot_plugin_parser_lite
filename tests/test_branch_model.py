@@ -437,3 +437,62 @@ def test_alert_reconcile_env_lists_every_gating_step() -> None:
     vals = " ".join(str(v) for v in env.values())
     assert "steps.detect.outcome" in vals, "对账未采集 detect 的 outcome"
     assert "steps.roll_pr.outcome" in vals, "对账未采集 roll_pr 的 outcome"
+
+
+def test_docs_warn_that_dispatch_and_schedule_use_default_branch() -> None:
+    """把「dispatch/schedule 取默认分支定义」这个坑写进 CONTRIBUTING.md。
+
+    实测：`main` 是默认分支时，`schedule` 与不带 ref 的 `workflow_dispatch`
+    都拿 `main` 上的 workflow 定义（run 的 headSha 等于 main 的 sha），
+    因此对 `dev` 上刚改完的 `sync-upstream` 做验证时，**必须** `--ref dev`，
+    否则你以为在验证新逻辑，实际跑的是旧版本。
+
+    这条断言防的是「文档被删掉 → 下次有人又踩」。
+    """
+    text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "--ref dev" in text, "CONTRIBUTING.md 缺「手动触发须带 --ref dev」的说明"
+    assert "默认分支" in text, "缺「dispatch/schedule 取默认分支定义」的解释"
+    # 速查块里的命令也必须是带 ref 的形态，不能留着裸调用
+    assert "gh workflow run sync-upstream --ref dev" in text, (
+        "速查块里的 sync-upstream 手动触发命令未带 --ref dev"
+    )
+
+
+def test_sync_upstream_installs_test_deps_for_dry_run_pytest() -> None:
+    """`sync-upstream` 跑全量 pytest，就必须先装测试期依赖。
+
+    实测事故：`Install deps` 只装了 requirements + host-provided，没有 pytest，
+    于是「dry-run 全量契约测试」以 `No module named pytest` 直接红，连续 3 次
+    触发 MC-11 熔断，把整个同步流水线停摆。
+
+    这类**假红**比真红更糟：它把「环境缺失」伪装成「契约破了」，掩盖真问题。
+    所以这里钉住三样必需品，与 ci.yml 的 test job 对齐。
+    """
+    steps = _sync_steps()
+    install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
+    assert install is not None, "sync-upstream 缺 Install deps 步骤"
+    body = str(install.get("run", ""))
+    for pkg in ("pytest", "pytest-asyncio", "syrupy"):
+        assert pkg in body, f"Install deps 未装 {pkg}——dry-run 契约测试会假红"
+    assert "astrbot" in body, "Install deps 未装 astrbot——导入链测试会假红"
+    assert "tests/requirements-test.txt" in body, "Install deps 未装测试专用依赖"
+
+
+def test_sync_upstream_still_runs_full_pytest_dry_run() -> None:
+    """dry-run 必须是**全量** pytest，不能为了躲依赖问题退化成子集。"""
+    steps = _sync_steps()
+    dry = next((s for s in steps if "dry-run" in str(s.get("name", ""))), None)
+    assert dry is not None, "缺 dry-run 契约测试步骤"
+    body = str(dry.get("run", ""))
+    assert "pytest" in body, "dry-run 未跑 pytest"
+    assert "-c config/pyproject.toml" in body, "dry-run 未用项目 pytest 配置"
+    # 不得出现 -k / -m 之类的**筛选**（那会让 dry-run 悄悄只跑一部分）。
+    # 注意不能直接 substring 查 " -m "：`python -m pytest` 里的 `-m` 是
+    # 「跑模块」而非「标记筛选」，裸匹配会误伤（自己踩过）。
+    # 做法：剥掉 `python -m ` 前缀后再看 pytest 的参数串。
+    args = re.sub(r"^\s*python\s+-m\s+", "", body.strip())
+    args = re.sub(r"^pytest\s+", "", args)
+    for flag in ("-k", "-m", "--deselect", "--ignore"):
+        assert not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", args), (
+            f"dry-run 被窄化（出现 {flag}）：{body}"
+        )
