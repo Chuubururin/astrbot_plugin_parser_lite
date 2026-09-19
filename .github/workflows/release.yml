@@ -1,8 +1,10 @@
 name: release
 
 # 发布信任链（SLSA 对标）：
-# tag v* → 确定性测试 → 构建 zip（显式白名单）→ actions/attest 生成
-# SLSA provenance（id-token 短期 Sigstore 证书）→ 受保护环境 → gh release。
+# tag v* → 确定性测试 → 构建 zip（显式白名单）→ Syft 生成 SPDX SBOM →
+# actions/attest 生成 SLSA provenance 与 SBOM 证明（id-token 短期 Sigstore
+# 证书）→ 证明 bundle 落成 release 附件（离线可验）→ 受保护环境 + 人工放行
+# → gh release。
 # 发布流程不恢复任何缓存（cache-poisoning 审计项）。
 # tag 规范：v{metadata.yaml 的 version}，直接沿用上游 nonebot-plugin-parser-lite
 # 版本号（如 v1.3.6）；版本由 sync PR 自动跟随，本 workflow 校验 tag 与之锁步。
@@ -54,16 +56,18 @@ jobs:
             exit 1
           fi
 
+      # 依赖安装统一走复合 action（.github/actions/setup-env），默认档。
+      # 与 ci.yml 的 test job 同构：不装 astrbot 时 test_event_stop /
+      # test_sender_chain / test_json_card_urls 会 pytest.importorskip 整模块静默
+      # 跳过，而它们恰是桥接层的行为契约（H6 同类缺陷在发布轨的残留，2026-09-18
+      # 复核）。发布物一旦带着静默降级的测试结果出去，就是「绿着发布了一个没人
+      # 验过的桥」。
+      - name: 安装依赖（与 ci.yml 的 test job 同构）
+        uses: ./.github/actions/setup-env  # zizmor: ignore[self-repository] actionlint 尚不支持 $/
+
       - name: 确定性测试门禁
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
-          # 与 ci.yml 同构：不装 astrbot 时 test_event_stop / test_sender_chain /
-          # test_json_card_urls 会 pytest.importorskip 整模块静默跳过，而它们恰是
-          # 桥接层的行为契约（H6 同类缺陷在发布轨的残留，2026-09-18 复核）
-          python -m pip install --no-deps "astrbot>=4.28,<5"
-          python -m pip install -r tests/requirements-test.txt
           python scripts/verify_vendor.py
           python -m pytest -c config/pyproject.toml --rootdir=. -q
 
@@ -112,17 +116,88 @@ jobs:
           print(f"zip 结构 OK（{len(names)} 个条目）")
           PYEOF
 
+      # ---- SBOM：软件物料清单（NTIA / CISA SBOM 最低要素；Scorecard 的 SBOM 项）----
+      # 用 Syft（anchore/sbom-action，业界事实标准）扫发布物目录，产出 SPDX JSON。
+      # 刻意关掉 upload-artifact / upload-release-assets：release 里有什么，必须
+      # 由本文件的显式白名单单独决定（与 zip 的白名单同一原则），不让第三方
+      # action 私自增删附件 —— 否则「发布物清单」就有了第二个作者。
+      - name: 生成 SPDX SBOM（Syft）
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: dist/astrbot_plugin_parser_lite
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
       - name: Generate SLSA provenance attestation
+        id: attest_prov
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: "astrbot_plugin_parser_lite-*.zip"
 
-      - name: 创建 Release（附 zip 与校验和）
+      - name: Generate SBOM attestation
+        id: attest_sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "astrbot_plugin_parser_lite-*.zip"
+          sbom-path: sbom.spdx.json
+
+      # ---- 把证明落成 release 附件 -------------------------------------------
+      # 为什么必须落盘：actions/attest 默认只把证明写进 GitHub 的 attestation
+      # store，而 store 要联网查询、且**不在 release 资产里**。后果有两个：
+      #   ① 消费方无法离线验证（官方离线流程要求手上有 bundle 文件）；
+      #   ② 供应链扫描器只看 release 资产的**文件名后缀**，看不见 store ——
+      #      于是「有证明」被读成「没证明」。
+      # 后缀取 .intoto.jsonl：GitHub 官方离线验证文档里 bundle 下载下来的扩展名
+      # 就是 .jsonl（内容为单行 JSON，即合法 JSONL），而 SLSA 生态对 provenance
+      # bundle 的约定名是 <artifact>.intoto.jsonl。
+      - name: 归档证明 bundle 为 release 附件
+        env:
+          PROV_BUNDLE: ${{ steps.attest_prov.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.attest_sbom.outputs.bundle-path }}
         run: |
           set -euo pipefail
-          sha256sum "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip" \
-            > "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.sha256"
+          require_file() {
+            if [ -z "$2" ] || [ ! -f "$2" ]; then
+              echo "::error::$1 证明 bundle 不存在（${2:-空}）—— attest 步骤未产出可归档文件"
+              exit 1
+            fi
+          }
+          require_file provenance "$PROV_BUNDLE"
+          require_file sbom "$SBOM_BUNDLE"
+          cp "$PROV_BUNDLE" "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.intoto.jsonl"
+          cp "$SBOM_BUNDLE" "sbom.spdx.json.intoto.jsonl"
+          ls -l ./*.intoto.jsonl sbom.spdx.json
+
+      - name: 创建 Release（附 zip、校验和、证明与 SBOM）
+        run: |
+          set -euo pipefail
+          ZIP="astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip"
+          sha256sum "$ZIP" > "${ZIP}.sha256"
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
-            "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip" \
-            "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.sha256"
-          echo "验证：gh attestation verify <zip> -R ${GITHUB_REPOSITORY}"
+            "$ZIP" \
+            "${ZIP}.sha256" \
+            "${ZIP}.intoto.jsonl" \
+            "sbom.spdx.json" \
+            "sbom.spdx.json.intoto.jsonl"
+          {
+            echo "### 发布物"
+            echo ""
+            echo "| 资产 | 说明 |"
+            echo "|---|---|"
+            echo "| \`${ZIP}\` | 插件包 |"
+            echo "| \`${ZIP}.sha256\` | 校验和 |"
+            echo "| \`${ZIP}.intoto.jsonl\` | SLSA provenance（Sigstore bundle） |"
+            echo "| \`sbom.spdx.json\` | SPDX 软件物料清单 |"
+            echo "| \`sbom.spdx.json.intoto.jsonl\` | SBOM 证明 |"
+            echo ""
+            echo "离线验证（先取可信根：\`gh attestation trusted-root > trusted_root.jsonl\`）："
+            echo ""
+            echo '```bash'
+            echo "gh attestation verify ${ZIP} -R ${GITHUB_REPOSITORY} \\"
+            echo "  --bundle ${ZIP}.intoto.jsonl \\"
+            echo "  --custom-trusted-root trusted_root.jsonl"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

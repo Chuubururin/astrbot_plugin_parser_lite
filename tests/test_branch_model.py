@@ -299,11 +299,33 @@ def _install_lines(step: dict) -> str:
     「types-qrcode：qrcode 无 py.typed」）。若直接对整段 run 做
     `"pytest" in body`，**注释本身就能满足断言** —— 把安装行删掉测试照绿。
     反向验证抓到过这个漏洞（去掉 mypy / types-qrcode 两个用例均 MISSED）。
+
+    注：自 2026-09-19 起，安装清单的唯一实现搬到了复合 action，对它的断言在
+    tests/test_supply_chain.py（那里的 `_code_lines` 是同一逻辑）。本函数保留
+    给仍直接读 workflow 内联脚本的用例使用。
     """
     body = str(step.get("run", ""))
     return "\n".join(
         ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")
     )
+
+
+# 依赖安装的唯一实现（复合 action）。所有 job 都必须委派给它，而不是各抄一份
+# 安装清单 —— 2026-09-19 的「提权通道被假红锁死」事故就源于清单漂移。
+#
+# 为什么是 `./` 而不是 zizmor 推荐的 `$/`（self-repository 语法）：actionlint
+# 最新版 v1.7.12（2026-03-30）尚不认识 `$/`，会判 "ref is missing"；而 actionlint
+# 是本地与 CI 双端硬门禁。故工作流里保留 `./` 并**显式行内豁免**该建议，理由见
+# ci.yml 的说明；复评触发条件是 actionlint 支持 `$/`。
+SETUP_ENV_USES = "./.github/actions/setup-env"
+
+
+def _setup_env_call(steps: list[dict]) -> dict | None:
+    """在工作流步骤里找对复合 action 的调用（`uses: ./.github/actions/setup-env`）。"""
+    for s in steps:
+        if str(s.get("uses", "")) == SETUP_ENV_USES:
+            return s
+    return None
 
 
 def test_alert_reconcile_step_exists_and_runs_always() -> None:
@@ -472,24 +494,33 @@ def test_docs_warn_that_dispatch_and_schedule_use_default_branch() -> None:
     )
 
 
-def test_sync_upstream_installs_test_deps_for_dry_run_pytest() -> None:
-    """`sync-upstream` 跑全量 pytest，就必须先装测试期依赖。
+def test_sync_upstream_delegates_dependency_setup_to_shared_action() -> None:
+    """`sync-upstream` 跑全量 pytest，依赖必须齐备 —— 但安装定义只能有一处。
 
-    实测事故：`Install deps` 只装了 requirements + host-provided，没有 pytest，
-    于是「dry-run 全量契约测试」以 `No module named pytest` 直接红，连续 3 次
-    触发 MC-11 熔断，把整个同步流水线停摆。
+    实测事故：安装块只装了 requirements + host-provided，没有 pytest，于是
+    「dry-run 全量契约测试」以 `No module named pytest` 直接红，连续 3 次触发
+    MC-11 熔断，把整个同步流水线停摆。
 
     这类**假红**比真红更糟：它把「环境缺失」伪装成「契约破了」，掩盖真问题。
-    所以这里钉住三样必需品，与 ci.yml 的 test job 对齐。
+    而事故的根因不是「漏了一个包」，是**同一份安装清单在 4 个工作流里各抄了
+    一遍**。所以这里的断言从「逐包检查」改成「必须委派给唯一实现」：包清单本身
+    的正确性由 tests/test_supply_chain.py 对复合 action 本体负责。
     """
     steps = _sync_steps()
-    install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
-    assert install is not None, "sync-upstream 缺 Install deps 步骤"
-    body = _install_lines(install)
-    for pkg in ("pytest", "pytest-asyncio", "syrupy"):
-        assert pkg in body, f"Install deps 未装 {pkg}——dry-run 契约测试会假红"
-    assert "astrbot" in body, "Install deps 未装 astrbot——导入链测试会假红"
-    assert "tests/requirements-test.txt" in body, "Install deps 未装测试专用依赖"
+    call = _setup_env_call(steps)
+    assert call is not None, "sync-upstream 未使用复合 action .github/actions/setup-env"
+    # 默认档 = astrbot 与 test-reqs 都装（dry-run 要跑全量 pytest）
+    for key, why in (
+        ("astrbot", "否则桥接层行为契约会整模块静默 skip"),
+        ("test-reqs", "否则 dry-run 契约测试以 No module named pytest 假红"),
+    ):
+        value = str(call.get("with", {}).get(key, "true"))
+        assert value != "false", f"sync-upstream 的 {key} 不能关：{why}"
+    # 不得再出现手抄的安装清单（否则漂移的入口又回来了）
+    for s in steps:
+        assert "pip install -r requirements.txt" not in str(s.get("run", "")), (
+            "sync-upstream 又手抄了安装清单——应统一走复合 action"
+        )
 
 
 def test_sync_upstream_still_runs_full_pytest_dry_run() -> None:
@@ -512,60 +543,39 @@ def test_sync_upstream_still_runs_full_pytest_dry_run() -> None:
         )
 
 
-def test_promote_installs_its_own_gate_tooling() -> None:
-    """promote 直接调 `python -m ruff` / mypy，就必须把它们装进 venv。
+def test_promote_declares_gate_extras() -> None:
+    """promote 直接调 `python -m ruff` / mypy，就必须声明 extras=gate。
 
-    实测事故：`Install deps` 装了 pytest 却没装 ruff，于是提权门禁的第一步
+    实测事故：安装块装了 pytest 却没装 ruff，于是提权门禁的第一步
     `lint（ruff check）` 以 `No module named ruff` 假红 —— 门禁过不了，
     **整条提权通道被锁死**（main 永远推不动）。dry-run run 35383666398 复现。
 
     注意 promote 与 ci.yml 的 lint job 取 ruff 的方式不同：ci.yml 走 pre-commit
-    （ruff 在 pre-commit 的隔离环境里），promote 是裸 `python -m ruff`，
-    所以必须显式安装，且版本要与 pre-commit 的 rev 对齐以免格式化判定分歧。
+    （ruff 在 pre-commit 的隔离环境里），promote 是裸 `python -m ruff`，所以
+    必须显式声明 gate 档。版本对齐改由复合 action 从 pre-commit 的 rev 推导，
+    不再手抄 —— 见 tests/test_supply_chain.py。
     """
     doc = _load(PROMOTE_PATH)
     steps = doc["jobs"]["promote"]["steps"]
-    install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
-    assert install is not None, "promote 缺 Install deps 步骤"
-    body = _install_lines(install)
-    for pkg in ("ruff", "mypy"):
-        assert pkg in body, f"promote 的 Install deps 未装 {pkg}——提权门禁会假红并锁死"
-    assert "types-qrcode" in body, "缺 types-qrcode 会让 mypy 报 import-untyped"
-
-    # ruff 版本必须与 pre-commit 配置的 rev 一致
-    precommit = (REPO_ROOT / "config" / ".pre-commit-config.yaml").read_text(encoding="utf-8")
-    m = re.search(r"ruff-pre-commit\s*\n\s*rev:\s*(v[\d.]+)", precommit)
-    assert m, "pre-commit 配置里找不到 ruff-pre-commit 的 rev"
-    rev = m.group(1).lstrip("v")
-    assert f"ruff=={rev}" in body, (
-        f"promote 装的 ruff 版本未与 pre-commit 的 rev v{rev} 对齐——"
-        f"两处 ruff 不一致会让格式化判定分歧"
+    call = _setup_env_call(steps)
+    assert call is not None, "promote 未使用复合 action .github/actions/setup-env"
+    assert call.get("with", {}).get("extras") == "gate", (
+        "promote 必须声明 extras=gate，否则 ruff/mypy 不装，提权门禁假红并锁死通道"
     )
 
 
-def test_promote_gate_commands_all_have_their_tooling() -> None:
-    """逐条对账：promote 跑什么门禁，就得装什么工具。
+def test_promote_has_no_hand_rolled_install_list() -> None:
+    """promote 不得再手抄安装清单 —— 那正是「门禁假红」的入口。
 
-    这条比上一条更耐用：新增门禁步骤时会自动暴露缺装。
+    这条与上一条是一对：上一条要求「委派给复合 action」，这条禁止「同时保留
+    旧的手抄清单」。两者都满足时，安装定义才真的只有一处。
     """
     doc = _load(PROMOTE_PATH)
     steps = doc["jobs"]["promote"]["steps"]
-    install = next((s for s in steps if str(s.get("name", "")) == "Install deps"), None)
-    assert install is not None
-    installed = _install_lines(install)
-
-    # 命令里出现的「python -m <mod>」必须在 install 里有对应包
-    mod_to_pkg = {"ruff": "ruff", "pytest": "pytest", "mypy": "mypy"}
-    ran: set[str] = set()
     for s in steps:
-        for mod in re.findall(r"python\s+-m\s+([a-z_]+)", str(s.get("run", ""))):
-            ran.add(mod)
-    for mod in sorted(ran):
-        pkg = mod_to_pkg.get(mod)
-        if pkg is None:
-            continue
-        assert pkg in installed, (
-            f"promote 跑了 `python -m {mod}` 但 Install deps 没装 {pkg}——会假红"
+        body = str(s.get("run", ""))
+        assert "pip install -r requirements.txt" not in body, (
+            "promote 手抄了安装清单——应统一走复合 action，否则清单会再次漂移"
         )
 
 

@@ -1,0 +1,39 @@
+# 代码所有者（CODEOWNERS）
+#
+# 作用与**局限**（如实声明）：
+# GitHub 的 CODEOWNERS 只有在分支保护 / Rulesets 里勾选
+# "Require review from Code Owners" 时才具备强制力。本仓库是**私有仓库 + Free
+# 计划**，Rulesets 接口实测返回 403（"Upgrade to GitHub Pro or make this
+# repository public"），故此处**没有平台级强制力**，作用是：
+#   1. PR 界面自动请求对应所有者评审（人肉提醒）；
+#   2. 把「哪些改动会改变发布/提权/门禁行为」写成可机读的清单，供评审者判断。
+# 强制力由本地 pre-push 钩子（scripts/no-force-push-main.sh）与
+# promote-dev-to-main 的自带门禁补偿，见 CONTRIBUTING.md 第 8 节。
+#
+# 语法：<pattern> <owner>；`*` 为兜底规则。
+
+# 兜底：仓库所有者
+*                                   @Chuubururin
+
+# ---- 发布与提权行为 --------------------------------------------------------
+# 改动这些文件等于改动「main 何时前进、发布物里有什么」，必须由所有者评审。
+/.github/workflows/                 @Chuubururin
+/.github/actions/                   @Chuubururin
+/.github/dependabot.yml             @Chuubururin
+/.github/SECURITY.md                @Chuubururin
+
+# ---- 门禁判定与供应链 ------------------------------------------------------
+# scripts/ 决定门禁怎么判（typecheck / verify_vendor / maintenance_check /
+# pinned_tool_versions），改它等于改「什么算通过」。
+/scripts/                           @Chuubururin
+/config/                            @Chuubururin
+/tests/                             @Chuubururin
+
+# vendor/ 是上游快照，零修改铁律；任何改动都必须是同步流水线的产物，
+# 而非人工编辑。这里标出来是为了让越界改动一眼可见。
+/vendor/                            @Chuubururin
+
+# 发布物白名单与插件元数据
+/metadata.yaml                      @Chuubururin
+/_conf_schema.json                  @Chuubururin
+/main.py                            @Chuubururin

@@ -60,16 +60,31 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements/host-provided.txt mypy
-          # mypy 的检查范围含 tests/（pyproject 仅排除 vendor/.research/.agents），
-          # 故测试期依赖必须在位：缺 pytest / syrupy 会产出 25 处 import-not-found。
-          python -m pip install pytest pytest-asyncio syrupy
-          # qrcode 无 py.typed，且不在 pyproject 的 ignore_missing_imports 名单里；
-          # 缺存根会报 bridge/render.py:25 import-untyped。
-          python -m pip install types-qrcode
+      # 依赖安装统一走复合 action（.github/actions/setup-env）：单一来源，
+      # 杜绝多处 Install deps 手抄漂移（2026-09-19 提权通道被假红锁死即此类事故）。
+      #
+      # 为什么用 `./` 而非 zizmor 推荐的 `$/`（self-repository 语法）：actionlint
+      # 最新版 v1.7.12（2026-03-30）**尚不认识** `$/`，会直接判
+      # "specifying action ... in invalid format because ref is missing"。而
+      # actionlint 是本地与 CI 双端硬门禁，`$/` 过不了。故此处保留 `./` 并**显式
+      # 豁免**该条建议（行内 ignore），理由与风险如实声明：
+      #   · `$/` 的两点好处是「不受运行时文件系统状态影响」与「可被平台视作
+      #     pinning 以强制 fully-pinned 策略」；
+      #   · 本仓库没有任何步骤在运行时把 action 克隆进 .github/actions/，故第一点
+      #     的风险不成立；
+      #   · 第二点需要平台侧 Actions policy，而本仓库是私仓 + Free 计划（Rulesets
+      #     实测 403），该能力本来就没有。
+      # 复评触发条件：actionlint 支持 `$/` 后立刻改回并撤掉豁免。
+      #
+      # extras=type 装 mypy + types-qrcode：mypy 的检查范围含 tests/（pyproject
+      # 仅排除 vendor/.research/.agents），故 pytest / syrupy 必须在位，否则产出
+      # 25 处 import-not-found；qrcode 无 py.typed，缺存根会报
+      # bridge/render.py:25 import-untyped。
+      - uses: ./.github/actions/setup-env  # zizmor: ignore[self-repository] actionlint 尚不支持 $/
+        with:
+          astrbot: "false"
+          test-reqs: "false"
+          extras: type
       - name: mypy
         # 根目录无 __init__.py，mypy 需显式包基并在包父目录下运行（见脚本 docstring）。
         run: python scripts/typecheck.py
@@ -86,16 +101,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
-          # 宿主框架（真实 AstrBot 契约）：--no-deps 避开 63 个声明依赖
-          python -m pip install --no-deps "astrbot>=4.28,<5"
-          # 但 --no-deps 只省掉了「声明」，没省掉「实际用到」的：astrbot 的
-          # core/__init__ 在导入期即建库 / 初始化 logger，导入闭包仍需一批第三方包。
-          # 清单及推导方法见 tests/requirements-test.txt（带依赖装，传递依赖交给 pip）
-          python -m pip install -r tests/requirements-test.txt
+      # 依赖安装统一走复合 action（.github/actions/setup-env）。
+      # astrbot 以 --no-deps 装（避开 63 个声明依赖），但其 core/__init__ 在导入期
+      # 即建库 / 初始化 logger，导入闭包仍需一批第三方包 —— 由
+      # tests/requirements-test.txt 补齐（清单及推导方法见该文件头）。
+      - uses: ./.github/actions/setup-env  # zizmor: ignore[self-repository] actionlint 尚不支持 $/
       # 环境守卫：缺依赖的失败形态是「收集期报错 + 其余模块静默 skip」——不守卫
       # 就会以 cryptic traceback 收场，或干脆无声降级。
       - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）

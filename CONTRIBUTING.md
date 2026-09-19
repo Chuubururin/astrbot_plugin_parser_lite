@@ -267,8 +267,13 @@ git commit --allow-empty -m "[promote] release v1.3.7"
   | `actions/checkout` | v7.0.1 | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
   | `actions/setup-python` | v7.0.0 | `5fda3b95a4ea91299a34e894583c3862153e4b97` |
   | `actions/attest` | v4.2.2 | `1e69f48acb82d1966a394da916b4c1698aa569d6` |
+  | `anchore/sbom-action` | v0.24.2 | `3ad7283483fc7af8ff2b4ea19663c2d5ca935e26` |
 
-  升级 action 时：改到新 tag 并更新 SHA，走 PR 人工审阅。
+  升级 action 时：改到新 tag 并更新 SHA，走 PR 人工审阅。依赖升级 PR 由
+  Dependabot 每周开（target-branch = `dev`，见第 13 节）。
+
+- **依赖安装只有一处实现**：`.github/actions/setup-env/`（复合 action）。
+  新增 job 需要装依赖时委派给它，不要手抄清单 —— 见第 13.1 节。
 
 - **工作流清单**（`.github/workflows/`）：
 
@@ -277,7 +282,7 @@ git commit --allow-empty -m "[promote] release v1.3.7"
   | `ci.yml` | PR（任意 base）+ push 到 `dev` | 三道 required checks：`lint` / `typecheck` / `test` |
   | `main-pr-target-guard.yml` | PR(base=main) | 拒绝打到 `main` 的 PR（见 8.2） |
   | `promote-dev-to-main.yml` | push 到 `dev`（`[promote]` 前缀）+ 手动 | 门禁后把 `main` 快进到 `dev` |
-  | `release.yml` | push tag `v*` | 构建 zip + SLSA attestation + 发布 |
+  | `release.yml` | push tag `v*` | 构建 zip + Syft SBOM + SLSA attestation（provenance 与 SBOM 各一）→ 证明落成 release 附件 → 发布 |
   | `sync-upstream.yml` | 每日 cron（`17 17 * * *`）+ 手动 | 滚动同步上游快照 → PR(base=dev) |
 
   依赖关系（谁等谁）：
@@ -487,6 +492,115 @@ gh workflow run promote-dev-to-main -f dry_run=true
 
 ---
 
-## 13. 行为准则
+## 13. 供应链与合规基线
+
+本仓库是**私有仓库 + Free 计划**，平台侧的供应链防线大多不可用（见 13.4）。
+所以这一节列的每一条，都必须是「写进仓库、由 CI 与本地门禁强制」的东西。
+条款来源与落地位置的对照如下，**机械钉扎在 `tests/test_supply_chain.py`**：
+
+| 标准条款（来源） | 落地位置 | 钉扎 |
+| --- | --- | --- |
+| 第三方 action 钉完整 commit SHA（GitHub Secure use；Scorecard `Pinned-Dependencies`） | 全部 `uses:` | `test_every_third_party_action_is_pinned_to_a_full_commit_sha` |
+| 钉扎行保留 `# vX.Y.Z` 注释（Dependabot 依赖它更新版本文档） | 同上 | `test_pinned_actions_keep_a_version_comment_for_dependabot` |
+| 顶层 `permissions` 只读、写权限下放 job 级（Scorecard `Token-Permissions` 满分口径） | 5 个工作流 | `test_workflows_declare_top_level_read_only_permissions` |
+| 不用 `pull_request_target` / `workflow_run` 检出不可信代码（Scorecard `Dangerous-Workflow`，Critical） | 5 个工作流 | `test_workflows_avoid_dangerous_triggers` |
+| 依赖更新工具（Scorecard `Dependency-Update-Tool`） | `.github/dependabot.yml` | `test_dependabot_covers_actions_and_hand_maintained_python_deps` |
+| 依赖更新冷却期（zizmor `dependabot-cooldown`，置信度 High） | 同上 `cooldown` 段 | 同上 |
+| 安全政策（Scorecard `Security-Policy`，按其三档评分写全） | `.github/SECURITY.md` | `test_security_policy_satisfies_every_scorecard_scoring_tier` |
+| 代码所有者约束工作流变更（GitHub Secure use） | `.github/CODEOWNERS` | `test_codeowners_covers_the_supply_chain_surface` |
+| 发布产物带签名/证明（Scorecard `Signed-Releases`） | `release.yml` 归档 `*.intoto.jsonl` | `test_release_attaches_provenance_bundle_to_the_release` |
+| 发布 SBOM（Scorecard `SBOM`；NTIA/CISA 最低要素） | `release.yml`（Syft → SPDX） | `test_release_generates_and_attests_an_sbom` |
+| 复用 CI 逻辑而非多处手抄（GitHub 官方推荐 composite action） | `.github/actions/setup-env/` | `test_every_delegating_workflow_uses_the_shared_setup_action` |
+
+### 13.1 依赖安装只有一处定义
+
+`.github/actions/setup-env/action.yml` 是**唯一**的依赖安装实现，四个工作流的
+五个 job 全部委派给它。三个输入：
+
+| 输入 | 取值 | 用途 |
+| --- | --- | --- |
+| `astrbot` | `true`（默认）/ `false` | 是否以 `--no-deps` 装宿主框架 |
+| `test-reqs` | `true`（默认）/ `false` | 是否装 `tests/requirements-test.txt` |
+| `extras` | `none`（默认）/ `type` / `gate` | `type` = mypy + types-qrcode；`gate` = ruff + mypy + types-qrcode |
+
+**为什么必须收成一处**：2026-09-19 的事故复盘 —— 同一份清单在 4 个工作流里
+各抄一遍，`promote` 那份漏了 ruff，门禁第一步 `lint（ruff check）` 以
+`No module named ruff` 假红。那是**环境缺失、不是代码问题**，却把整条提权通道
+锁死（门禁过不了 → `main` 永远推不动）。断言因此从「逐包检查」改成「必须委派
+给唯一实现」+「不得再手抄清单」，两条互补。
+
+**ruff 版本不手抄**：`extras=gate` 时版本由 `scripts/pinned_tool_versions.py`
+从 `config/.pre-commit-config.yaml` 的 `ruff-pre-commit` rev 推导。原因见
+`ci.yml` 的 lint job —— 它走 pre-commit 的隔离环境，ruff 版本由 `rev:` 决定；
+而 promote 是裸 `python -m ruff`。两处不一致会让同一个文件「一边判过、一边判
+不过」。单一来源是唯一不会漂移的做法。
+
+### 13.2 发布信任链与离线验证
+
+`release.yml` 在 tag `v*` 时产出五个资产：
+
+| 资产 | 说明 |
+| --- | --- |
+| `astrbot_plugin_parser_lite-<tag>.zip` | 插件包（显式白名单构建） |
+| `…<tag>.zip.sha256` | 校验和 |
+| `…<tag>.zip.intoto.jsonl` | SLSA provenance（Sigstore bundle） |
+| `sbom.spdx.json` | SPDX 软件物料清单 |
+| `sbom.spdx.json.intoto.jsonl` | SBOM 的 Sigstore 证明 |
+
+**为什么证明必须落成附件**：`actions/attest` 默认只把证明写进 GitHub 的
+attestation store，而 store 要联网查询、且不在 release 资产里。后果有两个：
+消费方无法离线验证；供应链扫描器只看 release 资产的**文件名后缀**，于是
+「有证明」被读成「没证明」。后缀取 `.intoto.jsonl` 的依据：GitHub 官方离线
+验证文档里 bundle 下载下来的扩展名就是 `.jsonl`（内容为单行 JSON，即合法
+JSONL），而 SLSA 生态对 provenance bundle 的约定名是 `<artifact>.intoto.jsonl`。
+
+离线验证：
+
+```bash
+gh attestation trusted-root > trusted_root.jsonl
+gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
+  -R Chuubururin/astrbot_plugin_parser_lite \
+  --bundle astrbot_plugin_parser_lite-<tag>.zip.intoto.jsonl \
+  --custom-trusted-root trusted_root.jsonl
+```
+
+### 13.3 新增工作流或 action 时的检查单
+
+1. 第三方 action 钉到完整 SHA，同行写 `# vX.Y.Z`；
+2. 顶层 `permissions` 只有 `contents: read`，写权限在 job 级声明并注释理由；
+3. 需要装依赖就 `uses: ./.github/actions/setup-env`，**不要**手抄清单；
+4. 确认 `tests/test_supply_chain.py` 与 `tests/test_branch_model.py` 全绿
+   （它们会替你把上面三条机械核一遍）。
+
+### 13.4 平台限制：以下标准本仓库**做不到**
+
+如实声明，避免以后有人以为「没做 = 忘了」：
+
+| 标准条款 | 为什么做不到 | 补偿措施 |
+| --- | --- | --- |
+| 分支保护 / Rulesets（Scorecard `Branch-Protection`） | 私仓 + Free：`/rulesets` 实测 403「Upgrade to GitHub Pro」 | `scripts/no-force-push-main.sh`（pre-push 钩子拦非快进推送）+ `main-pr-target-guard.yml` + promote 自带门禁 |
+| CodeQL 代码扫描（Scorecard `SAST`） | 私仓需 GitHub Code Security（GHAS），`security_and_analysis` 为 null | `actionlint` + `zizmor --pedantic` 覆盖工作流层；`ruff` + `mypy` 覆盖源码层静态检查 |
+| 私密漏洞报告（GitHub Security Advisories） | 同上，需 GHAS | `.github/SECURITY.md` 给出邮箱 + issues 兜底渠道 |
+| Secret scanning / push protection | 同上 | 见第 9 节：secret 只走 `secrets.*`，发布走受保护环境 + 人工放行 |
+| `CODEOWNERS` 强制力 | 需分支保护勾选 "Require review from Code Owners" | 仅 PR 界面自动请求评审；强制力由上面三条补偿 |
+
+### 13.5 已知工具冲突与复评触发条件
+
+- **`$/` vs actionlint**：zizmor 的 `self-repository` 审计（v1.30.0 起）建议把
+  仓库内 action 的引用从 `./…` 改成 `$/…`（GitHub 2026-07 引入的语法，不受
+  运行时文件系统状态影响，且被平台视作 pinning）。但 **actionlint 最新版
+  v1.7.12（2026-03-30）尚不认识 `$/`**，会判 `ref is missing`；而 actionlint 是
+  本地与 CI 双端硬门禁。故当前保留 `./…` 并在调用点写**显式行内豁免**
+  `# zizmor: ignore[self-repository]`，理由写在 `ci.yml` 里。
+  **复评触发条件：actionlint 支持 `$/` 后立刻改回并撤掉豁免。**
+- **Dependabot 不覆盖根目录 pip**：`requirements.txt` 与
+  `requirements/host-provided.txt` 是 `vendor/_upstream/pyproject.toml` 的派生产物
+  （文件头写明「勿手改」），一致性由 `tests/test_requirements_sync.py` 逐字节
+  守护。让 Dependabot 改它们，每个 PR 都注定违反派生契约 —— 那是噪声不是防线。
+  上游版本漂移的正道是 sync-upstream 滚动 + 重跑 `scripts/derive_requirements.py`。
+
+---
+
+## 14. 行为准则
 
 参与本项目即表示你同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。

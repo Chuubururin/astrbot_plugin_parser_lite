@@ -1,0 +1,71 @@
+name: setup-env
+description: >-
+  统一安装运行期 / 测试期 / 门禁期依赖。所有 job 共用一处定义，避免多处
+  "Install deps" 手抄漂移 —— 2026-09-19「提权通道被假红锁死」即此类事故：
+  promote 的安装块漏了 ruff，门禁以 No module named ruff 永久红，
+  main 从此推不动。
+
+inputs:
+  astrbot:
+    description: 是否安装宿主框架 AstrBot（--no-deps；其导入闭包的传递依赖由 test-reqs 补）
+    required: false
+    default: "true"
+  test-reqs:
+    description: 是否安装 tests/requirements-test.txt（astrbot 导入闭包的传递依赖）
+    required: false
+    default: "true"
+  extras:
+    description: '额外工具链：none | type（mypy + types-qrcode）| gate（ruff + mypy + types-qrcode）'
+    required: false
+    default: "none"
+
+runs:
+  using: composite
+  steps:
+    - name: 安装依赖
+      shell: bash
+      # ${{ }} 一律经 env 传递，不直接写进 run: 块 —— 展开结果会成为 shell 代码，
+      # zizmor 的 template-injection 审计会（正确地）判为注入面。仓库其余工作流
+      # 遵循同一约定（见 promote-dev-to-main.yml 的「校验 main 可快进」步骤）。
+      env:
+        SETUP_ASTRBOT: ${{ inputs.astrbot }}
+        SETUP_TEST_REQS: ${{ inputs.test-reqs }}
+        SETUP_EXTRAS: ${{ inputs.extras }}
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
+
+        if [ "$SETUP_ASTRBOT" = "true" ]; then
+          # astrbot 以 --no-deps 装：宿主提供的大件已在 host-provided.txt 里，
+          # 重复解析会拉进版本冲突；但它「实际用到」的第三方包仍需补齐。
+          python -m pip install --no-deps "astrbot>=4.28,<5"
+        fi
+        if [ "$SETUP_TEST_REQS" = "true" ]; then
+          python -m pip install -r tests/requirements-test.txt
+        fi
+
+        case "$SETUP_EXTRAS" in
+          none)
+            ;;
+          type)
+            # qrcode 无 py.typed 且不在 ignore_missing_imports 名单里；
+            # 缺存根会让 mypy 报 bridge/render.py:25 import-untyped。
+            python -m pip install mypy types-qrcode
+            ;;
+          gate)
+            # ruff / mypy 必须装进 venv：这些 job 直接 `python -m ruff` /
+            # `scripts/typecheck.py`，**不走** pre-commit 的隔离环境。漏装会让
+            # 门禁以 `No module named ruff` 假红 —— 环境缺失不是代码问题，却会把
+            # 整条提权通道锁死（门禁过不了 → main 永远推不动）。
+            # 版本从 config/.pre-commit-config.yaml 的 rev 推导（单一来源），
+            # 避免与走 pre-commit 的 ci.yml lint job 产生格式化判定分歧。
+            ruff_version="$(python scripts/pinned_tool_versions.py ruff)"
+            echo "ruff 版本（源自 pre-commit 配置的 rev）：${ruff_version}"
+            python -m pip install "ruff==${ruff_version}" mypy types-qrcode
+            ;;
+          *)
+            echo "::error::setup-env 的 extras 只接受 none / type / gate，收到：${SETUP_EXTRAS}"
+            exit 1
+            ;;
+        esac

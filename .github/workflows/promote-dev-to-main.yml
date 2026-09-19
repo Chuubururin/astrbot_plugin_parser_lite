@@ -114,21 +114,18 @@ jobs:
       # 能力推 main，而 main 的唯一防线就是这一步。dev 上的 CI 绿是「必要条件」，
       # 但 promote 是**不可逆的发布动作**，独立复算比信任上游信号更便宜
       # （全量契约测试 ~25s）。刻意与 ci.yml 保持同一组命令，避免两套门禁漂移。
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements/host-provided.txt pytest pytest-asyncio syrupy
-          python -m pip install --no-deps "astrbot>=4.28,<5"
-          python -m pip install -r tests/requirements-test.txt
-          # 本 job 直接 `python -m ruff` / `scripts/typecheck.py`，**不走** pre-commit
-          # 的隔离环境，故 ruff / mypy 必须装进 venv。漏装会让门禁以
-          # `No module named ruff` 假红 —— 而那是环境缺失不是代码问题，
-          # 却会把**整条提权通道锁死**（门禁过不了 → main 永远推不动）。
-          # ruff 版本对齐 config/.pre-commit-config.yaml 的 rev，避免与 ci.yml
-          # 的 lint job（走 pre-commit）产生格式化判定分歧。
-          # types-qrcode：qrcode 无 py.typed 且不在 ignore_missing_imports 名单里，
-          # 缺存根会让 mypy 报 bridge/render.py import-untyped。
-          python -m pip install "ruff==0.16.7" mypy types-qrcode
+      # 依赖安装统一走复合 action（.github/actions/setup-env），extras=gate。
+      #
+      # 为什么必须显式声明 gate 而不是沿用默认值：本 job 直接跑
+      # `python -m ruff` / `scripts/typecheck.py`，**不走** pre-commit 的隔离
+      # 环境，故 ruff / mypy 必须装进 venv。漏装会让门禁以 `No module named
+      # ruff` 假红 —— 那是环境缺失不是代码问题，却会把**整条提权通道锁死**
+      # （门禁过不了 → main 永远推不动）。2026-09-19 实测踩过。
+      # ruff 版本由复合 action 从 config/.pre-commit-config.yaml 的 rev 推导，
+      # 与走 pre-commit 的 ci.yml lint job 天然同版本，不会产生格式化判定分歧。
+      - uses: ./.github/actions/setup-env  # zizmor: ignore[self-repository] actionlint 尚不支持 $/
+        with:
+          extras: gate
 
       - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
         run: python scripts/check_test_deps.py

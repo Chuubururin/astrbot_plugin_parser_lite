@@ -1,0 +1,67 @@
+# 依赖更新基线（OpenSSF Scorecard 检查项 Dependency-Update-Tool）。
+#
+# 为什么需要：本仓库把所有第三方 action 钉到**完整 commit SHA**（Scorecard
+# Pinned-Dependencies 的要求），而 SHA 不会跟随上游的安全修复 —— 钉扎换来了
+# 不可变性，代价就是必须有人来开升级 PR。Dependabot 在 Free 计划的私有仓库
+# 同样免费，是「无 GHAS、无分支保护」约束下少数可用的供应链防线之一。
+#
+# target-branch 一律指向 dev：main 是发布指针，只由 promote-dev-to-main 快进
+# 推进。若让 Dependabot 直接打 main，就绕过了整套门禁与提权通道。
+#
+# cooldown 是供应链要求（zizmor 的 dependabot-cooldown 审计，置信度 High）：
+# 新版本发布后先等一段时间再开 PR，让社区有时间发现「恶意投毒」或「发布即坏」
+# 的版本。本仓库把所有 action 钉到不可变 SHA，等于把「跟上安全修复」的责任
+# 全交给了 Dependabot —— 那么它就更不能抢在社区验证之前把新版本拉进来。
+version: 2
+
+updates:
+  # ① GitHub Actions：覆盖 .github/workflows/ 与 .github/actions/ 里的全部 uses。
+  #    分组为一个 PR：本仓库 action 数量少、SHA 升级无兼容性风险，逐条开 PR
+  #    只会稀释评审注意力。
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:17"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    labels: [dependencies, ci]
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # ② 测试期依赖（tests/requirements-test.txt，**手工维护**，文件头已声明）。
+  #    这些包跟随 astrbot 上游漂移：astrbot 新增模块级 import 或导入期副作用时，
+  #    本文件必须补包，否则 CI 的「断言 astrbot 导入链完整」会红。Dependabot
+  #    让它自动跟版，比人工盯 astrbot 的 changelog 可靠。
+  - package-ecosystem: pip
+    directory: /tests
+    target-branch: dev
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:47"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: test
+    labels: [dependencies, python]
+    groups:
+      python-test:
+        patterns: ["*"]
+
+  # 刻意**不**配置根目录的 pip：requirements.txt 与
+  # requirements/host-provided.txt 是 vendor/_upstream/pyproject.toml 的派生产物
+  # （文件头写着「勿手改」），一致性由 tests/test_requirements_sync.py 逐字节
+  # 守护。Dependabot 改它们必然违反派生契约 → 每个 PR 都是注定合不了的红灯，
+  # 那不是防线而是噪声。上游版本漂移的正道是 sync-upstream 滚动 + 重跑
+  # scripts/derive_requirements.py。
