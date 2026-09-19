@@ -141,6 +141,74 @@ def test_scope_paths_exist(checklist: dict[str, Any]) -> None:
             assert (REPO_ROOT / path).exists(), f"{entry['id']} 的 scope 路径不存在：{path}"
 
 
+def test_gh_runs_detectors_point_at_existing_workflows(checklist: dict[str, Any]) -> None:
+    """detector.kind == gh_runs 指向的工作流必须真实存在于 ``.github/workflows/``。
+
+    这是 2026-09-20 审计缺陷 5 的防回归：MC-11 的 ``detector.workflow`` 指向的
+    ``sync-upstream`` 被删除后，``gh run list`` 永远查不到它，详情文案退化成
+    「gh 不可用或查询失败」，把「工作流已删除」这个真实原因**掩盖成网络/权限
+    问题**，排障方向被带偏。原测试只校验 pytest 节点的存在性，gh_runs 这一类
+    完全没被守护——正是它让本次腐烂静默存活。
+
+    退役条目（带 ``retired`` 字段）免检：它们的失效是**已记录**的，不应再红。
+    """
+    workflows_dir = REPO_ROOT / ".github" / "workflows"
+    existing = {path.stem for path in workflows_dir.glob("*.yml")}
+    for entry in checklist["entries"]:
+        detector = entry["detector"]
+        if detector.get("kind") != "gh_runs":
+            continue
+        if "retired" in entry:
+            continue
+        workflow = detector.get("workflow")
+        assert workflow, f"{entry['id']} 的 gh_runs detector 缺 workflow"
+        assert workflow in existing, (
+            f"{entry['id']} 的 detector.workflow={workflow!r} 在 .github/workflows/ 下不存在"
+            f"（现有：{sorted(existing)}）。gh run list 会查不到它，详情文案将退化成"
+            "「gh 不可用或查询失败」并掩盖真实原因。请修正指向，或给条目加 retired 说明。"
+        )
+
+
+def test_retired_entries_carry_reason_and_revive_path(checklist: dict[str, Any]) -> None:
+    """退役条目必须写清「为什么退役」与「怎么复活」。
+
+    与被删除工作流的墓碑测试（tests/test_codegen.py）同源纪律：**删除要有墓碑，
+    墓碑要能指向原文**。没有 revive 字段，恢复上游同步时没人知道这条还要不要捡回来。
+    """
+    for entry in checklist["entries"]:
+        retired = entry.get("retired")
+        if retired is None:
+            continue
+        assert isinstance(retired, dict), f"{entry['id']} 的 retired 必须是对象"
+        assert retired.get("at"), f"{entry['id']} 的 retired 缺 at"
+        assert retired.get("why"), f"{entry['id']} 的 retired 缺 why（为什么退役）"
+        assert retired.get("revive"), f"{entry['id']} 的 retired 缺 revive（怎么复活）"
+
+
+def test_doc_refs_point_at_existing_paths(checklist: dict[str, Any]) -> None:
+    """``doc_ref`` 里的**仓库路径**必须存在（历史引用可写在 retired 里）。
+
+    原实现下 doc_ref 是自由文本，MC-10 指向被删除的
+    ``.github/workflows/sync-upstream.yml`` 也无人发现。这里只校验形如
+    ``xxx/yyy.zzz`` 的路径前缀，纯文档标题（如 ``doc/CONTEXT.md「黄金样本」``）
+    取「」之前的部分。
+    """
+    for entry in checklist["entries"]:
+        doc_ref = entry.get("doc_ref")
+        if not isinstance(doc_ref, str) or not doc_ref:
+            continue
+        # 取一个仓库路径候选：以已知顶层目录开头且含扩展名的片段
+        candidate = doc_ref.split("「")[0].split("」")[0].strip()
+        if not candidate.startswith((".github/", "doc/", "scripts/", "tests/", "maintenance/")):
+            continue
+        if "retired" in entry or "退役" in doc_ref:
+            # 退役条目允许把**历史**路径写在 retired.revive 里
+            continue
+        assert (REPO_ROOT / candidate).exists(), (
+            f"{entry['id']} 的 doc_ref 指向不存在的路径：{candidate}"
+        )
+
+
 def test_pytest_detectors_point_at_real_nodes(
     checklist: dict[str, Any],
     collected_nodes: set[str],

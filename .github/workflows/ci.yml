@@ -23,9 +23,9 @@ concurrency:
 jobs:
   lint:
     # required check ①：ruff（lint+format）+ actionlint + zizmor --pedantic
-    # ⚠️ 这个 job name 是 main 分支保护上的必需检查 context（逐字一致）。
-    #    改名必须同步改 docs/BRANCHING.md、scripts/apply_branch_protection.sh、
-    #    .github/workflows/protection-audit.yml —— 否则 PR 永久停在
+    # ⚠️ 这个 job name 是 dev 分支保护上的必需检查 context（逐字一致）。
+    #    改名必须同步改 scripts/apply_branch_protection.sh 的 REQUIRED_CHECKS
+    #    （注意它是 **JSON 字符串**，不是 bash 数组）—— 否则 PR 永久停在
     #    "Expected — Waiting for status to be reported"。
     name: lint (ruff / actionlint / zizmor)
     runs-on: ubuntu-latest

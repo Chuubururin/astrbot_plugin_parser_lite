@@ -33,6 +33,18 @@ AST 白名单（`VENDOR_CONSUMERS` 常量即本清单的真值源，增删模块
 
 ## 同步
 
+> ⚠️ **本节描述的上游自动同步机制当前已移除。**
+>
+> 下文的 `sync-upstream` 工作流、`lkg` 分支、分层 automerge、熔断、
+> staleness 告警与 `SYNC_PAT` 均随「只留 4 个工作流」的精简一并退役
+> （决策记录见 [BRANCHING.md](./BRANCHING.md) §10「明确**不做**的项」）。
+> 现在上游滚动的**唯一入口**是本地 `scripts/roll_local.py`；`lkg` 分支
+> 与 `sync-state.json` 的熔断字段仍在仓库中，但已无消费者。
+>
+> **原文保留**：下列描述是恢复该机制时最省事的规格说明——它逐条
+> 写明了 roll 序列、单 roll 在途约束与恢复命令。恢复前请先读
+> §10 的取舍记录，不要只读本节就把工作流加回来。
+
 **roll（滚动同步）**
 sync-upstream 工作流的一次执行（每日 cron 一次）：克隆上游 standalone →
 比对 sha → 整树重建 vendor → 派生 requirements → 显示文本提取（fetch 上游

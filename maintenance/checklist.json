@@ -408,7 +408,12 @@
       ],
       "escalate_if": "总是（本条 class 即 escalate）",
       "note": "工作树中无法判定，必须在 PR 上下文评估；属 roll-time 事件型条目",
-      "doc_ref": ".github/workflows/sync-upstream.yml「分层 automerge」"
+            "retired": {
+        "at": "2026-09-20",
+        "why": "本条的触发源是 sync-upstream 工作流开的同步 PR 正文 advisory 段。该工作流已随「只留 4 个工作流」精简移除（见 doc/BRANCHING.md 退役说明），本条在恢复上游自动同步前没有触发渠道。",
+        "revive": "恢复上游自动同步时一并复活；原 doc_ref 为 .github/workflows/sync-upstream.yml「分层 automerge」"
+      },
+      "doc_ref": "doc/BRANCHING.md §10「明确不做的项」"
     },
     {
       "id": "MC-11",
@@ -442,7 +447,12 @@
         }
       ],
       "escalate_if": "熔断原因为上游失联 >24h 或上游仓库不可达 → 人工介入并通知上游",
-      "note": "连续 3 天未处理会导致同步整体停摆，连无关的上游更新也一起卡住"
+      "note": "连续 3 天未处理会导致同步整体停摆，连无关的上游更新也一起卡住",
+      "retired": {
+        "at": "2026-09-20",
+        "why": "detector.workflow 指向的 sync-upstream 已移除，gh run list 永远查不到该工作流 → 详情文案会退化成「gh 不可用或查询失败」，把「工作流已删除」这个真实原因掩盖成网络/权限问题。fallback 仍读 .github/sync-state.json，故条目不会彻底坏，但诊断信息误导。",
+        "revive": "恢复上游自动同步时一并复活；届时 detector.workflow 与 sync-state.json 需同时校准"
+      }
     },
     {
       "id": "MC-12",

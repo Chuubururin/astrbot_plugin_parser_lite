@@ -24,8 +24,20 @@ name: release
 #      reviewer 超时即失败。已提到 60 分钟。
 #   ② 环境的 `prevent_self_review` 必须**关**：单人维护下开着它，
 #      你无法批准自己 workflow run 触发的部署 → 发布永久卡死。
-#      该开关无法在 YAML 里声明，只能在 Settings → Environments 配，
-#      故由 .github/workflows/protection-audit.yml 每日巡检兜底。
+#      该开关无法在 YAML 里声明，只能在 Settings → Environments 配。
+#
+#      ⚠️ 本版**没有自动巡检**保护这个开关。上一版曾用
+#      `protection-audit.yml` 每日巡检 GitHub 侧保护设置，该工作流已随
+#      「只留 4 个工作流」的精简一并移除。**这是一个已知缺口，doc/BRANCHING.md
+#      §9「服务端配置没有自动巡检」有完整声明与缓解措施，改动前请先读它。**
+#      以下三处只能靠人工纪律维护：
+#        · 本环境的 prevent_self_review（必须为 OFF）
+#        · `dev` 分支的 required_status_checks（须与 ci.yml 的 job name 逐字一致）
+#        · `main` 分支**不得**启用 required_pull_request_reviews 与
+#          required_status_checks（否则指针式快进合并会被永久锁死）
+#      自动对账能力仍在本仓库内、只是不在 CI 上：`scripts/apply_branch_protection.sh`
+#      可回读并校核当前设置（`--dry-run` 只比对不改），这也是
+#      `tests/test_branch_model.py` 守护的对象。改动 Settings 后请重放一次。
 
 on:
   push:

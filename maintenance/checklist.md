@@ -12,7 +12,11 @@
 
 ## 1. 它解决什么问题
 
-本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`）：roll → 两层注入 →
+> ⚠️ **本段描述的上游自动同步已移除**（见 doc/BRANCHING.md §10）。
+> 现在 roll 由本地 `scripts/roll_local.py` 驱动，不开 sync PR、无 automerge。
+> 维护清单中 MC-10 / MC-11 两条因此带 `retired` 标记（保留以备恢复）。
+>
+（原文保留，供恢复时参考）本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`）：roll → 两层注入 →
 契约测试 → PR（base=`dev`）→ 分层 automerge。绝大多数上游演进（新增配置字段、新增依赖、
 schema 选项变化）零人工。
 

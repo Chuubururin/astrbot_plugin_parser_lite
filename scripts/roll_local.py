@@ -1,9 +1,14 @@
-"""本地一键滚动同步：镜像 sync-upstream 工作流的 roll 序列（离线本地版）。
+"""本地一键滚动同步：上游 standalone → vendor 整树重建 → 两层注入（离线本地版）。
+
+⚠️ 本版起，**本脚本是 roll 序列的唯一实现**（不是镜像）。上一版曾有一个
+`sync-upstream.yml` 工作流在 CI 侧跑同一序列，它已随「只留 4 个工作流」的
+精简移除；`scripts/pipeline_common.py` 仍是两轨共同消费的单点语义层，
+但其双轨对账的意义已变为「历史契约」而非「当前双实现」（见
+doc/BRANCHING.md 的退役说明）。
 
 本仓库当前以本地为主工作面（未推远端，GitHub 工作流不触发），上游
 standalone 分支由其 CI 随 main 每次 push 自动发布——vendor 轨的滚动因此
-需要本地驱动。本脚本把工作流的 roll 序列收敛为单命令（与工作流同语义，
-差异仅在不开 PR、直接本地提交）：
+需要本地驱动。本脚本把 roll 序列收敛为单命令：
 
 1. fetch 上游 standalone（孤儿单提交构建）+ main（平面提取源），网络抖动
    自动重试；
@@ -14,7 +19,7 @@ standalone 分支由其 CI 随 main 每次 push 自动发布——vendor 轨的�
    两层注入单命令（提取三数据面 → 分析 → 生成）→ vendor 三层校验 →
    全量契约测试；
 4. 更新 sync-state（version/main_sha/standalone_sha/synced_at/failures）
-   并按工作流同款清单提交。
+   并提交。
 
 安全口径：进程启动于仓库根（os.chdir）；git 子命令统一经 _git（字面量
 参数列表、无 shell），引用固定为 standalone/main/FETCH_HEAD；固定步骤
@@ -22,7 +27,7 @@ standalone 分支由其 CI 随 main 每次 push 自动发布——vendor 轨的�
 路径（pathlib 拼接）。
 
 两条编排层上游真值纪律（提交主题解析 / 远端 main 真值提取源）与祖先校验门
-**委托 scripts/pipeline_common.py 的同一实现**，与 sync-upstream 工作流
+本章程**由 scripts/pipeline_common.py 承载**，历史上与 sync-upstream 工作流
 共用单点语义：双轨各写一份曾在细节上漂移（2026-09-17 评审 M16）。
 
 用法::
