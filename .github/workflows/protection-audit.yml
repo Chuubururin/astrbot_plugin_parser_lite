@@ -1,0 +1,267 @@
+name: protection-audit
+
+# 强制力巡检：每天验证「main 的保护仍在、且等于期望值」。
+#
+# 为什么必须有这个工作流 —— 这是 public 方案**独有的**风险：
+#
+# 旧方案（private + Free）的强制力写在**工作流 YAML 里**。要改它得改代码、
+# 过 review、留 git 痕迹。虽然那种强制力是「模拟的」（不阻止直推 main），
+# 但它**不会静默消失**。
+#
+# 新方案（public + Free）的强制力写在**服务端配置里**。它是真的、硬的，
+# 但有一个致命特性：**任何人都能在 Settings 页面上点两下把它关掉，而且
+# 不产生任何代码变更、不留 review 记录、不触发 CI**。等下一次有人直推 main
+# 时才会发现「保护没了」——那时事故已经发生。
+#
+# 所以：服务端强制力必须配一个**持续的**断言，把「配过一次」变成「每天被验证」。
+# 这就是本工作流。它读的是实际配置，比对的是 docs/BRANCHING.md 里写明的
+# 期望值（与 scripts/apply_branch_protection.sh 同源）。
+#
+# 告警生命周期沿用本仓库已验证的模式（见 sync-upstream.yml）：
+#   · 对账步骤用 always()，且判据是「存在 failure/cancelled」而非「不是全 success」；
+#   · 关告警必须挂在整条流水线健康上，否则「关闭」代码永远不可达；
+#   · set -euo pipefail 下一律显式 if 块（`[ cond ] && var=x` 会静默中止脚本）。
+on:
+  schedule:
+    # 每日 UTC 05:41 = 北京 13:41。避开 sync-upstream（17:17）与 CodeQL（周一 04:23）。
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protection-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: audit branch protection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # 漂移时开告警 issue
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # ---- 先对账（关），再检测（开）------------------------------------
+      # 顺序至关重要：若「关」排在「开」之后，本轮新开的告警会被同轮立刻关掉。
+      # 这条顺序由 tests/test_supply_chain.py 断言钉住。
+      - name: 告警对账（上一轮健康 → 关闭在案告警）
+        id: reconcile
+        if: ${{ always() }}
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # 本轮刚开始，还没有任何检测结论 —— 此时不能贸然关告警。
+          # 「关」的正确位置是在**检测全部通过之后**，见最后一个步骤。
+          # 这一步只把「上一轮是否健康」的判定标记置为空，
+          # 真正的关闭动作放在 audit 步骤内（它才知道检测结果）。
+          echo "healthy=" >> "$GITHUB_OUTPUT"
+          echo "::notice::对账占位：检测完成后由 audit 步骤决定是否关闭"
+
+      - name: 检测分支保护与安全开关
+        id: audit
+        env:
+          REPO: ${{ github.repository }}
+          BRANCH: main
+          # 期望的必需检查 context —— 必须与各工作流的 job name 逐字一致。
+          # 与 scripts/apply_branch_protection.sh 的 REQUIRED_CHECKS 同源；
+          # 改一处必须改另一处，tests/test_branch_model.py 会断言两者一致。
+          EXPECTED_CHECKS: |-
+            lint (ruff / actionlint / zizmor)
+            typecheck (mypy)
+            test (pytest + vendor verify)
+            analyze (python)
+        run: |
+          set -euo pipefail
+          drift=()
+          note() { printf '  · %s\n' "$1"; }
+
+          echo "== 1) 分支保护是否存在 =="
+          if ! prot="$(gh api "repos/${REPO}/branches/${BRANCH}/protection" 2>/dev/null)"; then
+            drift+=("main 的分支保护不存在或不可读（可能被人在 Settings 里删掉了）")
+            prot=""
+          fi
+
+          if [ -n "$prot" ]; then
+            echo "== 2) 逐项比对期望值 =="
+
+            ea="$(echo "$prot" | jq -r '.enforce_admins.enabled')"
+            if [ "$ea" = "true" ]; then note "enforce_admins=true"; else
+              drift+=("enforce_admins 为 ${ea}，期望 true —— 管理员可绕过保护")
+            fi
+
+            st="$(echo "$prot" | jq -r '.required_status_checks.strict')"
+            if [ "$st" = "true" ]; then note "strict=true"; else
+              drift+=("required_status_checks.strict 为 ${st}，期望 true —— 可在分支过期时合并")
+            fi
+
+            afp="$(echo "$prot" | jq -r '.allow_force_pushes.enabled')"
+            if [ "$afp" = "false" ]; then note "allow_force_pushes=false"; else
+              drift+=("allow_force_pushes 为 ${afp}，期望 false —— main 历史可被改写")
+            fi
+
+            ad="$(echo "$prot" | jq -r '.allow_deletions.enabled')"
+            if [ "$ad" = "false" ]; then note "allow_deletions=false"; else
+              drift+=("allow_deletions 为 ${ad}，期望 false —— main 可被删除")
+            fi
+
+            rlh="$(echo "$prot" | jq -r '.required_linear_history.enabled')"
+            if [ "$rlh" = "true" ]; then note "required_linear_history=true"; else
+              drift+=("required_linear_history 为 ${rlh}，期望 true —— 与快进提权模型不符")
+            fi
+
+            # 必需检查：期望值必须**全部在内**（不要求数量相等，
+            # 因为将来可能新增别的检查而不必改这里）
+            actual_checks="$(echo "$prot" | jq -r '.required_status_checks.contexts[]?' | sort)"
+            while IFS= read -r want; do
+              [ -n "$want" ] || continue
+              if printf '%s\n' "$actual_checks" | grep -Fxq "$want"; then
+                note "必需检查在位：${want}"
+              else
+                drift+=("必需检查缺失：'${want}'（现有：$(printf '%s' "$actual_checks" | tr '\n' ';'))")
+              fi
+            done <<< "$EXPECTED_CHECKS"
+          fi
+
+          echo "== 3) secret scanning / Dependabot alerts =="
+          sa="$(gh api "repos/${REPO}" --jq '.security_and_analysis.secret_scanning.status // "unknown"')"
+          if [ "$sa" = "enabled" ]; then note "secret scanning=enabled"; else
+            drift+=("secret scanning 状态为 ${sa}，期望 enabled")
+          fi
+
+          va="$(gh api "repos/${REPO}/vulnerability-alerts" -i 2>/dev/null | head -1 | awk '{print $2}')"
+          if [ "$va" = "204" ]; then note "Dependabot alerts=enabled"; else
+            drift+=("Dependabot alerts 未启用（HTTP ${va}，期望 204）")
+          fi
+
+          echo "== 4) release 环境的 required reviewers =="
+          # public + Free 下环境保护规则**可用**；但必须确认它真的配了 reviewer，
+          # 且**没有**开 prevent_self_review（单人维护下开了会永久卡死发布）。
+          envs="$(gh api "repos/${REPO}/environments" 2>/dev/null || echo '{}')"
+          reviewers="$(echo "$envs" | jq -r '[.environments[]? | select(.name=="release") | .protection_rules[]? | select(.type=="required_reviewers")] | length')"
+          if [ "${reviewers:-0}" -ge 1 ]; then
+            note "release 环境有 required reviewers"
+          else
+            drift+=("release 环境没有 required reviewers —— 发布无人放行")
+          fi
+
+          echo "== 5) 默认分支的工作流文件齐全 =="
+          # 默认分支缺工作流文件 = 该工作流无法被无 ref 的 dispatch，
+          # 且其 schedule 读的是旧定义（见 CONTRIBUTING.md 的「默认分支陷阱」）
+          for wf in ci.yml promote-dev-to-main.yml sync-upstream.yml release.yml codeql.yml protection-audit.yml; do
+            if gh api "repos/${REPO}/contents/.github/workflows/${wf}" --jq '.name' >/dev/null 2>&1; then
+              note "工作流在位：${wf}"
+            else
+              drift+=("默认分支缺工作流文件：${wf}")
+            fi
+          done
+
+          # ---- 结论 ----
+          if [ "${#drift[@]}" -eq 0 ]; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::强制力巡检全部通过"
+            {
+              echo "### ✅ 强制力巡检通过"
+              echo ""
+              echo "分支保护、必需检查、secret scanning、Dependabot、release 环境、工作流文件 —— 全部与期望一致。"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "drift<<EOF"
+              printf '%s\n' "${drift[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::warning::检测到 ${#drift[@]} 项强制力漂移"
+            printf '  ! %s\n' "${drift[@]}"
+            {
+              echo "### ⚠️ 强制力漂移（${#drift[@]} 项）"
+              echo ""
+              printf -- '- %s\n' "${drift[@]}"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+
+      - name: 关闭在案告警（本轮健康时）
+        if: ${{ always() && steps.audit.outputs.healthy == 'true' }}
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          nums="$(gh issue list --search "protection drift in:title state:open" \
+                  --json number --jq '.[].number')"
+          if [ -z "$nums" ]; then
+            echo "::notice::无在案告警需要关闭"
+            exit 0
+          fi
+          for n in $nums; do
+            gh issue close "$n" --comment "强制力巡检已恢复（run ${RUN_ID} 全绿）" \
+              || echo "::warning::关闭 #${n} 失败，留待下轮对账"
+          done
+
+      - name: 开告警（检测到漂移时）
+        if: ${{ always() && steps.audit.outputs.healthy == 'false' }}
+        env:
+          DRIFT: ${{ steps.audit.outputs.drift }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # 去重：同一漂移只维持一个 issue（沿用 sync-upstream 的既有模式）
+          existing="$(gh issue list --search "protection drift in:title state:open" \
+                      --json number --jq '.[0].number // ""')"
+          body="$(cat <<EOF
+          每日强制力巡检发现以下漂移。这些是**服务端配置**，代码里看不出来，
+          只有本巡检能发现。
+
+          \`\`\`
+          ${DRIFT}
+          \`\`\`
+
+          ## 修复
+
+          分支保护类漂移可直接重放期望配置（幂等）：
+
+          \`\`\`bash
+          bash scripts/apply_branch_protection.sh
+          \`\`\`
+
+          secret scanning / Dependabot / 环境 reviewer 需在 Settings 页面开启，
+          详见 \`docs/BRANCHING.md\`。
+
+          ## 为什么这个告警重要
+
+          public + Free 下，main 的强制力来自服务端配置而非工作流 YAML。
+          配置可以被随手点掉而**不留任何代码痕迹**——若不修复，
+          「main 只由提权通道推进」会静默失效，直到有人直推 main 才会暴露。
+
+          run：${RUN_URL}
+          EOF
+          )"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+            echo "::notice::已在 #${existing} 追加评论（去重）"
+          else
+            gh issue create --title "protection drift: 强制力配置与期望不一致" \
+              --body "$body" --label "ci" 2>/dev/null \
+              || gh issue create --title "protection drift: 强制力配置与期望不一致" --body "$body"
+          fi
+
+      - name: 汇总
+        if: ${{ always() }}
+        env:
+          HEALTHY: ${{ steps.audit.outputs.healthy }}
+        run: |
+          {
+            echo "### protection-audit 汇总"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 健康 | \`${HEALTHY:-unknown}\` |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

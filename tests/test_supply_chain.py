@@ -1,17 +1,22 @@
 """供应链与合规基线的机械钉扎（CONTRIBUTING.md 第 13 节）。
 
-背景：本仓库是**私有仓库 + Free 计划**，平台侧的供应链防线大多不可用 ——
-实测 `/rulesets` 返回 403（"Upgrade to GitHub Pro or make this repository
-public"）、`security_and_analysis` 为 null（无 GitHub Code Security，故 CodeQL
-与私密漏洞报告都不可用）、`/vulnerability-alerts` 404。于是能落地的只剩
-「写进仓库、由 CI 与本地门禁强制」的那一部分：
+背景（2026-09-19 重构）：仓库从 **private 转为 public**，平台侧的供应链防线
+从「大多不可用」变成「基本可用」。两边的事实都要记牢，否则会写出错的断言：
 
-- 第三方 action 钉完整 commit SHA（Pinned-Dependencies）
-- 顶层 permissions 最小权限（Token-Permissions）
-- 依赖更新工具（Dependency-Update-Tool）
-- 安全政策（Security-Policy）
-- 发布产物带签名与 SBOM（Signed-Releases / SBOM）
-- 依赖安装只有一处定义（DRY，消灭「假红锁死提权通道」的入口）
+| 能力 | private + Free（旧） | public + Free（新） |
+|---|---|---|
+| `/rulesets`、`/branches/*/protection` | **403** Upgrade to GitHub Pro | 可用 |
+| `security_and_analysis` | null（无 Code Security） | secret scanning 可用 |
+| CodeQL（SAST） | 需 GHAS，不可用 | **免费** |
+| `/vulnerability-alerts` | 404 | 可用 |
+| 环境 required reviewers | 仅 public 可用 | 可用 |
+
+于是本文件守护的东西分成两类：
+- **写进仓库、由 CI 与本地门禁强制**的（钉 SHA / 最小权限 / 依赖更新工具 /
+  安全政策 / 发布物签名与 SBOM / 依赖安装单一实现）—— 这部分完全不变；
+- **服务端配置**的（分支保护 / CodeQL / secret scanning / 环境 reviewer）——
+  新增，且必须配一个**持续巡检**（protection-audit.yml），因为服务端配置
+  可以被人在 UI 上点掉而**不留任何代码痕迹**。
 
 本文件把上面每一条都变成断言。**依据的标准条款写在每个测试的 docstring 里**，
 并注明该条款来自哪个权威来源，避免以后有人「觉得多余」而删掉。
@@ -413,11 +418,96 @@ def test_release_keeps_least_privilege_and_protected_environment() -> None:
     assert job["permissions"]["contents"] == "write"
 
 
+def test_release_environment_is_a_real_gate_for_public_repos() -> None:
+    """`environment: release` 在 public 下是**真的**门；注释不得再声称它不可用。
+
+    背景：旧仓库是 private + Free，官方文档明确写「如需在私有或内部仓库中访问
+    环境、环境机密和部署分支，必须使用 GitHub Pro、GitHub Team 或 GitHub
+    Enterprise」。也就是说那个 `environment:` 声明当时是**一道不存在的门**，
+    而注释承诺了「人工放行」——典型的「文档写了但平台没给」。
+
+    转 public 后它真实生效。两条要守：
+      ① 注释必须反映现状（否则误导后人以为门是假的，从而不配 reviewer）；
+      ② timeout 必须覆盖人工审批（见 test_branch_model.py 的同类断言）。
+    """
+    text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    # 旧方案的过时陈述必须消失
+    for stale in ("部署保护规则", "私有仓库", "GitHub Pro"):
+        # 允许出现在「解释历史」的语境里，但不得出现在断言现状的句子中；
+        # 这里用较宽松的口径：只要「必须使用 GitHub Pro」这类硬陈述不在即可
+        assert f"必须使用 {stale}" not in text, f"release.yml 仍含过时的可用性陈述：{stale}"
+    # 现状必须写清
+    assert "required reviewers" in text or "required reviewer" in text, (
+        "release.yml 必须说明 environment 的 required reviewers 会真的阻塞 job"
+    )
+    assert "超时" in text or "timeout" in text, "必须说明超时包含人工审批等待时间"
+
+
+def test_codeql_fills_the_sast_gap_that_private_plan_left() -> None:
+    """CodeQL 工作流必须存在——它是 Scorecard 的 SAST 项唯一认的形式。
+
+    依据：Scorecard 的 SAST 检查只认 `github/codeql-action` 或 SonarCloud；
+    而 code scanning 对 **private** 仓库需要 GitHub Code Security 许可，
+    对 **public** 仓库免费。旧仓库是 private，故这是当时的必然空白；
+    转 public 后必须补上，否则「补齐供应链基线」是不完整的。
+    """
+    path = WORKFLOWS / "codeql.yml"
+    assert path.is_file(), "缺 codeql.yml —— Scorecard 的 SAST 项仍为空白"
+    text = path.read_text(encoding="utf-8")
+    assert "github/codeql-action" in text, "必须用官方 codeql-action（第三方 SAST 拿不到该分）"
+    assert "security-events: write" in text, "CodeQL 需 security-events: write 权限上传 SARIF"
+
+
+def test_protection_audit_workflow_exists() -> None:
+    """强制力巡检必须存在。
+
+    public 方案的强制力在**服务端配置**里：真的硬，但可以被人在 Settings 上
+    随手点掉且**不留任何代码痕迹**。没有持续巡检，「强制力存在」就只是某一天的
+    快照 —— 直到有人直推 main 才会发现保护没了，而那时事故已经发生。
+    """
+    path = WORKFLOWS / "protection-audit.yml"
+    assert path.is_file(), "缺 protection-audit.yml —— 服务端配置的漂移将无人发现"
+    doc = _load_yaml(path)
+    # YAML 1.1 把裸 on 解析成布尔 True，两种键名都要认（与 test_branch_model 同法）
+    triggers = doc.get("on") or doc.get(True) or {}
+    assert "schedule" in triggers, "巡检必须定时执行，否则只是「配过一次」"
+    perms = doc["jobs"]["audit"]["permissions"]
+    assert perms.get("issues") == "write", "漂移时需开 issue 告警，故要 issues: write"
+
+
+def test_enforcement_surfaces_are_declared_impossible_or_covered() -> None:
+    """每一项强制力都必须要么被巡检覆盖，要么在文档里明确声明做不到。
+
+    这是「不许悄悄略过」的机械保证：旧方案有一张「做不到的标准」表（因为
+    private + Free 缺了一堆能力）。转 public 后那张表必须**缩小**，
+    但缩小必须是有意识的 —— 本断言要求 BRANCHING.md 明确列出仍未做的项，
+    防止「既然能用了，那就都写上」式的含糊。
+    """
+    doc = (REPO_ROOT / "doc" / "BRANCHING.md").read_text(encoding="utf-8")
+    assert "仍然做不到" in doc or "未做的" in doc, (
+        "doc/BRANCHING.md 必须有「仍未做到/未做」的清单——否则读者会以为基线是完整的"
+    )
+    audit = (WORKFLOWS / "protection-audit.yml").read_text(encoding="utf-8")
+    # 这两项在 public 下可用但**不在**代码里（属服务端开关），必须由巡检覆盖
+    assert "secret_scanning" in audit, "secret scanning 是开关项，必须由巡检发现被关"
+    assert "vulnerability-alerts" in audit, "Dependabot alerts 是开关项，必须由巡检发现被关"
+
+
 # ---------------------------------------------------------------------------
 # ⑤ 工作流文件安全基线（Pinned-Dependencies / Dangerous-Workflow）
 # ---------------------------------------------------------------------------
 
-_THIRD_PARTY_USE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@([0-9a-f]{40})$")
+# 第三方 action 的 uses 形态：owner/repo[/subpath...]@<40 位 sha>
+#
+# 注意 `subpath` 这一步不能省：`github/codeql-action/init@<sha>` 是**合法**且
+# 常见的形态（codeql 把 init / analyze / upload-sarif 拆成同一仓库的子路径）。
+# 早期版本的正则只允许 owner/repo@sha，于是引入 codeql.yml 后这条断言会
+# **误报** ——把已正确钉扎的 action 判成未钉扎。
+# 教训：断言的正则必须覆盖平台允许的**全部**合法形态，否则它拦的不是违规，
+# 而是「用的形态我没预料到」。
+_THIRD_PARTY_USE = re.compile(
+    r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*@([0-9a-f]{40})$"
+)
 
 
 def _uses_values() -> list[tuple[str, str]]:

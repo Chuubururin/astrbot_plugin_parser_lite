@@ -1,14 +1,27 @@
-"""分支模型的机械钉扎（CONTRIBUTING.md 第 8 节）。
+"""分支模型的机械钉扎（docs/BRANCHING.md）。
 
-背景：本仓库的强制力**不在 GitHub 侧**——仓库 private 且未开通 GitHub Pro，
-`/branches/main/protection` 与 `/rulesets` 均返回 403。所以「PR 只能打 dev」
-「main 只由 promote 推进」这些约定，若不写成断言，就只是文档里的一句话。
+背景（2026-09-19 重构）：仓库从 private 转为 **public** 后，强制力的落点变了。
+
+- **旧**：private + Free，`/branches/main/protection` 与 `/rulesets` 均 403。
+  强制力只能**模拟**——PR 守卫工作流判红 + 提权 job 自带门禁 + 本地 pre-push
+  钩子。三者都不阻止有写权限的人直接 `git push main`，文档必须承认这一点。
+- **新**：public + Free，分支保护完整可用（`enforce_admins: true`）。
+  强制力**真的在服务端**。于是：
+    ① PR 守卫工作流（`main-pr-target-guard.yml`）被**删除**——服务端会直接
+       拒绝 base=main 的 PR，留着它只是重复的 CI 信号，且会让人误以为
+       强制力来自那个文件；
+    ② 提权 job 的门禁从「唯一防线」降为「第二道」（不可逆动作前独立复算）；
+    ③ 新增一类必须守护的东西：**服务端配置**。它可以被人在 UI 上点掉而不留
+       任何代码痕迹，所以需要 `protection-audit.yml` 每日巡检 + 本文件断言
+       期望值三处同源。
 
 本文件把分支模型当契约守护：
-- 两个新工作流存在且触发条件正确；
+- 强制力期望值在 docs/BRANCHING.md、apply_branch_protection.sh、
+  protection-audit.yml 三处**逐字一致**（改一处漏另两处 → PR 永久卡死）；
 - ci.yml 的 push 触发跟 dev 而非 main；
 - sync-upstream 的 roll PR base、keepalive 目标、staleness 基线都是 dev；
-- release.yml 的白名单/结构断言不被本次改动破坏（防误伤）。
+- release.yml 的白名单/结构断言不被本次改动破坏（防误伤）；
+- 守卫工作流**不得复活**（本条防止有人「顺手加回来」）。
 """
 
 from __future__ import annotations
@@ -22,11 +35,24 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
-GUARD_PATH = WORKFLOWS / "main-pr-target-guard.yml"
 PROMOTE_PATH = WORKFLOWS / "promote-dev-to-main.yml"
 CI_PATH = WORKFLOWS / "ci.yml"
 SYNC_PATH = WORKFLOWS / "sync-upstream.yml"
 RELEASE_PATH = WORKFLOWS / "release.yml"
+CODEQL_PATH = WORKFLOWS / "codeql.yml"
+AUDIT_PATH = WORKFLOWS / "protection-audit.yml"
+BRANCHING_DOC = REPO_ROOT / "doc" / "BRANCHING.md"
+PROTECTION_SCRIPT = REPO_ROOT / "scripts" / "apply_branch_protection.sh"
+
+# 分支保护上的必需检查 context —— 必须与各工作流的 jobs.<id>.name 逐字一致。
+# 这是全套配置里**最易错**的一处：写错不报错，只让 PR 永久停在
+# "Expected — Waiting for status to be reported"。
+REQUIRED_CHECKS = (
+    "lint (ruff / actionlint / zizmor)",
+    "typecheck (mypy)",
+    "test (pytest + vendor verify)",
+    "analyze (python)",
+)
 
 
 def _load(path: Path) -> dict:
@@ -45,41 +71,49 @@ def _workflow_triggers(doc: dict) -> dict:
     raise AssertionError("workflow 缺 on: 段")
 
 
-# ---------------------------------------------------------------- 守卫工作流
+# ------------------------------------------------- 守卫的退役（public 后）
+#
+# 旧方案里 `main-pr-target-guard.yml` 是「PR 只能打 dev」的**唯一**强制力。
+# public 后分支保护在服务端拒绝 base=main 的 PR，守卫变成重复信号，已删除。
+# 下面两条断言防止它被「顺手加回来」——加回来不只是冗余，还会让人误判
+# 强制力的来源（以为靠这个工作流拦，实际上靠服务端）。
 
 
-def test_main_pr_target_guard_exists_and_targets_main() -> None:
-    """守卫必须只对 base=main 的 PR 触发。
-
-    若它改成对所有 PR 触发，合法打到 dev 的 PR 会被一起判红——门禁从
-    「拦错方向」变成「拦一切」，分支模型直接不可用。
-    """
-    assert GUARD_PATH.is_file(), "缺 main-pr-target-guard.yml"
-    triggers = _workflow_triggers(_load(GUARD_PATH))
-    assert list(triggers) == ["pull_request"], f"守卫只应由 pull_request 触发：{list(triggers)}"
-    assert triggers["pull_request"]["branches"] == ["main"], (
-        "守卫必须只匹配 base=main；否则会误伤打到 dev 的合法 PR"
+def test_pr_target_guard_workflow_is_gone() -> None:
+    """守卫工作流必须不存在（public 后由服务端分支保护接管）。"""
+    guard = WORKFLOWS / "main-pr-target-guard.yml"
+    assert not guard.exists(), (
+        "main-pr-target-guard.yml 又出现了。public 仓库下 base=main 的 PR 由"
+        "服务端分支保护直接拒绝，本工作流是重复信号，且会掩盖真正的强制力来源。"
+        "若确实要恢复它（例如仓库重新转回 private），必须同时恢复文档里"
+        "「直推 main 不会被拦」的边界声明。"
     )
 
 
-def test_main_pr_target_guard_actually_fails() -> None:
-    """守卫的 job 必须真的失败（exit 1），而不是只打印警告。
+def test_docs_no_longer_claim_the_repo_is_private() -> None:
+    """文档不得再把「无分支保护」当作**现状**陈述。
 
-    `echo ::error::` 加 exit 0 会让 check 变绿——那是个不拦任何东西的装饰。
+    这类陈述在 public 后是**反向误导**：它会让维护者以为直推 main 拦不住，
+    从而放弃使用（实际可用的）服务端强制力。
+
+    注意：文档里**允许**出现「private 下 403」这类对比性说明（解释为什么
+    以前做不到）。所以断言的是「现状陈述」而非「字面出现」，判据是：
+    不得出现把仓库说成 private 的句子，且必须明确写出 public 的强制力。
     """
-    text = GUARD_PATH.read_text(encoding="utf-8")
-    assert re.search(r"^\s+exit 1\s*$", text, re.MULTILINE), (
-        "守卫的 run 块必须以 exit 1 收场，否则 required check 会是绿的"
-    )
-    assert "::error::" in text, "守卫应给出 ::error:: 注记（PR 页面上可见）"
+    doc = BRANCHING_DOC.read_text(encoding="utf-8")
+    assert "public" in doc, "doc/BRANCHING.md 必须写明仓库可见性是 public"
 
+    # 旧方案的「边界声明」——它断言的是当时的现实，public 后必须消失
+    for stale in (
+        "不阻止有写权限的人",
+        "远端没有分支保护",
+        "强制力**不在 GitHub 侧**",
+        "本仓库是 private",
+    ):
+        assert stale not in doc, f"doc/BRANCHING.md 仍含旧方案的过时现状陈述：{stale}"
 
-def test_main_pr_target_guard_has_no_write_permissions() -> None:
-    """守卫是纯判定，不得有写权限（Scorecard 最小权限）。"""
-    doc = _load(GUARD_PATH)
-    assert doc["permissions"] == {"contents": "read"}, doc.get("permissions")
-    for job in doc["jobs"].values():
-        assert "permissions" not in job, "守卫的 job 不应额外声明权限"
+    # 现状必须写清：强制力真的在服务端
+    assert "enforce_admins" in doc, "必须写明 enforce_admins=true（管理员也不能绕过）"
 
 
 # ---------------------------------------------------------------- 提权工作流
@@ -255,11 +289,11 @@ def test_sync_staleness_baseline_reads_dev() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    [GUARD_PATH, PROMOTE_PATH, CI_PATH, SYNC_PATH, RELEASE_PATH],
-    ids=["guard", "promote", "ci", "sync", "release"],
+    [PROMOTE_PATH, CI_PATH, SYNC_PATH, RELEASE_PATH, CODEQL_PATH, AUDIT_PATH],
+    ids=["promote", "ci", "sync", "release", "codeql", "audit"],
 )
 def test_workflows_are_valid_yaml_with_jobs(path: Path) -> None:
-    """五个工作流都必须是合法 YAML 且含 jobs（防手改引入语法错）。"""
+    """六个工作流都必须是合法 YAML 且含 jobs（防手改引入语法错）。"""
     doc = _load(path)
     assert isinstance(doc.get("jobs"), dict) and doc["jobs"], f"{path.name} 缺 jobs"
     assert "permissions" in doc, f"{path.name} 缺顶层 permissions"
@@ -269,6 +303,153 @@ def test_release_whitelist_still_present() -> None:
     """本次改动不得误伤 release.yml 的白名单（回归护栏）。"""
     text = RELEASE_PATH.read_text(encoding="utf-8")
     assert "cp -a metadata.yaml requirements.txt main.py bridge" in text
+
+
+# ------------------------------------------------- 强制力期望值三处同源
+#
+# public 方案的强制力在**服务端配置**里，而配置可以被人点掉且不留代码痕迹。
+# 唯一可行的防御是：期望值写成代码（可评审、可 diff），且三处引用必须一致：
+#   ① docs/BRANCHING.md            —— 人读的说明
+#   ② scripts/apply_branch_protection.sh —— 应用
+#   ③ .github/workflows/protection-audit.yml —— 巡检
+# 任何一处漏改，后果分别是：文档骗人 / 配错 / 巡检误报。
+
+
+def test_required_checks_match_every_workflow_job_name() -> None:
+    """必需检查 context 必须与真实 job name 逐字一致。
+
+    这是全套配置里最易错、且**报错最不友好**的一处：context 写错不会报错，
+    只会让 PR 永久停在 "Expected — Waiting for status to be reported"。
+    """
+    actual: set[str] = set()
+    for path in (CI_PATH, CODEQL_PATH):
+        doc = _load(path)
+        for job in doc["jobs"].values():
+            if isinstance(job, dict) and job.get("name"):
+                actual.add(job["name"])
+
+    missing = [c for c in REQUIRED_CHECKS if c not in actual]
+    assert not missing, (
+        f"分支保护期望的必需检查在真实工作流里找不到对应 job name：{missing}；"
+        f"现有 job name：{sorted(actual)}。"
+        "改名时必须同步 docs/BRANCHING.md、scripts/apply_branch_protection.sh、"
+        "protection-audit.yml。"
+    )
+
+
+def test_branching_doc_lists_every_required_check() -> None:
+    """BRANCHING.md 必须列出每一条必需检查（人读的那一份也要同步）。"""
+    doc = BRANCHING_DOC.read_text(encoding="utf-8")
+    for check in REQUIRED_CHECKS:
+        assert check in doc, f"BRANCHING.md 未列出必需检查：{check}"
+
+
+def test_protection_script_expects_every_required_check() -> None:
+    """apply_branch_protection.sh 的 REQUIRED_CHECKS 必须齐全。"""
+    text = PROTECTION_SCRIPT.read_text(encoding="utf-8")
+    for check in REQUIRED_CHECKS:
+        assert check in text, f"apply_branch_protection.sh 缺必需检查：{check}"
+
+
+def test_protection_audit_expects_every_required_check() -> None:
+    """protection-audit.yml 的 EXPECTED_CHECKS 必须齐全。
+
+    巡检漏一项 = 那一项被关掉了也不会有人知道。
+    """
+    text = AUDIT_PATH.read_text(encoding="utf-8")
+    for check in REQUIRED_CHECKS:
+        assert check in text, f"protection-audit.yml 缺必需检查：{check}"
+
+
+def test_protection_audit_covers_every_enforcement_surface() -> None:
+    """巡检必须覆盖每一种「可以被点掉」的强制力。"""
+    text = AUDIT_PATH.read_text(encoding="utf-8")
+    surfaces = {
+        "分支保护可读": "/protection",
+        "enforce_admins": "enforce_admins",
+        "严格模式": "required_status_checks.strict",
+        "禁止强推": "allow_force_pushes",
+        "禁止删除": "allow_deletions",
+        "线性历史": "required_linear_history",
+        "secret scanning": "secret_scanning",
+        "Dependabot alerts": "vulnerability-alerts",
+        "release 环境 reviewer": "required_reviewers",
+        "默认分支工作流齐全": "contents/.github/workflows/",
+    }
+    missing = [label for label, needle in surfaces.items() if needle not in text]
+    assert not missing, f"protection-audit 未覆盖以下强制力面：{missing}"
+
+
+def test_protection_script_enforces_admins_and_reads_back() -> None:
+    """配置脚本必须①禁止管理员绕过 ②回读校验。
+
+    ① 是本设计的核心承诺——若管理员可绕过，「main 只由提权推进」就只是
+       对普通贡献者的约束。
+    ② 因为「写完 ≠ 生效」：API 返回 200 但字段被服务端规范化是真实发生过的。
+    """
+    text = PROTECTION_SCRIPT.read_text(encoding="utf-8")
+    assert '"enforce_admins": true' in text, "apply_branch_protection.sh 必须禁止管理员绕过"
+    assert "--method PUT" in text, "应当用 PUT 全量替换以获得幂等性"
+    assert "回读校验" in text, "写完必须回读比对，否则「写成功」被当成「生效」"
+
+
+def test_protection_audit_reconcile_precedes_detection() -> None:
+    """告警对账必须排在检测之前，否则本轮新开的告警会被同轮关掉。
+
+    （与 sync-upstream 的告警生命周期同一纪律。）
+    """
+    doc = _load(AUDIT_PATH)
+    steps = doc["jobs"]["audit"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    reconcile = next(i for i, n in enumerate(names) if "对账" in n)
+    detect = next(i for i, n in enumerate(names) if "检测" in n)
+    assert reconcile < detect, f"对账步骤必须排在检测之前：{names}"
+
+
+def test_codeql_excludes_vendor_snapshot() -> None:
+    """CodeQL 必须排除 vendor/ 与 templates/。
+
+    它们是上游快照（零修改铁律：只能整树重建，不许就地改）。对这些目录报出的
+    问题我们**改不了**，留在结果里只会淹没真问题。
+    """
+    text = CODEQL_PATH.read_text(encoding="utf-8")
+    assert "paths-ignore" in text, "codeql.yml 缺 paths-ignore"
+    for excluded in ("vendor", "templates"):
+        assert excluded in text, f"codeql.yml 未排除 {excluded}/"
+    # CodeQL 的三项权限，缺 actions: read 会以与代码无关的报错收场
+    doc = _load(CODEQL_PATH)
+    perms = doc["jobs"]["analyze"]["permissions"]
+    assert perms.get("security-events") == "write", "CodeQL 需 security-events: write"
+    assert perms.get("actions") == "read", "CodeQL 需 actions: read（最易漏的一项）"
+
+
+def test_release_job_timeout_covers_human_approval() -> None:
+    """release job 的超时必须覆盖人工审批等待。
+
+    `timeout-minutes` **包含**停在 `environment` 等批准的时长。旧值 15 意味着
+    reviewer 必须在一刻钟内点批准，否则 job 直接失败——而那时发布物已构建、
+    已签名，失败后需重跑整个 trust chain。
+    """
+    doc = _load(RELEASE_PATH)
+    job = doc["jobs"]["release"]
+    assert job.get("environment") == "release", "release job 必须声明受保护环境"
+    timeout = job.get("timeout-minutes", 0)
+    assert timeout >= 30, (
+        f"release job 的 timeout-minutes={timeout} 太短——它包含人工审批等待时间，"
+        "至少应留 30 分钟给审阅者"
+    )
+
+
+def test_default_branch_choice_is_documented() -> None:
+    """默认分支选 dev 的决策必须写进文档。
+
+    这张表（哪个事件读哪个 ref 的定义）是最容易踩坑、也最容易忘的地方：
+    默认分支设成 dev 之后，「改了定时工作流但 cron 仍跑旧版本」这个坑才消失。
+    """
+    doc = BRANCHING_DOC.read_text(encoding="utf-8")
+    assert "默认分支" in doc, "BRANCHING.md 必须说明默认分支的选择"
+    assert "schedule" in doc, "必须说明 cron 读默认分支的定义"
+    assert "dev" in doc
 
 
 # ---------------------------------------------------------------- 告警生命周期
@@ -604,13 +785,16 @@ def test_docs_document_ref_dev_for_both_manual_workflows() -> None:
 
 
 def test_docs_contain_per_branch_workflow_matrix() -> None:
-    """§12.3 的分支×工作流矩阵是运维参考，别被删掉。
+    """分支×工作流矩阵是运维参考，别被删掉。
 
-    矩阵记录了「main 上缺 main-pr-target-guard / promote-dev-to-main」这一
-    非直观事实——它是「尚未首次 promote」的必然结果，也是守卫可被绕过的原因。
+    矩阵记录了「默认分支上缺哪些工作流」这一非直观事实。public 重构后
+    `main-pr-target-guard.yml` 已删除，矩阵与工作流清单必须同步更新——
+    否则文档会描述一个不存在的文件。
     """
     text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     assert "12.3 各分支上有哪些工作流" in text, "缺 §12.3 分支×工作流矩阵"
-    for name in ("main-pr-target-guard.yml", "promote-dev-to-main.yml"):
-        assert name in text, f"矩阵未提及 {name}"
-    assert "首次 promote" in text, "未说明「main 缺文件是尚未首次 promote 的必然结果」"
+    assert "promote-dev-to-main.yml" in text, "矩阵未提及 promote-dev-to-main.yml"
+    # 守卫已退役：文档里不应再把它列为在役工作流
+    assert "main-pr-target-guard.yml" not in text, (
+        "CONTRIBUTING.md 仍提及已删除的 main-pr-target-guard.yml —— 文档描述了不存在的文件"
+    )

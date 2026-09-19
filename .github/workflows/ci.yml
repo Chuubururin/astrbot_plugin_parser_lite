@@ -1,8 +1,10 @@
 name: CI
 
-# 分支模型（CONTRIBUTING.md 第 8 节）：dev 是工作分支，main 是发布指针。
-# - pull_request 无分支过滤：**任何** base 都跑，包括误打到 main 的 PR（那时
-#   main-pr-target-guard 会额外报红，两道信号互不遮蔽）；
+# 分支模型（docs/BRANCHING.md）：dev 是工作分支、main 是发布指针。
+# - pull_request 无分支过滤：**任何** base 都跑。注意这里不再有「让误打 main 的
+#   PR 判红」的职责——那个职责已交给**服务端分支保护**（公开仓库下可用）。
+#   ci.yml 保留无过滤的 pull_request 只是为了让**任何** PR 都有信号，
+#   而不是作为强制力。强制力在分支保护上，不在这个文件里。
 # - push 只跟 dev：main 由 promote-dev-to-main 推进，promote job 内自带同构门禁
 #   （GITHUB_TOKEN 推的提交不触发本工作流，故不能依赖这里兜底）。
 on:
@@ -21,6 +23,10 @@ concurrency:
 jobs:
   lint:
     # required check ①：ruff（lint+format）+ actionlint + zizmor --pedantic
+    # ⚠️ 这个 job name 是 main 分支保护上的必需检查 context（逐字一致）。
+    #    改名必须同步改 docs/BRANCHING.md、scripts/apply_branch_protection.sh、
+    #    .github/workflows/protection-audit.yml —— 否则 PR 永久停在
+    #    "Expected — Waiting for status to be reported"。
     name: lint (ruff / actionlint / zizmor)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -50,6 +56,7 @@ jobs:
           pre-commit run --config config/.pre-commit-config.yaml --all-files --show-diff-on-failure
 
   typecheck:
+    # required check ②（见 lint 的改名纪律说明）
     name: typecheck (mypy)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -72,8 +79,8 @@ jobs:
       #     pinning 以强制 fully-pinned 策略」；
       #   · 本仓库没有任何步骤在运行时把 action 克隆进 .github/actions/，故第一点
       #     的风险不成立；
-      #   · 第二点需要平台侧 Actions policy，而本仓库是私仓 + Free 计划（Rulesets
-      #     实测 403），该能力本来就没有。
+      #   · 第二点需要平台侧 Actions policy；本仓库虽有分支保护，但 Actions
+      #     policy 是 owner 级设置，未启用。
       # 复评触发条件：actionlint 支持 `$/` 后立刻改回并撤掉豁免。
       #
       # extras=type 装 mypy + types-qrcode：mypy 的检查范围含 tests/（pyproject
@@ -90,7 +97,7 @@ jobs:
         run: python scripts/typecheck.py
 
   test:
-    # required check ②：确定性三类契约 + 行为黄金样本（网络隔离区默认跳过）
+    # required check ③（见 lint 的改名纪律说明）
     name: test (pytest + vendor verify)
     runs-on: ubuntu-latest
     timeout-minutes: 15

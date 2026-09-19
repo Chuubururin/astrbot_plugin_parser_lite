@@ -1,12 +1,25 @@
 name: promote-dev-to-main
 
-# 把**已验证的 dev** 提为 main——main 是纯粹的发布指针，永远等于某个已通过
+# 把**已验证的 dev** 提为 main —— main 是纯粹的发布指针，永远等于某个已通过
 # 全量门禁的 dev 快照。这是分支模型的唯一一条「向 main 写」通道。
 #
-# 为什么不是 merge PR：本仓库 private 且未开通 GitHub Pro，远端没有分支保护与
-# 必需检查可用（/rulesets 与 /branches/*/protection 均 403）。PR 合并路径上，
-# 「合并按钮何时可按」没有任何强制力——所以把门禁做进工作流本身：promote job
-# 在推 main 之前**自带**全套确定性门禁（lint / typecheck / 全量契约测试）。
+# ── 与旧方案（private + Free）的关键差异 ────────────────────────────────
+# 旧仓库是 private + Free：分支保护不可用（/rulesets 与
+# /branches/*/protection 均 403 "Upgrade to GitHub Pro"）。那时本 job 自带
+# 的全套门禁是 main 的**唯一防线**，且必须在文档里承认「有写权限的人可以
+# 直推 main，没人拦得住」。
+#
+# 现在仓库是 **public + Free**：分支保护完整可用（见 docs/BRANCHING.md），
+# `enforce_admins: true` 让**管理员也不能直推 main**。所以本 job 的门禁
+# 从「唯一防线」降为**第二道防线** —— 但这道防线仍然保留，理由变了：
+#
+#   promote 是**不可逆的发布动作**（main 的移动即对外发布信号）。
+#   在不可逆动作前独立复算一遍门禁（~25s）比信任上游信号更便宜。
+#   上游 dev 上的 CI 绿是**必要条件**，不是充分条件：
+#   它证明的是「那个提交在当时的上下文里是绿的」，而提权发生在此刻。
+#
+# 新增的一条断言见 job 末尾「断言 main 的分支保护仍在」——
+# 那是**配置漂移探测器**：若有人把分支保护关了，这个 job 会红。
 #
 # 为什么用 GITHUB_TOKEN 而不是 GitHub App / PAT：零配置即可用，且 GITHUB_TOKEN
 # 推的提交**不会**触发后续工作流——这恰是我们要的：门禁已在 promote job 内跑过，
@@ -110,10 +123,10 @@ jobs:
           python-version: "3.12"
 
       # ---- 门禁：与 ci.yml 的 test job 同构 -------------------------------------
-      # 为什么在 promote 里重跑一遍而不是复用 dev 上的 CI 结论：GITHUB_TOKEN 有
-      # 能力推 main，而 main 的唯一防线就是这一步。dev 上的 CI 绿是「必要条件」，
-      # 但 promote 是**不可逆的发布动作**，独立复算比信任上游信号更便宜
-      # （全量契约测试 ~25s）。刻意与 ci.yml 保持同一组命令，避免两套门禁漂移。
+      # 为什么在 promote 里重跑一遍而不是复用 dev 上的 CI 结论：见文件头
+      # 「与旧方案的关键差异」——promote 是不可逆的发布动作，独立复算比信任
+      # 上游信号更便宜（全量契约测试 ~25s）。刻意与 ci.yml 保持同一组命令，
+      # 避免两套门禁漂移。
       # 依赖安装统一走复合 action（.github/actions/setup-env），extras=gate。
       #
       # 为什么必须显式声明 gate 而不是沿用默认值：本 job 直接跑
@@ -211,6 +224,11 @@ jobs:
           # --force-with-lease 而非裸 push：快进语义下两者等价，但 lease 钉住
           # 「我校验过的那个 main」——若有人在校验与推送之间动了 main，推送被拒
           # 而不是把对方的提交抹掉（race-free 的提权）。
+          #
+          # 注：分支保护要求 `strict` + 线性历史 + 禁止强推。本推送虽带
+          # --force-with-lease，但在快进语义下**不构成**强推（远端是新提交的
+          # 祖先），故不受 allow_force_pushes=false 阻断。这正是本模型选择
+          # 快进而非 merge 的原因之一。
           git push --force-with-lease="refs/heads/main:${MAIN_SHA}" \
             origin "origin/dev:refs/heads/main"
           {
@@ -224,7 +242,43 @@ jobs:
             echo "发布 tag：\`git tag v<metadata 版本> ${DEV_SHA} && git push origin <tag>\`"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
+      # ---- 配置漂移探测：强制力还在不在？ -------------------------------------
+      # 这是 public 方案**独有**的一步。旧方案（private）的强制力是模拟的，
+      # 但它写在 YAML 里、改它要过 review 留痕迹。新方案的强制力在**服务端配置**里：
+      # 真的硬，但可以被人在 Settings 上随手点掉，不留任何代码痕迹。
+      #
+      # 每日巡检（protection-audit.yml）负责发现漂移；本步骤是**第二重**：
+      # 在「即将向 main 写入」这个最需要保护的时刻，确认保护仍然在位。
+      # 若这里红了，说明有人关了分支保护 —— 提权通道不应继续可用。
+      #
+      # 放在推送**之后**：先完成动作，再报告环境健康度。若放在推送前，
+      # 一个误关的保护会阻断正常发布；而真正的风险（保护失效时被直推）
+      # 需要的是**告警**而不是阻断提权本身。
+      # 唯一例外：分支保护无 admin 权限读不到时会红。workflow 的 GITHUB_TOKEN
+      # 拿得到 read 权限（保护配置读操作只需 repo 权限），故不会误红。
+      - name: 断言 main 的分支保护仍在（防配置漂移）
+        if: ${{ always() && steps.relation.outputs.skip == 'false' && github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! prot="$(gh api "repos/${REPO}/branches/main/protection" 2>/dev/null)"; then
+            echo "::error::main 的分支保护不存在或不可读 —— 强制力已失效。"
+            echo "::error::请重放期望配置：bash scripts/apply_branch_protection.sh"
+            exit 1
+          fi
+          # 关键字段抽查（完整比对由 protection-audit.yml 负责，
+          # 这里只做「还在不在」的快速判断，避免两处逻辑漂移）
+          ea="$(echo "$prot" | jq -r '.enforce_admins.enabled')"
+          if [ "$ea" != "true" ]; then
+            echo "::error::main 的 enforce_admins 为 ${ea}，期望 true —— 管理员可绕过保护"
+            exit 1
+          fi
+          echo "::notice::main 分支保护在位（enforce_admins=true）"
+
       - name: 汇总
+        if: ${{ always() }}
         env:
           DECIDE_REASON: ${{ needs.decide.outputs.reason }}
           SKIP: ${{ steps.relation.outputs.skip }}

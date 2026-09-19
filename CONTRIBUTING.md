@@ -33,7 +33,7 @@ B 站/抖音/小红书等平台的分享链接并转发为内容卡片。
 ```bash
 git clone https://github.com/Chuubururin/astrbot_plugin_parser_lite.git
 cd astrbot_plugin_parser_lite
-git switch dev            # 工作分支；直接改 main 的 PR 会被 main-pr-target-guard 判红
+git switch dev            # 工作分支（也是默认分支）；打到 main 的 PR 会被服务端分支保护拒绝
 
 python3 -m venv .venv && . .venv/bin/activate        # Python 3.12
 pip install -r requirements.txt -r requirements/host-provided.txt
@@ -155,40 +155,63 @@ feature 分支 ──PR(base=dev)──▶ dev ──promote-dev-to-main──�
 
 | 分支 | 角色 | 谁可以推进 | 历史可否改写 |
 |---|---|---|---|
-| `dev` | **工作分支**。所有 PR（含 `sync-upstream` 的 roll PR）以此为 base | 合并 PR；`sync-upstream` 的 roll PR 与 keepalive | ❌ 禁止（本地 `pre-push` 拦截） |
-| `main` | **发布指针**。只承载「已通过全量门禁、可发布」的快照 | **仅** `promote-dev-to-main` 工作流 | ❌ 禁止（同上） |
+| `dev` | **工作分支 + 默认分支**。所有 PR（含 `sync-upstream` 的 roll PR）以此为 base | 合并 PR；`sync-upstream` 的 roll PR 与 keepalive | ❌ 禁止 |
+| `main` | **发布指针**。只承载「已通过全量门禁、可发布」的快照 | **仅** `promote-dev-to-main` 工作流 | ❌ 禁止 |
 | `lkg` | 回滚锚点。每次 roll 前留档上一已验证快照 | `sync-upstream`（每次覆写） | ✅ 允许 force（语义即覆写） |
 
-**贡献者请一律向 `dev` 开 PR。** 打到 `main` 的 PR 会被
-`main-pr-target-guard` 工作流直接判红（见 8.3）。
+**贡献者请一律向 `dev` 开 PR。** 打到 `main` 的 PR 会被**服务端分支保护直接拒绝**
+（不是靠某个 CI 判红——见 8.2）。
 
-### 8.2 远端没有分支保护 —— 门禁在工作流里
+> 默认分支是 `dev` 而非 `main`，理由是**权威版本就是 `dev`**。
+> 这个设置还顺带消除了一整类坑：`schedule`（cron）与不带 `--ref` 的
+> `workflow_dispatch` 都读**默认分支**上的定义，默认分支设为 `dev` 后，
+> 改了定时工作流**立即生效**，无需等一次 promote。
 
-本仓库是 **private 且未开通 GitHub Pro**，GitHub 的分支保护与 rulesets 对私有仓库
-仅对付费计划开放：`GET /repos/{owner}/{repo}/branches/main/protection` 与
-`/rulesets` 均返回 `403 Upgrade to GitHub Pro`。
+### 8.2 强制力在服务端 —— 分支保护
 
-所以这里的强制力**不在 GitHub 侧**，而由三件事共同构成：
+**本仓库是 public。** public 仓库在 GitHub Free 计划下可用完整的分支保护
+（private 则不可用：`/branches/main/protection` 与 `/rulesets` 会返回
+`403 Upgrade to GitHub Pro`）。
 
-| 强制点 | 机制 | 拦截什么 |
+`main` 的保护配置**期望值**记在 `doc/BRANCHING.md`，由
+`scripts/apply_branch_protection.sh` 幂等应用：
+
+| 配置 | 值 | 含义 |
 |---|---|---|
-| `main-pr-target-guard` 工作流 | 对 base=main 的 PR 直接 `exit 1` | 把变更绕过 dev 直接提给 main |
-| `promote-dev-to-main` 的 job 内门禁 | promote 前自带 lint / mypy / vendor 校验 / 全量 pytest，任一红即不推 main | 把未验证的快照推上 main |
-| 本地 `pre-push` 钩子（`scripts/no-force-push-main.sh`） | 拒绝对 `main`/`dev` 的非快进推送 | 就地改写两条长期分支的历史 |
+| `enforce_admins` | `true` | **管理员也不能绕过**——这是本设计的核心承诺 |
+| `required_status_checks` | 4 个必需检查 | 见 8.3 |
+| `strict` | `true` | 分支必须最新才能合并 |
+| `allow_force_pushes` / `allow_deletions` | `false` | `main` 历史不可改写、不可删除 |
+| `required_linear_history` | `true` | 与快进提权模型一致 |
 
-> **知道的边界**：以上都不阻止**有写权限的人**用 `git push` 直接推 `main`
-> （GitHub 侧没有规则可拦）。这条护栏防的是误操作与自动化，不是恶意。真需要
-> 硬隔离时，把仓库转 public 或升级计划后启用分支保护即可——届时本节的三个
-> 强制点仍应保留（纵深防御）。
+纵深防御仍有另外两层（**保留**，但已不是主要防线）：
+
+| 层次 | 机制 | 拦截什么 |
+|---|---|---|
+| 服务端（**主**） | 分支保护 + 必需检查 | 直推 `main`、绕过检查的合并 |
+| `promote-dev-to-main` 的 job 内门禁 | promote 前自带 lint / mypy / vendor 校验 / 全量 pytest | 把未验证的快照推上 `main`（**不可逆动作前的独立复算**） |
+| 本地 `pre-push` 钩子（`scripts/no-force-push-main.sh`） | 拒绝对 `main`/`dev` 的非快进推送 | 就地改写历史的误操作（**可被 `--no-verify` 绕过**，只作快速反馈） |
+
+> **服务端配置会漂移。** 它可以被人在 Settings 上随手点掉，且**不留任何代码
+> 痕迹**——Git 有历史和 review，配置没有。所以
+> `.github/workflows/protection-audit.yml` 每日巡检实际配置是否仍等于期望值，
+> 发现漂移就开 `protection drift` issue。**这是本方案唯一新增的「守护配置的
+> 配置」**，不要删。
 
 ### 8.3 必需检查（required checks）
 
-CI（`.github/workflows/ci.yml`）在**每个** PR 上运行，三个 job 即 required checks
-（名字必须与 job `name` 逐字一致）：
+分支保护上的必需检查**四条**（名字必须与 job `name` 逐字一致）：
 
 - `lint (ruff / actionlint / zizmor)`
 - `typecheck (mypy)`
 - `test (pytest + vendor verify)`
+- `analyze (python)` ← CodeQL，public 后免费可用（private 需 GHAS）
+
+> ⚠️ **改名是最容易踩的坑。** context 指的是 job 的 `name`（不是文件名、
+> 不是 job id、不是 workflow name）。写错的后果**不是报错**，而是 PR 永久停在
+> `Expected — Waiting for status to be reported`。改任何 job 名时，必须同步改
+> **四处**：`doc/BRANCHING.md`、`scripts/apply_branch_protection.sh`、
+> `protection-audit.yml`、以及本节。`tests/test_branch_model.py` 会断言前三处一致。
 
 「确定性三类契约」（import 面 AST 白名单 / API 签名快照 / requirements 派生一致性）
 包含在 `test` job 中；网络隔离区快照（`network` 标记）默认跳过，不作为 required。
@@ -280,20 +303,24 @@ git commit --allow-empty -m "[promote] release v1.3.7"
   | 文件 | 触发 | 作用 |
   | --- | --- | --- |
   | `ci.yml` | PR（任意 base）+ push 到 `dev` | 三道 required checks：`lint` / `typecheck` / `test` |
-  | `main-pr-target-guard.yml` | PR(base=main) | 拒绝打到 `main` 的 PR（见 8.2） |
-  | `promote-dev-to-main.yml` | push 到 `dev`（`[promote]` 前缀）+ 手动 | 门禁后把 `main` 快进到 `dev` |
-  | `release.yml` | push tag `v*` | 构建 zip + Syft SBOM + SLSA attestation（provenance 与 SBOM 各一）→ 证明落成 release 附件 → 发布 |
+  | `codeql.yml` | PR（任意 base）+ push 到 `dev` + 每周一 cron | 第四道 required check `analyze (python)`：CodeQL SAST |
+  | `promote-dev-to-main.yml` | push 到 `dev`（`[promote]` 前缀）+ 手动 | 门禁后把 `main` 快进到 `dev`；推完断言分支保护仍在位 |
+  | `release.yml` | push tag `v*` | 构建 zip + Syft SBOM + SLSA attestation（provenance 与 SBOM 各一）→ 证明落成 release 附件 → **等 `release` 环境人工放行** → 发布 |
   | `sync-upstream.yml` | 每日 cron（`17 17 * * *`）+ 手动 | 滚动同步上游快照 → PR(base=dev) |
+  | `protection-audit.yml` | 每日 cron（`41 5 * * *`）+ 手动 | **巡检服务端强制力是否漂移**（分支保护 / 必需检查 / secret scanning / Dependabot / 环境 reviewer / 工作流文件齐全） |
 
   依赖关系（谁等谁）：
 
   ```
-  PR → dev ──ci.yml（必过）──┬── promote-dev-to-main.yml ──→ main ──→ tag v* ──→ release.yml
-                            └──（PR 合入 dev 后）sync-upstream.yml 的产出也走同一条 ci 门
+  PR → dev ──ci.yml + codeql.yml（必过）──┬── promote-dev-to-main.yml ──→ main ──→ tag v* ──→ release.yml
+                                          └──（PR 合入 dev 后）sync-upstream.yml 的产出也走同一条 ci 门
+
+  protection-audit.yml ──（独立，每日巡检强制力配置）
   ```
 
-  `main` 不被任何工作流直接推：唯一的写入者是 `promote-dev-to-main.yml`；
-  `main-pr-target-guard.yml` 保证没有 PR 能以 `main` 为 base。
+  `main` 不被任何工作流直接推：唯一的写入者是 `promote-dev-to-main.yml`。
+  **服务端分支保护**（不是某个工作流）保证没有 PR 能以 `main` 为 base、
+  也没有人能直推 `main`。
   注意 **用 `GITHUB_TOKEN` 推的提交不会再触发工作流**，所以 promote 自己也带
   全套门禁，而不是「推完等 CI」。
 
@@ -393,10 +420,10 @@ gh workflow run promote-dev-to-main --ref dev
 **人工处置**：确属误报可直接关；下次成功 run 的对账不会重开。若想强制刷新，
 `gh workflow run sync-upstream -f force=true` 会跳过熔断跑一轮完整对账。
 
-### 12.2 手动触发时必须带 `--ref dev`
+### 12.2 不同事件读不同 ref 的 workflow 定义
 
-`main` 是默认分支，而**不同事件读的是不同 ref 上的 workflow 定义**。
-把这条规则记牢，本节的其余内容都是它的推论：
+**默认分支是 `dev`**，而不同事件读的是不同 ref 上的 workflow 定义。
+把这张表记牢，本节的其余内容都是它的推论：
 
 | 事件 | 读哪个 ref 的定义 | 文件必须在默认分支上？ |
 | --- | --- | --- |
@@ -406,50 +433,26 @@ gh workflow run promote-dev-to-main --ref dev
 | `workflow_dispatch`（不带 `--ref`） | **默认分支** | **是** |
 | `workflow_dispatch --ref X` | **`X`** | 是（须先满足上一条） |
 
-实测证据：
+**默认分支设为 `dev` 带来的好处**（这是本次重构的一个有意选择）：
+`schedule` 与无 `--ref` 的 dispatch 都读**默认分支**，而 `dev` 正是改动的落点。
+于是「改了定时工作流、cron 却仍跑旧版本」这个坑**直接消失**——
+改动 push 到 `dev` 就生效，不必等一次 promote。
 
-| 触发方式 | run 的 `headSha` | 取到的定义 |
-| --- | --- | --- |
-| `schedule`（每日 cron） | `main` 的 sha | 旧 |
-| `gh workflow run sync-upstream` | `main` 的 sha | 旧 |
-| `gh workflow run sync-upstream --ref dev` | `dev` 的 sha | **新** |
+（在旧的 `main`=默认分支方案下，这里有整整一类坑：`schedule` 读 `main` 的旧定义，
+改动必须 promote 之后才对 cron 生效，极易被误判成「改动无效」。
+把默认分支改成 `dev` 后，这类困惑不再存在。）
 
-**`promote-dev-to-main` 更严重：不带 `--ref` 直接报错**，不是「跑了旧版本」而是
-**根本跑不起来**：
+**仍需注意的一点**：`pull_request` 读的是**合并提交**的定义。
+所以「PR 的 head 侧新增/修改的 workflow」在本 PR 上就能生效（合并提交含它），
+这是期望的行为。
 
-```
-$ gh workflow run promote-dev-to-main -f dry_run=true
-could not create workflow dispatch event: HTTP 422: Workflow does not have
-'workflow_dispatch' trigger
-$ gh workflow run promote-dev-to-main --ref dev -f dry_run=true     # ✓ 成功
-```
-
-原因：`main` 上**没有** `promote-dev-to-main.yml`（它是随本次分支模型才引入的，
-只在 `dev` / `lkg` 上）。默认分支上找不到带 `workflow_dispatch` 的文件，
-dispatch API 就判 422。同理，`main-pr-target-guard.yml` 也不在 `main` 上。
-
-所以：
+**手动触发一律带 `--ref dev`**（除非你明确想跑某个别的 ref）：
 
 ```bash
-# 正确：立刻用 dev 上的最新定义跑
 gh workflow run sync-upstream --ref dev -f force=true
 gh workflow run promote-dev-to-main --ref dev -f dry_run=true
-# 错误 A：会用 main 上的（可能过时的）定义跑，你以为在验证新逻辑，其实没有
-gh workflow run sync-upstream -f force=true
-# 错误 B：直接 422 失败
-gh workflow run promote-dev-to-main -f dry_run=true
+gh workflow run protection-audit --ref dev
 ```
-
-**推论一**：对这类「先合并进 `dev`、再 promote 到 `main`」的工作流，
-**改动只有在 promote 之后才对 cron 与无 ref 的 dispatch 生效**。
-这是把强制力放在 workflow 里的固有代价；调它们时务必用 `--ref dev`，
-不要因为 cron 表现还是旧的而误判改动无效。
-
-**推论二（安全）**：`pull_request` 读的是**合并提交**的定义，所以
-`main-pr-target-guard` 只在「PR 的 head 侧含该文件」时才生效。
-从 `dev` 拉的分支含它 → 守卫生效；**从 `main` 拉的分支不含它 → 守卫不触发**，
-该 PR 不会被拒。这个缺口会随**首次 promote**（`main` 拿到该文件）自动闭合。
-在此之前，若有人从 `main` 拉分支再开 base=main 的 PR，守卫拦不住。
 
 ### 12.3 各分支上有哪些工作流
 
@@ -458,37 +461,44 @@ gh workflow run promote-dev-to-main -f dry_run=true
 | 工作流文件 | `dev` | `lkg` | `main` |
 | --- | :-: | :-: | :-: |
 | `ci.yml` | ✓ | ✓ | ✓ |
-| `main-pr-target-guard.yml` | ✓ | ✓ | **✗** |
-| `promote-dev-to-main.yml` | ✓ | ✓ | **✗** |
+| `codeql.yml` | ✓ | ✓ | ✓ |
+| `promote-dev-to-main.yml` | ✓ | ✓ | ✓ |
 | `release.yml` | ✓ | ✓ | ✓ |
 | `sync-upstream.yml` | ✓ | ✓ | ✓ |
+| `protection-audit.yml` | ✓ | ✓ | ✓ |
 
-**`main` 缺两个文件，是「尚未首次 promote」的必然结果** —— 这两个工作流随本次
-分支模型才引入，只在 `dev` / `lkg` 上；`main` 仍是引入前的基线提交。
-**首次 promote 之后 `main` 会补齐**。
+**六个文件在每个长期分支上都齐全。** 这是 public 重构带来的一个附带改善：
+旧方案里「PR 目标守卫」与 promote 两个工作流只在 `dev` / `lkg` 上，导致
+「默认分支缺文件 → 无 ref 的 dispatch 判 422」这类坑；现在默认分支是 `dev`，
+且首次 push 时就建好全部三个长期分支，不再有「文件不在默认分支上」的状态。
+（若某天发现默认分支缺某个工作流文件，那就是一次**部署事故**——
+`protection-audit.yml` 会把它报出来。）
 
 再叠加各工作流的 `on:` 过滤器，得到「实际会跑」的矩阵：
 
-| 工作流 | 触发 | `dev` | `lkg` | `main` | 其他分支 / tag |
-| --- | --- | :-: | :-: | :-: | --- |
-| `ci.yml` | PR（任意 base） | — | — | — | **任何 PR 都跑**（读合并提交） |
-| `ci.yml` | push | **✓** | ✗ | ✗ | ✗（过滤器只认 `dev`） |
-| `main-pr-target-guard.yml` | PR base=main | — | — | — | head 侧含该文件时跑 |
-| `promote-dev-to-main.yml` | push | **✓** | ✗ | ✗ | ✗ |
-| `promote-dev-to-main.yml` | 手动 | ✓（`--ref dev`） | ✓ | **✗ 422** | 需 `--ref` |
-| `release.yml` | push tag `v*` | ✓ | ✓ | ✓ | **任何 ref 的 tag** |
-| `sync-upstream.yml` | cron | **✓**（定义取自 `main`） | ✗ | ✓（旧定义） | ✗ |
-| `sync-upstream.yml` | 手动 | ✓（`--ref dev`） | ✓ | ✓（旧定义） | 需 `--ref` |
+| 工作流 | 触发 | `dev` | `main` | 其他分支 / tag |
+| --- | --- | :-: | :-: | --- |
+| `ci.yml` | PR（任意 base） | — | — | **任何 PR 都跑**（读合并提交） |
+| `ci.yml` | push | **✓** | ✗ | ✗（过滤器只认 `dev`） |
+| `codeql.yml` | PR（任意 base） | — | — | **任何 PR 都跑** |
+| `codeql.yml` | push | **✓** | ✗ | ✗ |
+| `codeql.yml` | cron（周一 04:23） | **✓**（默认分支即 `dev`） | ✓（旧定义，但同文件） | ✗ |
+| `promote-dev-to-main.yml` | push | **✓** | ✗ | ✗ |
+| `promote-dev-to-main.yml` | 手动 | ✓ | ✓ | 需 `--ref` |
+| `release.yml` | push tag `v*` | ✓ | ✓ | **任何 ref 的 tag** |
+| `sync-upstream.yml` | cron（每日 17:17） | **✓**（默认分支即 `dev`） | ✓ | ✗ |
+| `sync-upstream.yml` | 手动 | ✓ | ✓ | 需 `--ref` |
+| `protection-audit.yml` | cron（每日 05:41） | **✓**（默认分支即 `dev`） | ✓ | ✗ |
 
 三条要点：
 
 1. **`ci.yml` 的 push 触发只认 `dev`**，所以 `main` 上永远不会因 push 而跑 CI
    —— 这不是缺陷，而是刻意为之（`GITHUB_TOKEN` 推的提交本就不触发工作流，
    把 `main` 留在列表里只会制造「main 有 CI 保护」的错觉）。
-2. **`lkg` 上虽然五个文件都在，但它不该被用来跑任何东西** —— 它是回滚锚点，
+2. **`lkg` 上虽然文件都在，但它不该被用来跑任何东西** —— 它是回滚锚点，
    不是工作分支。`lkg` 存在是为了 `checkout` 出「上一已验证快照」。
-3. **`sync-upstream` 的 cron 行是「定义取自 `main`」** —— 即改动要等 promote
-   才生效（见 12.2）。
+3. **cron 读的是默认分支（`dev`）的定义** —— 而 `dev` 正是改动落点，
+   所以改动**立即对 cron 生效**，无需等 promote（见 12.2）。
 
 ---
 
@@ -502,15 +512,19 @@ gh workflow run promote-dev-to-main -f dry_run=true
 | --- | --- | --- |
 | 第三方 action 钉完整 commit SHA（GitHub Secure use；Scorecard `Pinned-Dependencies`） | 全部 `uses:` | `test_every_third_party_action_is_pinned_to_a_full_commit_sha` |
 | 钉扎行保留 `# vX.Y.Z` 注释（Dependabot 依赖它更新版本文档） | 同上 | `test_pinned_actions_keep_a_version_comment_for_dependabot` |
-| 顶层 `permissions` 只读、写权限下放 job 级（Scorecard `Token-Permissions` 满分口径） | 5 个工作流 | `test_workflows_declare_top_level_read_only_permissions` |
-| 不用 `pull_request_target` / `workflow_run` 检出不可信代码（Scorecard `Dangerous-Workflow`，Critical） | 5 个工作流 | `test_workflows_avoid_dangerous_triggers` |
+| 顶层 `permissions` 只读、写权限下放 job 级（Scorecard `Token-Permissions` 满分口径） | 6 个工作流 | `test_workflows_declare_top_level_read_only_permissions` |
+| 不用 `pull_request_target` / `workflow_run` 检出不可信代码（Scorecard `Dangerous-Workflow`，Critical） | 6 个工作流 | `test_workflows_avoid_dangerous_triggers` |
 | 依赖更新工具（Scorecard `Dependency-Update-Tool`） | `.github/dependabot.yml` | `test_dependabot_covers_actions_and_hand_maintained_python_deps` |
 | 依赖更新冷却期（zizmor `dependabot-cooldown`，置信度 High） | 同上 `cooldown` 段 | 同上 |
 | 安全政策（Scorecard `Security-Policy`，按其三档评分写全） | `.github/SECURITY.md` | `test_security_policy_satisfies_every_scorecard_scoring_tier` |
 | 代码所有者约束工作流变更（GitHub Secure use） | `.github/CODEOWNERS` | `test_codeowners_covers_the_supply_chain_surface` |
-| 发布产物带签名/证明（Scorecard `Signed-Releases`） | `release.yml` 归档 `*.intoto.jsonl` | `test_release_attaches_provenance_bundle_to_the_release` |
+| 发布产物带签名/证明（Scorecard `Signed-Releases`；**后缀 `.intoto.jsonl` 才是满分档**） | `release.yml` 归档 `*.intoto.jsonl` | `test_release_attaches_provenance_bundle_to_the_release` |
 | 发布 SBOM（Scorecard `SBOM`；NTIA/CISA 最低要素） | `release.yml`（Syft → SPDX） | `test_release_generates_and_attests_an_sbom` |
 | 复用 CI 逻辑而非多处手抄（GitHub 官方推荐 composite action） | `.github/actions/setup-env/` | `test_every_delegating_workflow_uses_the_shared_setup_action` |
+| **SAST**（Scorecard `SAST`，只认 `github/codeql-action` 或 SonarCloud） | `codeql.yml` | `test_codeql_fills_the_sast_gap_that_private_plan_left` |
+| **分支保护**（Scorecard `Branch-Protection`） | 服务端配置，期望值见 `doc/BRANCHING.md` | `test_protection_script_enforces_admins_and_reads_back` |
+| **环境人工放行**（GitHub environments） | `release.yml` 的 `environment: release` | `test_release_environment_is_a_real_gate_for_public_repos` |
+| **强制力不漂移**（本仓库独有，见 13.4） | `protection-audit.yml` | `test_protection_audit_covers_every_enforcement_surface` |
 
 ### 13.1 依赖安装只有一处定义
 
@@ -572,17 +586,37 @@ gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
 4. 确认 `tests/test_supply_chain.py` 与 `tests/test_branch_model.py` 全绿
    （它们会替你把上面三条机械核一遍）。
 
-### 13.4 平台限制：以下标准本仓库**做不到**
+### 13.4 平台能力现状：哪些能做、哪些仍做不到
 
-如实声明，避免以后有人以为「没做 = 忘了」：
+**2026-09-19 重构**：仓库从 private 转为 **public**，平台侧的多数防线随之解锁。
+两张表如实分开写，避免两种误判——「以为没做」和「以为做了」。
 
-| 标准条款 | 为什么做不到 | 补偿措施 |
+**public + Free 下现在能做的**（本次新增，属**服务端配置**而非仓库内代码）：
+
+| 能力 | 落点 | 谁能改 | 失效探测 |
+| --- | --- | --- | --- |
+| 分支保护 + 必需检查 | 服务端 / `scripts/apply_branch_protection.sh` | 仓库 admin | `protection-audit.yml` 每日巡检 |
+| 禁止直推 `main`（含管理员） | 同上 `enforce_admins: true` | 同上 | 同上 |
+| CodeQL 代码扫描（Scorecard `SAST`） | `codeql.yml` | 代码 | CI required check `analyze (python)` |
+| Secret scanning / push protection | 服务端开关 | 仓库 admin | 同上巡检 |
+| Dependabot alerts | 服务端开关 | 仓库 admin | 同上巡检 |
+| 环境 required reviewers | 服务端 `release` 环境 | 仓库 admin | 同上巡检 |
+| 私有安全公告 | 服务端 | 仓库 admin | — |
+
+> ⚠️ **服务端配置会漂移，且不留代码痕迹。** 上面这些可以被人在 Settings 上
+> 随手点掉——Git 有历史和 review，配置没有。所以每一条都配了失效探测
+> （`protection-audit.yml`）。**这是本方案唯一「守护配置的配置」，不要删**。
+
+**仍做不到 / 未做的**（如实声明，避免以后有人以为「没做 = 忘了」）：
+
+| 标准条款 | 现状 | 原因 / 补偿 |
 | --- | --- | --- |
-| 分支保护 / Rulesets（Scorecard `Branch-Protection`） | 私仓 + Free：`/rulesets` 实测 403「Upgrade to GitHub Pro」 | `scripts/no-force-push-main.sh`（pre-push 钩子拦非快进推送）+ `main-pr-target-guard.yml` + promote 自带门禁 |
-| CodeQL 代码扫描（Scorecard `SAST`） | 私仓需 GitHub Code Security（GHAS），`security_and_analysis` 为 null | `actionlint` + `zizmor --pedantic` 覆盖工作流层；`ruff` + `mypy` 覆盖源码层静态检查 |
-| 私密漏洞报告（GitHub Security Advisories） | 同上，需 GHAS | `.github/SECURITY.md` 给出邮箱 + issues 兜底渠道 |
-| Secret scanning / push protection | 同上 | 见第 9 节：secret 只走 `secrets.*`，发布走受保护环境 + 人工放行 |
-| `CODEOWNERS` 强制力 | 需分支保护勾选 "Require review from Code Owners" | 仅 PR 界面自动请求评审；强制力由上面三条补偿 |
+| `CODEOWNERS` **强制** review | ⚠️ 写了但不强制 | 分支保护的 `required_approving_review_count` 刻意取 **0**（单人维护下取 1 会自我死锁——无法批准自己的 PR）。见 `doc/BRANCHING.md` 的决策记录。协作方变多后应提到 1 并重评 `enforce_admins` 与 bypass 的取舍 |
+| commit signing / vigilant mode | 未强制 | 需签名 key 分发，单人仓库收益有限；发布侧已由 SLSA attestation 覆盖 |
+| 历史泄漏扫描（gitleaks 等） | 未接入 CI | 建仓前手动扫过一次全历史（凭证/大文件/内网地址，均无命中）。列为可选增强 |
+| 签名类资产（`.asc` / `.sigstore`） | 未做 | 已用 attestation（`.intoto.jsonl`）满足 Scorecard `Signed-Releases` 的**最高档**，无需再加 |
+| 分支保护之外再做 Rulesets | 未做 | `branch protection` 已覆盖需求；Rulesets 是其超集，迁移收益不足以抵消复杂度 |
+| 第三方 SAST（Semgrep 等） | 未做 | Scorecard 的 `SAST` 项只认 `github/codeql-action` 或 SonarCloud，加第三方工具拿不到分且增加噪声面 |
 
 ### 13.5 已知工具冲突与复评触发条件
 
@@ -598,6 +632,31 @@ gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
   （文件头写明「勿手改」），一致性由 `tests/test_requirements_sync.py` 逐字节
   守护。让 Dependabot 改它们，每个 PR 都注定违反派生契约 —— 那是噪声不是防线。
   上游版本漂移的正道是 sync-upstream 滚动 + 重跑 `scripts/derive_requirements.py`。
+- **CodeQL 必须排除 `vendor/` 与 `templates/`**：它们是上游快照（零修改铁律：
+  只能整树重建，不许就地改），对它们报出的问题我们**改不了**，留在结果里只会
+  淹没真问题。已写进 `codeql.yml` 的 `paths-ignore`，并由测试钉住。
+- **`github/codeql-action` 的 uses 带子路径**：`codeql-action/init@<sha>` 这种
+  形态是合法的（init / analyze 拆成同仓库子路径）。`tests/test_supply_chain.py`
+  的钉扎正则在 2026-09-19 因此**误报过**——正则只允许 `owner/repo@sha`。
+  已修正为允许任意深度的子路径。**教训：断言的正则必须覆盖平台允许的全部合法
+  形态，否则它拦的不是违规，而是「用的形态我没预料到」。**
+
+### 13.6 强制力清单的执行路径（写在最后，但最该先读）
+
+```
+1. 建 public 仓库（空仓库，不勾 README）
+2. push dev / main / lkg 三个分支  ← 全部 workflow 文件随之就位
+3. 设置默认分支为 dev
+4. 服务端开启：secret scanning / Dependabot alerts
+5. 创建 release 环境 + required reviewers（prevent_self_review 必须关）
+6. bash scripts/apply_branch_protection.sh   ← 打分支保护（幂等 + 回读校验）
+7. gh workflow run protection-audit --ref dev ← 确认巡检全绿
+8. 开一个测试 PR → 确认必需检查阻塞合并
+9. 实测 git push origin main → 确认被服务端拒绝
+```
+
+第 6 步**必须在第 2 步之后**（要先把文件推上去，必需检查的 context 才有意义）；
+第 9 步是唯一能证明「强制力真实存在」的动作 —— 不要跳过。
 
 ---
 

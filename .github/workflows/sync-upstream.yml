@@ -161,9 +161,9 @@ jobs:
             git config user.name "parser-lite-sync-bot"
             git config user.email "actions@users.noreply.github.com"
             git commit --allow-empty -m "chore(sync): keepalive [skip ci]"
-            # 触碰 dev 而非 main：main 只由 promote-dev-to-main 推进，
-            # 直推 main 会被分支模型拒绝（且本仓库 private 无 GitHub Pro，
-            # 远端分支保护不可用——拒绝来自工作流约定而非 GitHub）
+            # 触碰 dev 而非 main：main 只由 promote-dev-to-main 推进。
+            # 仓库为 public 后分支保护真实可用（enforce_admins=true），
+            # 直推 main 会被**服务端**拒绝——不再是「工作流约定」层面的软约束。
             if ! git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:dev; then
               echo "::warning::keepalive 直推 dev 失败，改为开提醒 issue"
               gh issue create --title "keepalive：仓库长期无活动，调度工作流将停用" \

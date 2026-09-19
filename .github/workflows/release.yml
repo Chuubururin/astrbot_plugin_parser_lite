@@ -8,6 +8,24 @@ name: release
 # 发布流程不恢复任何缓存（cache-poisoning 审计项）。
 # tag 规范：v{metadata.yaml 的 version}，直接沿用上游 nonebot-plugin-parser-lite
 # 版本号（如 v1.3.6）；版本由 sync PR 自动跟随，本 workflow 校验 tag 与之锁步。
+#
+# ── `environment: release` 现在是一道**真的门** ────────────────────────
+# 旧仓库是 private + Free，而官方文档写着：
+#   「如需在私有或内部仓库中访问环境、环境机密和部署分支，必须使用
+#     GitHub Pro、GitHub Team 或 GitHub Enterprise。」
+#   「使用 GitHub Free 计划的用户只能为公共仓库配置环境。」
+#   —— https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments
+# 也就是说：旧仓库里那个 `environment: release` 声明是**不存在的门**，
+# 注释里承诺的「人工放行」从未生效过 —— 典型的「文档写了但平台没给」。
+#
+# 仓库转为 **public** 后环境保护规则可用，required reviewers 会**真的阻塞 job**。
+# 两个必须随之处理的后果：
+#   ① `timeout-minutes` **包含等待人工审批的时间**。旧值 15 分钟意味着
+#      reviewer 超时即失败。已提到 60 分钟。
+#   ② 环境的 `prevent_self_review` 必须**关**：单人维护下开着它，
+#      你无法批准自己 workflow run 触发的部署 → 发布永久卡死。
+#      该开关无法在 YAML 里声明，只能在 Settings → Environments 配，
+#      故由 .github/workflows/protection-audit.yml 每日巡检兜底。
 
 on:
   push:
@@ -24,8 +42,13 @@ jobs:
   release:
     name: build + attest + publish release
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # 受保护环境：required reviewer 硬门禁（secret 卫生 + 人工放行）
+    # 60 而非 15：这个超时**包含人工审批的等待时间**（见文件头 ①）。
+    # 15 分钟意味着 reviewer 必须在一刻钟内点批准，否则 job 直接失败。
+    timeout-minutes: 60
+    # 受保护环境：required reviewer 硬门禁（public + Free 下真实可用）。
+    # 配好之后，本 job 会在 attestation 完成后**停下等批准**，
+    # 批准前不执行 gh release create —— 即「发布物已构建并已签名，
+    # 但对外发布需要人点一下」。
     environment: release
     permissions:
       contents: write # 创建 Release
@@ -153,6 +176,8 @@ jobs:
       # 后缀取 .intoto.jsonl：GitHub 官方离线验证文档里 bundle 下载下来的扩展名
       # 就是 .jsonl（内容为单行 JSON，即合法 JSONL），而 SLSA 生态对 provenance
       # bundle 的约定名是 <artifact>.intoto.jsonl。
+      # 供应链扫描器（OpenSSF Scorecard 的 Signed-Releases）的判定正是读这个后缀：
+      # provenanceExtensions = [".intoto.jsonl"] → 满分；仅有签名类后缀 → 低一档。
       - name: 归档证明 bundle 为 release 附件
         env:
           PROV_BUNDLE: ${{ steps.attest_prov.outputs.bundle-path }}
@@ -170,6 +195,18 @@ jobs:
           cp "$PROV_BUNDLE" "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.intoto.jsonl"
           cp "$SBOM_BUNDLE" "sbom.spdx.json.intoto.jsonl"
           ls -l ./*.intoto.jsonl sbom.spdx.json
+
+      # ---- 人工放行点 --------------------------------------------------------
+      # 到这里发布物已构建、已签名、证明已归档，但**尚未对外发布**。
+      # `environment: release` 的 required reviewers 会阻塞在此，
+      # 批准后才执行下一步的 gh release create。
+      # 显式写这条 notice，让日志里能看出「停在这里是在等人」。
+      #
+      # 注意 name 里的冒号必须引号包起来：裸 `environment: release` 会让 YAML
+      # 把它解析成映射键值对，报 "mapping values are not allowed in this context"。
+      - name: "等待人工放行（environment: release 的 required reviewers）"
+        run: |
+          echo "::notice::发布物已构建并签名，等待 environment: release 的审阅者批准后创建 Release"
 
       - name: 创建 Release（附 zip、校验和、证明与 SBOM）
         run: |
@@ -200,4 +237,8 @@ jobs:
             echo "  --bundle ${ZIP}.intoto.jsonl \\"
             echo "  --custom-trusted-root trusted_root.jsonl"
             echo '```'
+            echo ""
+            echo "注：public 仓库的 attestation 由 Sigstore public good instance 签发；"
+            echo "private 仓库用的是 GitHub 自己的 Sigstore 实例。"
+            echo "\`gh attestation trusted-root\` 一条命令同时取得两者。"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
