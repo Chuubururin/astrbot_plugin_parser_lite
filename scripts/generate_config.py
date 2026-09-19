@@ -68,6 +68,28 @@ STRING_OPTIONS: dict[str, list[str]] = {
     "plite_bili_cdn_region": ["zh", "en", "ja", "proxy"],
 }
 
+# 需要在**描述文字**上补写合法区间的上游 int 字段。
+#
+# 存在的理由：AstrBot 4.28 的插件配置面板对 int 字段不做范围校验——
+# `minimum`/`maximum` 不是宿主消费的键（写进 schema 是**假保护**），`slider`
+# 也只是额外渲染一个滑块，旁边仍有可自由输入的数字框（含负数）。既然面板
+# 无法拦住非法值，至少要让**描述**如实说明代码在运行期会钳制到什么区间，
+# 否则用户按描述以为自己受保护（2026-09-20 审计缺陷 1/2/7）。
+#
+# 注意：这里只改描述，**真正的强制力在两处运行期钳制**：
+#   - bridge/render.py   max_comments_count()            → [0, MAX_COMMENTS_LIMIT]
+#   - bridge/sender.py   forward_text_threshold()         → [1, 4500]
+# 二者与本表的区间由 tests/test_config_bounds.py 机械对账，防止描述漂移。
+RANGE_NOTES: dict[str, str] = {
+    "plite_max_comments": "有效范围 0-100，超出范围按边界值处理",
+    "plite_forward_text_threshold": "有效范围 1-4500，超出范围按边界值处理",
+}
+
+# 上游描述里已经写明的上界（形如「(最大4500)」）。命中时不再追加区间注记，
+# 只补下界说明——否则会出现「…强制转发(最大4500)（有效范围 1-4500…）」
+# 这种同义重复，读起来像是两个不同来源的约束在打架。
+_DESC_UPPER_BOUND_RE = re.compile(r"[（(]\s*最大\s*(\d+)\s*[）)]")
+
 ANALYSIS_PATH = REPO_ROOT / "vendor_analysis.json"
 SCHEMA_PATH = REPO_ROOT / "_conf_schema.json"
 GEN_CONFIG_PATH = REPO_ROOT / "bridge" / "gen_config.py"
@@ -282,6 +304,13 @@ def build_conf_schema(analysis: dict[str, Any] | None = None) -> str:
         raise SystemExit(
             f"STRING_OPTIONS 覆盖指向已不存在的上游字段 {sorted(stale_options)}，请清理或改名",
         )
+    stale_range_notes = set(RANGE_NOTES) - set(vendor_fields)
+    if stale_range_notes:
+        # 同 STRING_OPTIONS：区间注记指向已不存在的字段时，描述会静默失去
+        # 「代码会钳制」的说明，用户重新回到「以为自己受保护」的状态
+        raise SystemExit(
+            f"RANGE_NOTES 覆盖指向已不存在的上游字段 {sorted(stale_range_notes)}，请清理或改名",
+        )
     schema: dict[str, dict[str, Any]] = {}
     for name, bridge_entry in BRIDGE_FIELDS.items():
         schema[name] = dict(bridge_entry)
@@ -289,8 +318,21 @@ def build_conf_schema(analysis: dict[str, Any] | None = None) -> str:
         astr_type, options = _astrbot_type(field)
         if astr_type not in _ASTRBOT_TYPES:
             raise SystemExit(f"映射产生了非 AstrBot schema 类型 {astr_type!r}（字段 {name}）")
+        description = field["description"]
+        note = RANGE_NOTES.get(name)
+        if note and astr_type == "int" and note not in description:
+            # 追加式改写：上游描述原文逐字保留在前，桥的区间说明补在后——
+            # 避免覆盖上游文案（数据层上游驱动），同时让区间可被用户读到
+            stated = _DESC_UPPER_BOUND_RE.search(description)
+            lower = re.search(r"(\d+)-", note)
+            if stated and lower and stated.group(1) in note:
+                # 上游已写明上界且与代码一致 → 只补下界，避免同义重复
+                note_lower = f"最小 {lower.group(1)}，超出范围按边界值处理"
+                description = f"{description}（{note_lower}）"
+            else:
+                description = f"{description}（{note}）"
         entry: dict[str, Any] = {
-            "description": field["description"],
+            "description": description,
             "type": astr_type,
             "default": _default_value(name, field, astr_type),
         }

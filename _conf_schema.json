@@ -176,12 +176,12 @@
     "default": true
   },
   "plite_max_comments": {
-    "description": "最大评论数量",
+    "description": "最大评论数量（有效范围 0-100，超出范围按边界值处理）",
     "type": "int",
     "default": 5
   },
   "plite_forward_text_threshold": {
-    "description": "纯文本文本长度阈值，超过此长度的文本将会强制转发(最大4500)",
+    "description": "纯文本文本长度阈值，超过此长度的文本将会强制转发(最大4500)（最小 1，超出范围按边界值处理）",
     "type": "int",
     "default": 1000
   },

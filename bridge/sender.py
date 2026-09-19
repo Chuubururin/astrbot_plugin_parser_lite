@@ -61,8 +61,39 @@ MAX_FORWARD_NODES = render_params.MAX_FORWARD_NODES
 TEXT_SPLIT_PUNCTUATION = frozenset(render_params.TEXT_SPLIT_PUNCTUATION)
 """长文本切分标点集（上游 main 注入值；frozenset 形态由桥组包）"""
 
+FORWARD_TEXT_THRESHOLD_MIN = 1
+"""转发文本阈值下界：0/负数会让「切分」与「是否转发」两个判据自相矛盾。"""
+FORWARD_TEXT_THRESHOLD_MAX = 4500
+"""转发文本阈值上界（与 _conf_schema.json 描述「最大4500」对齐）。
+
+AstrBot 4.28 的插件配置面板对 int 字段不做范围校验（`minimum`/`maximum`
+不是宿主消费的键，`slider` 也只是额外渲染一个滑块，旁边的数字输入框仍可
+自由输入），因此上下界必须由运行期钳制兜住（2026-09-20 审计缺陷 2/7）。
+"""
+
 _video_file_threshold_mb: int = 100
 """视频转文件发送的阈值（MB）；main.py 在配置桥时注入，测试可直接覆写"""
+
+
+def _clamp_forward_text_threshold(value: Any) -> int:
+    """把 WebUI 可自由输入的转发阈值钳制到 ``[1, 4500]``。
+
+    为什么不能容忍 <=0：``need_forward`` 用 ``total_plain_len > split_threshold``
+    判定，阈值 0/负数对任何非空文本恒为 True ⇒ **一定走转发**；而
+    ``split_text_by_length_with_punct`` 与 ``_ForwardText.split`` 在
+    ``max_len <= 0`` 时走快路径**整段不切**。两个判据在同一次调用里互相矛盾，
+    结果是超长文本（可达 30000 上限之上）被整体塞进单个转发节点（2026-09-20
+    审计缺陷 2）。钳到下界 1 后：要么按 1 字切分（退化但不越界），要么用户
+    走 `need_forward_contents=False` 这个语义正确的开关。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return FORWARD_TEXT_THRESHOLD_MIN
+    return max(FORWARD_TEXT_THRESHOLD_MIN, min(FORWARD_TEXT_THRESHOLD_MAX, value))
+
+
+def forward_text_threshold() -> int:
+    """本次发送实际生效的转发阈值（已钳制）。"""
+    return _clamp_forward_text_threshold(pconfig.forward_text_threshold)
 
 
 def _sync_path(path: Any) -> SyncPath:
@@ -555,7 +586,9 @@ async def send_result(
 
     ordered_segs = await _build_forward_segs(result)
     if ordered_segs:
-        split_threshold = pconfig.forward_text_threshold
+        # 钳制后再判/再切：裸配置为 0/负数时 need_forward 恒 True 而切分函数
+        # 整段返回，超长文本会不经切分塞进单个转发节点（2026-09-20 审计缺陷 2）
+        split_threshold = forward_text_threshold()
         processed_segs: list[str | MediaFile | _AltMedia] = []
         total_plain_len = 0
         node_count = 0

@@ -385,7 +385,10 @@ async def resolve_parse_result(result: ParseResult) -> dict[str, Any]:
         "platform": result.platform,
         "content": result.content,  # render_content_items 内逐字段 `| e`
         "stats": _escaped_stats(result.stats),  # 内含形状翻译，勿另包一层
-        "comments": [_escaped_comment(c) for c in result.comments[: pconfig.max_comments]],
+        # 切片前必须钳制：WebUI 面板不校验 int 范围，负数会让 [:-1] 变成
+        # 「去掉末尾一条」而非「取零条」，评论数随之**非单调**（2026-09-20
+        # 审计缺陷 1）。钳制值与缓存键共用 max_comments_count()，两者不会分叉。
+        "comments": [_escaped_comment(c) for c in result.comments[: max_comments_count()]],
         "author": _escaped_author(result.author),
         "ai_summary": _esc(result.ai_summary),
         "rendering_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -504,14 +507,44 @@ RENDER_CACHE_REV = "2"
 桥自身变更走这里，两把钥匙互不覆盖。"""
 
 
+MAX_COMMENTS_LIMIT = 100
+"""评论条数上界（写入面板 slider 的量程，同时是运行期钳制上界）。
+
+AstrBot 4.28 的插件配置面板对 int 字段**不做范围校验**：`_conf_schema.json`
+里的 `minimum`/`maximum` 不是宿主消费的键，`slider` 也只是**额外**渲染一个
+滑块，旁边的 `type="number"` 数字输入框仍然可自由输入任意整数（含负数）。
+因此非法值必须由运行期钳制兜住——这正是本常量的存在理由（2026-09-20 审计
+缺陷 1/2 的修复）。"""
+
+
+def _clamp_config_int(value: Any, *, minimum: int, maximum: int) -> int:
+    """把 WebUI 可自由输入的 int 配置钳制到合法区间。
+
+    面板不校验 ⇒ 负数会畅通无阻地进入消费点：``comments[:-1]`` 是「去掉末尾
+    一条」而非「取零条」，会让评论数**非单调**（设 -1 反而比设 0 显示得多）。
+    对非 int（None/str 等异常形态）一律回落到下界，宁可少显示也不静默反向。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return minimum
+    return max(minimum, min(maximum, value))
+
+
+def max_comments_count() -> int:
+    """本次渲染实际生效的评论条数（已钳制，缓存键与切片共用同一取值）。"""
+    return _clamp_config_int(pconfig.max_comments, minimum=0, maximum=MAX_COMMENTS_LIMIT)
+
+
 def _render_config_rev() -> str:
     """影响渲染输出的配置态短摘要（纳入缓存键）。
 
     只纳入真正进模板输出的配置：二维码开关、评论条数、机器人昵称。theme
     已在键内（日夜不串图），不重复。缓存键缺这些会让 WebUI 改配置后最长
     vendor 清理周期（2h）内仍发旧图（2026-09-17 评审 M7）。
+
+    评论条数取**钳制后**的值：若用裸配置，非法值（如 -1 与 -2）会算出不同的
+    键却产出同一张图，白白多渲染一次；反之钳制后 -1 与 0 同键同图，语义正确。
     """
-    payload = repr((pconfig.append_qrcode, pconfig.max_comments, _nickname))
+    payload = repr((pconfig.append_qrcode, max_comments_count(), _nickname))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
