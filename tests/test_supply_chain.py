@@ -11,12 +11,20 @@
 | `/vulnerability-alerts` | 404 | 可用 |
 | 环境 required reviewers | 仅 public 可用 | 可用 |
 
+**注意 CodeQL 那一行的口径**：转 public 后它**技术上可用**，但本项目在
+2026-09-19 的第二次重构里**主动选择不做** —— 用户要求「更简单的 CICD」，
+而 CodeQL 会引入一个异步的、需要运维理解的失败来源。所以：
+
+- 本文件不再断言「codeql.yml 存在」；
+- 但仍断言「不做 SAST」这件事**被如实记录**（见
+  ``test_unsupported_standards_are_still_documented``），
+  避免下次有人以为基线是完整的。
+
 于是本文件守护的东西分成两类：
 - **写进仓库、由 CI 与本地门禁强制**的（钉 SHA / 最小权限 / 依赖更新工具 /
   安全政策 / 发布物签名与 SBOM / 依赖安装单一实现）—— 这部分完全不变；
-- **服务端配置**的（分支保护 / CodeQL / secret scanning / 环境 reviewer）——
-  新增，且必须配一个**持续巡检**（protection-audit.yml），因为服务端配置
-  可以被人在 UI 上点掉而**不留任何代码痕迹**。
+- **仍属平台侧、本项目主动不做的**（SAST / 每日配置巡检 / 签名提交）——
+  必须有一条断言保证「不做的清单」存在且是最新的。
 
 本文件把上面每一条都变成断言。**依据的标准条款写在每个测试的 docstring 里**，
 并注明该条款来自哪个权威来源，避免以后有人「觉得多余」而删掉。
@@ -44,7 +52,15 @@ PRECOMMIT_CONFIG = REPO_ROOT / "config" / ".pre-commit-config.yaml"
 
 # 依赖安装的调用方：必须全部委派给复合 action，不得各抄一份清单。
 # ci.yml 的 lint job 不在其列 —— 它走 pre-commit，ruff 由钩子的隔离环境提供。
-DELEGATING_WORKFLOWS = ("ci.yml", "promote-dev-to-main.yml", "release.yml", "sync-upstream.yml")
+#
+# **名单会变，所以另有一条断言按「行为」对账**（见
+# ``test_delegating_workflow_list_is_not_stale``）：名单只应包含**确实装依赖**
+# 的工作流，两边必须互相印证，不许沦为摆设。
+#
+# 2026-09-19 第二次重构：``promote-dev-to-main.yml`` 移出名单 —— 它变成了纯
+# ref 手术（decide → fetch → cherry → push），不装依赖也不跑门禁。
+# ``sync-upstream.yml`` 随本版移除（它依赖 lkg 分支）。若将来恢复，记得加回这里。
+DELEGATING_WORKFLOWS = ("ci.yml", "release.yml")
 
 # 门禁期需要「裸 python -m <mod>」的工具：模块名 → pip 包名。
 GATE_MODULE_TO_PACKAGE = {"ruff": "ruff", "pytest": "pytest", "mypy": "mypy"}
@@ -94,13 +110,36 @@ def _install_commands(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_every_delegating_workflow_uses_the_shared_setup_action() -> None:
-    """需要装依赖的 job 必须委派给 `.github/actions/setup-env`。
+def _needs_dependencies(doc: dict) -> bool:
+    """这个工作流是否**真的**需要装 Python 依赖？
+
+    判据是行为而非声明：出现 ``pip install``、``python -m <mod>``、
+    ``python3 -m <mod>`` 之一就算。用它取代「按名单点名」——
+    **名单会漂移，行为不会**。
+    """
+    for step in _all_steps(doc):
+        body = str(step.get("run", ""))
+        if "pip install" in body:
+            return True
+        if re.search(r"python3?\s+-m\s+[a-z_]", body):
+            return True
+    return False
+
+
+def test_every_workflow_that_needs_deps_delegates_to_the_shared_setup_action() -> None:
+    """**凡是真的装依赖的工作流**，都必须委派给 `.github/actions/setup-env`。
 
     依据：GitHub 官方推荐用 composite action / reusable workflow 复用 CI 逻辑，
     避免同一份配置在多处漂移。本项目为此付过学费 —— 4 处安装清单各抄一遍，
-    promote 那份漏了 ruff，门禁以 `No module named ruff` 假红，**整条提权通道
-    被锁死**（main 永远推不动），而那是环境缺失、不是代码问题。
+    提权那份漏了 ruff，门禁以 `No module named ruff` 假红，**整条提权通道被锁死**
+    （main 永远推不动），而那是环境缺失、不是代码问题。
+
+    **判据为什么从「按名单」改成「按事实」**：2026-09-19 第二次重构后，
+    ``promote-dev-to-main.yml`` 变成纯 ref 手术（decide → fetch → cherry →
+    push），不装依赖也不跑 ``python -m``。此时「promote 必须委派」这条断言
+    的事实前提**消失了**：它既不该被满足（那要凭空加回依赖安装），
+    也不该被简单删掉（会连「以后加回来的门禁必须委派」一起丢掉）。
+    改成按行为判定后，两个方向都守住了。
 
     引用形式是 `./...`（workspace-relative）：zizmor 的 self-repository 审计
     建议改用 `$/...`（GitHub 2026-07 起的新语法，不受运行时文件系统状态影响，
@@ -109,21 +148,53 @@ def test_every_delegating_workflow_uses_the_shared_setup_action() -> None:
     故这里保留 `./` 并要求调用点带**显式行内豁免**（`# zizmor: ignore[...]`），
     而不是静默降级。复评触发条件：actionlint 支持 `$/` 后改回并撤掉豁免。
     """
-    for name in DELEGATING_WORKFLOWS:
-        doc = _load_yaml(WORKFLOWS / name)
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        doc = _load_yaml(path)
+        if not _needs_dependencies(doc):
+            continue
         uses = [str(s.get("uses", "")) for s in _all_steps(doc)]
         assert "./.github/actions/setup-env" in uses, (
-            f"{name} 未委派给复合 action .github/actions/setup-env"
+            f"{path.name} 里出现了依赖安装/门禁命令，却未委派给复合 action "
+            ".github/actions/setup-env —— 这就是清单漂移事故的入口。"
         )
         # 必须带行内豁免注释：否则 zizmor --pedantic 会红，而豁免理由要写在
         # 工作流里（可读），不能只存在于某处文档。
-        text = (WORKFLOWS / name).read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
         assert "zizmor: ignore[self-repository]" in text, (
-            f"{name} 未对 self-repository 建议写明行内豁免与理由"
+            f"{path.name} 未对 self-repository 建议写明行内豁免与理由"
         )
         assert "$/.github/actions/setup-env" not in text, (
-            f"{name} 用了 `$/` 语法 —— actionlint v1.7.12 不认识它，会让 lint 门禁红"
+            f"{path.name} 用了 `$/` 语法 —— actionlint v1.7.12 不认识它，会让 lint 门禁红"
         )
+
+
+def test_delegating_workflow_list_is_not_stale() -> None:
+    """DELEGATING_WORKFLOWS 名单必须与事实一致 —— 不许沦为摆设。
+
+    名单只应包含**确实装依赖**的工作流。若某工作流被移出名单，但它仍在装依赖，
+    就说明有人为了让测试变绿而把名字删了（本仓库 2026-09-19 差点这么干：
+    promote 不再委派后，「把 promote 从名单删掉」是最省事的做法，
+    但那会同时放过「promote 悄悄又装上了依赖」的可能）。
+
+    所以这里逐个对账，并要求每个名字都能给出理由。
+    """
+    for name in DELEGATING_WORKFLOWS:
+        doc = _load_yaml(WORKFLOWS / name)
+        assert _needs_dependencies(doc), (
+            f"{name} 被列在 DELEGATING_WORKFLOWS 里，但它并不需要依赖 —— "
+            "请把它从名单移出，并在注释里说明它为什么不需要。"
+        )
+
+    # 反向：装了依赖却没进名单的工作流同样要暴露
+    offenders = [
+        p.name
+        for p in sorted(WORKFLOWS.glob("*.yml"))
+        if _needs_dependencies(_load_yaml(p)) and p.name not in DELEGATING_WORKFLOWS
+    ]
+    assert not offenders, (
+        f"这些工作流装了依赖却没进 DELEGATING_WORKFLOWS：{offenders}。"
+        "名单是给「谁该委派」做人工可读索引的，漏了它就等于漏了守护。"
+    )
 
 
 def test_no_workflow_hand_rolls_a_dependency_install_list() -> None:
@@ -233,29 +304,93 @@ def test_pinned_tool_versions_agrees_with_yaml_parse() -> None:
     assert re.fullmatch(r"\d+\.\d+\.\d+", got["ruff"]), f"ruff 版本形态可疑：{got['ruff']}"
 
 
-def test_gate_extras_covers_every_python_m_the_promote_gate_runs() -> None:
-    """逐条对账：promote 门禁跑什么 `python -m <mod>`，gate 档就得装什么。
+def test_gate_extras_covers_every_python_m_run_by_gated_workflows() -> None:
+    """逐条对账：跑门禁的工作流用什么 `python -m <mod>`，gate 档就得装什么。
 
-    这条比「列举包名」耐用：以后往 promote 里加门禁步骤时会自动暴露缺装。
-    生效的安装集 = 基础档 + gate 分支（pytest 在基础档、ruff/mypy 在 gate 档，
-    两者合起来才是 extras=gate 时真正装上的东西）。
+    **判据为什么改**：原断言只看 promote，因为那时 promote 是「唯一带门禁的
+    提权通道」。2026-09-19 第二次重构后 promote 变成纯 ref 手术，
+    `ran` 恒为空集 ⇒ 断言恒真 ⇒ **空断言**（永远绿、毫无守护力）。
+    空断言比没有断言更危险：它让人以为这里有守护。
+
+    改法两条：
+      A. 对账范围从「promote」扩到**所有跑 `python -m` 的工作流**，
+         这样将来谁加了门禁都自动纳入对账；
+      B. 把「promote 刻意不跑门禁」这件事本身钉住 —— 它是本设计的关键简化，
+         不是疏漏，必须由断言显式声明，否则下次有人会「顺手补上」。
+
+    依据：``setup-env`` 的 gate 档必须覆盖门禁期所有裸 ``python -m <mod>``，
+    否则会以 ``No module named...`` 假红 —— 而那是环境问题不是代码问题，
+    会让门禁失去可信度（本项目真实踩过：提权通道被假红锁死）。
     """
-    doc = _load_yaml(WORKFLOWS / "promote-dev-to-main.yml")
-    ran: set[str] = set()
-    for step in _all_steps(doc):
-        ran.update(re.findall(r"python\s+-m\s+([a-z_]+)", str(step.get("run", ""))))
+    # A. 全仓对账
+    ran: dict[str, set[str]] = {}
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        doc = _load_yaml(path)
+        mods: set[str] = set()
+        for step in _all_steps(doc):
+            mods.update(re.findall(r"python3?\s+-m\s+([a-z_]+)", str(step.get("run", ""))))
+        if mods:
+            ran[path.name] = mods
+
+    assert ran, (
+        "没有任何工作流跑 `python -m <mod>`？本仓库的门禁（ruff/mypy/pytest）"
+        "不可能全在别处。若确实改成了别的调用方式，请同步更新本断言。"
+    )
 
     body = _code_lines("\n".join(str(s.get("run", "")) for s in _setup_env_steps()))
     base_branch = body.split("case ", 1)[0]
     gate_branch = body.split("gate)", 1)[1].split(";;", 1)[0]
     # 只看真正的 pip 安装行：变量名/echo 文案里的包名不算「装了」
     effective = _install_commands(base_branch + gate_branch)
+
+    all_mods = {m for mods in ran.values() for m in mods}
+    # 排除两类，各有理由：
+    #   · `pip`  —— `python -m pip install …` 是**安装手段**，不是门禁工具，
+    #              它天然不会出现在 gate 档的安装清单里（自己不用装自己）。
+    #   · `pytest` —— 在**基础档**而非 gate 档，所以不在 GATE_MODULE_TO_PACKAGE 里。
+    non_gate_modules = {"pip", "pytest"}
+    unknown = all_mods - set(GATE_MODULE_TO_PACKAGE) - non_gate_modules
+    assert not unknown, (
+        f"这些模块被 `python -m` 调用，但不在 GATE_MODULE_TO_PACKAGE 的映射里："
+        f"{sorted(unknown)}。需要确认它是否在 gate 档装上了，"
+        "或在 non_gate_modules 里给出不装的理由。"
+    )
     missing = [
-        pkg for mod, pkg in GATE_MODULE_TO_PACKAGE.items() if mod in ran and pkg not in effective
+        pkg
+        for mod, pkg in GATE_MODULE_TO_PACKAGE.items()
+        if mod in all_mods and pkg not in effective
     ]
     assert not missing, (
-        f"promote 跑了 python -m {sorted(ran)}，但 extras=gate 未装 {missing}——会假红"
+        f"工作流跑了 python -m {sorted(all_mods)}，但 extras=gate 未装 {missing}——会假红"
     )
+
+
+def test_ci_is_the_only_gated_workflow_after_promote_was_simplified() -> None:
+    """promote **刻意**不跑门禁 —— 这是简化的一部分，必须显式钉住。
+
+    为什么可以安全地不跑：本模型里 promote 只做「把 main 指针移到 dev 所在的
+    那个提交」。而那个提交在 dev 上**已经跑过完整 CI**（ci.yml 的 push:dev）。
+    所以 promote 阶段的重复门禁不增加任何保证，只增加两样东西：
+      · 一个会因为「runner 网络抖动 / pip 源故障」而红的失败面；
+      · 一整块需要运维理解的配置（装什么、装哪个版本）。
+
+    代价如实声明：若有人绕过保护直接往 dev 推而 CI 尚未跑完就触发 promote，
+    main 会短暂指向一个「还没验证完」的提交。缓解：dev 上的 required checks
+    让「未通过就合并」不可能；且 main 与 dev 始终同 sha，真出问题回退一次即可。
+    复评触发条件：若将来 promote 需要做「发布前额外校验」（如版本号递增检查、
+    changelog 存在性），那时才需要给它装依赖并委派 setup-env。
+    """
+    promote = _load_yaml(WORKFLOWS / "promote-dev-to-main.yml")
+    assert not _needs_dependencies(promote), (
+        "promote-dev-to-main.yml 又开始装依赖/跑门禁了。本版刻意让它保持纯 ref 手术；"
+        "若确需在提权前校验，请在 doc/BRANCHING.md §5 记录理由，"
+        "并把它加回 DELEGATING_WORKFLOWS（届时 test_delegating_workflow_list_is_not_stale "
+        "会要求你这么做）。"
+    )
+
+    # 同时确认：确实还有别的工作流在跑门禁（否则「简化」变成了「删光」）
+    ci = _load_yaml(WORKFLOWS / "ci.yml")
+    assert _needs_dependencies(ci), "ci.yml 应当仍在跑门禁；否则门禁整体消失了"
 
 
 # ---------------------------------------------------------------------------
@@ -443,54 +578,72 @@ def test_release_environment_is_a_real_gate_for_public_repos() -> None:
     assert "超时" in text or "timeout" in text, "必须说明超时包含人工审批等待时间"
 
 
-def test_codeql_fills_the_sast_gap_that_private_plan_left() -> None:
-    """CodeQL 工作流必须存在——它是 Scorecard 的 SAST 项唯一认的形式。
+def test_sast_is_deliberately_absent_and_recorded_as_such() -> None:
+    """CodeQL **不在**本仓库，且这件事必须被记录为「主动不做」而非遗忘。
 
-    依据：Scorecard 的 SAST 检查只认 `github/codeql-action` 或 SonarCloud；
-    而 code scanning 对 **private** 仓库需要 GitHub Code Security 许可，
-    对 **public** 仓库免费。旧仓库是 private，故这是当时的必然空白；
-    转 public 后必须补上，否则「补齐供应链基线」是不完整的。
+    Scorecard 的 SAST 检查只认 `github/codeql-action` 或 SonarCloud。
+    转 public 后 CodeQL 技术上是免费的，本项目仍选择不做 —— 理由是
+    用户要求「更简单的 CICD」：CodeQL 会引入一个**异步**的失败来源
+    （首次扫描 5–10 分钟），且它的结果需要人来判读，对单人维护 + 运维使用的
+    场景收益低于理解成本。
+
+    这条断言的作用是**防止沉默漂移**：若有人悄悄加回 codeql.yml，
+    会在这里变红，从而被迫显式更新这一决策与本文件。
+
+    与之配套的是 ``test_unsupported_standards_are_still_documented``：
+    「不做」必须写在文档里，不能让读者以为基线是完整的。
     """
-    path = WORKFLOWS / "codeql.yml"
-    assert path.is_file(), "缺 codeql.yml —— Scorecard 的 SAST 项仍为空白"
-    text = path.read_text(encoding="utf-8")
-    assert "github/codeql-action" in text, "必须用官方 codeql-action（第三方 SAST 拿不到该分）"
-    assert "security-events: write" in text, "CodeQL 需 security-events: write 权限上传 SARIF"
-
-
-def test_protection_audit_workflow_exists() -> None:
-    """强制力巡检必须存在。
-
-    public 方案的强制力在**服务端配置**里：真的硬，但可以被人在 Settings 上
-    随手点掉且**不留任何代码痕迹**。没有持续巡检，「强制力存在」就只是某一天的
-    快照 —— 直到有人直推 main 才会发现保护没了，而那时事故已经发生。
-    """
-    path = WORKFLOWS / "protection-audit.yml"
-    assert path.is_file(), "缺 protection-audit.yml —— 服务端配置的漂移将无人发现"
-    doc = _load_yaml(path)
-    # YAML 1.1 把裸 on 解析成布尔 True，两种键名都要认（与 test_branch_model 同法）
-    triggers = doc.get("on") or doc.get(True) or {}
-    assert "schedule" in triggers, "巡检必须定时执行，否则只是「配过一次」"
-    perms = doc["jobs"]["audit"]["permissions"]
-    assert perms.get("issues") == "write", "漂移时需开 issue 告警，故要 issues: write"
+    assert not (WORKFLOWS / "codeql.yml").exists(), (
+        "codeql.yml 出现了。本版刻意不做 SAST —— 若确实要加回，"
+        "请同时更新本测试、doc/BRANCHING.md 的「仍未做」清单与 CONTRIBUTING.md。"
+    )
+    # Scorecard 的 SAST 项因此为空 —— 这必须在文档里如实声明
+    doc = (REPO_ROOT / "doc" / "BRANCHING.md").read_text(encoding="utf-8")
+    assert "SAST" in doc or "CodeQL" in doc, (
+        "doc/BRANCHING.md 必须写明 SAST/CodeQL 未做，否则读者会以为基线完整"
+    )
 
 
 def test_enforcement_surfaces_are_declared_impossible_or_covered() -> None:
-    """每一项强制力都必须要么被巡检覆盖，要么在文档里明确声明做不到。
+    """每一项强制力都必须要么有对应实现，要么在文档里明确声明不做。
 
-    这是「不许悄悄略过」的机械保证：旧方案有一张「做不到的标准」表（因为
-    private + Free 缺了一堆能力）。转 public 后那张表必须**缩小**，
-    但缩小必须是有意识的 —— 本断言要求 BRANCHING.md 明确列出仍未做的项，
-    防止「既然能用了，那就都写上」式的含糊。
+    这是「不许悄悄略过」的机械保证。本版移除了 CodeQL 与每日巡检之后，
+    有两项从「已覆盖」退回「主动不做」，必须仍然出现在清单里：
+
+    - **SAST**：撤下 codeql.yml
+    - **配置漂移巡检**：撤下 protection-audit.yml
+
+    另有两项属服务端开关（不在代码里），本版也**不做巡检**，
+    但应在文档的「仍未做」清单里点名，说明是靠人工在 Settings 确认的。
     """
     doc = (REPO_ROOT / "doc" / "BRANCHING.md").read_text(encoding="utf-8")
-    assert "仍然做不到" in doc or "未做的" in doc, (
-        "doc/BRANCHING.md 必须有「仍未做到/未做」的清单——否则读者会以为基线是完整的"
+    assert "仍未做" in doc or "不做" in doc, (
+        "doc/BRANCHING.md 必须有「仍未做/不做」的清单——否则读者会以为基线是完整的"
     )
-    audit = (WORKFLOWS / "protection-audit.yml").read_text(encoding="utf-8")
-    # 这两项在 public 下可用但**不在**代码里（属服务端开关），必须由巡检覆盖
-    assert "secret_scanning" in audit, "secret scanning 是开关项，必须由巡检发现被关"
-    assert "vulnerability-alerts" in audit, "Dependabot alerts 是开关项，必须由巡检发现被关"
+    # SAST 与巡检必须被点名（本版的两处主动回退）
+    for item in ("SAST", "巡检"):
+        assert item in doc, f"doc/BRANCHING.md 未说明「{item}」是否在做"
+    # 且这两个工作流确实不在
+    for gone in ("codeql.yml", "protection-audit.yml"):
+        assert not (WORKFLOWS / gone).exists(), f"{gone} 应已移除"
+
+
+def test_protection_drift_is_acknowledged_as_unmonitored() -> None:
+    """必须如实声明：服务端配置**没有**自动巡检。
+
+    这是本版一个**真实存在的缺口**，不能含糊过去。分支保护可以被人在
+    Settings 上点两下关掉，而代码仓库里没有任何痕迹。上一版用
+    protection-audit.yml 每日巡检来堵它；本版为了「更简单」撤掉了巡检，
+    代价就是**这个缺口重新打开**。
+
+    诚实声明它，比假称「已有巡检」好得多 —— 后者会让维护者放弃手动复核。
+    缓解措施（写在文档里）：promote 是唯一改 main 的路径，而它每次运行都会
+    真的去推 main；一旦保护被关掉且有人直推，`git cherry` 检查会让下次
+    promote 响亮失败，从而暴露问题。
+    """
+    doc = (REPO_ROOT / "doc" / "BRANCHING.md").read_text(encoding="utf-8")
+    assert "漂移" in doc, "必须写明「服务端配置可能被点掉且无巡检」，否则维护者不会去手动确认"
+    assert "apply_branch_protection.sh" in doc, "必须指出重新应用配置的命令，让维护者知道如何修复"
 
 
 # ---------------------------------------------------------------------------
@@ -499,12 +652,13 @@ def test_enforcement_surfaces_are_declared_impossible_or_covered() -> None:
 
 # 第三方 action 的 uses 形态：owner/repo[/subpath...]@<40 位 sha>
 #
-# 注意 `subpath` 这一步不能省：`github/codeql-action/init@<sha>` 是**合法**且
-# 常见的形态（codeql 把 init / analyze / upload-sarif 拆成同一仓库的子路径）。
-# 早期版本的正则只允许 owner/repo@sha，于是引入 codeql.yml 后这条断言会
+# 注意 `subpath` 这一步不能省：形如 `owner/repo/subpath@<sha>` 是**合法**且
+# 常见的形态（例如 codeql 把 init / analyze 拆成同一仓库的子路径）。
+# 早期版本的正则只允许 owner/repo@sha，于是引入这类 action 后这条断言会
 # **误报** ——把已正确钉扎的 action 判成未钉扎。
 # 教训：断言的正则必须覆盖平台允许的**全部**合法形态，否则它拦的不是违规，
-# 而是「用的形态我没预料到」。
+# 而是「用的形态我没预料到」。本版虽然不再用 codeql，但正则保留 subpath
+# 支持——下一次引入任何多级路径的 action 时不会再踩同一个坑。
 _THIRD_PARTY_USE = re.compile(
     r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*@([0-9a-f]{40})$"
 )

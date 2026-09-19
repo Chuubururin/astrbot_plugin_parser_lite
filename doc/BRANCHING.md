@@ -1,173 +1,379 @@
-# 分支模型与强制力
+# 分支模型与分支保护
 
-本文是**期望配置**的单一事实来源。`scripts/apply_branch_protection.sh`
-（应用）与 `.github/workflows/protection-audit.yml`（巡检）都以此为准，
-`tests/test_branch_model.py` 断言三者一致。
+> 本文是**预期配置的唯一事实源**。本文与
+> `scripts/apply_branch_protection.sh`、`CONTRIBUTING.md` §8 三处必须一致，
+> `tests/test_branch_model.py` 会断言这一点。
+
+**仓库可见性**：public。这决定了下面所有「能做 / 不能做」的边界。
 
 ---
 
-## 1. 模型
+## 1. 只有两个长期分支
+
+| 分支 | 角色 | 谁能推 | 保护 |
+|---|---|---|---|
+| **`dev`** | **工作分支 + 默认分支**。所有功能、修复、文档变更先到这里 | 开发人员经 PR；管理员可直推救急 | required checks、禁止删除、禁止强推 |
+| **`main`** | **发布指针**。永远与某次 promote 当时的 `dev` 尖端**是同一个提交** | **只有 CI** | required checks、`enforce_admins`、禁止删除 |
 
 ```
-feature/*  ──PR──▶  dev  ──promote（fast-forward）──▶  main
-                      │                                  │
-                      │                                  └── tag v* ──▶ release
-                      └── 每日 sync-upstream roll（上游镜像）
+  feat/xxx  ──PR──▶  dev（默认分支）  ──[merge] 前缀──▶  promote  ──▶  main  ──▶  tag v*  ──▶  release
+                       ▲                                                    │
+                       └────────────── 日常开发都在这边 ──────────────────────┘
+                                                              发布指针，不直接改
 ```
 
-- **`dev`** 是工作分支，也是**默认分支**。所有 PR 打到 `dev`。
-- **`main`** 是发布指针，**永远等于**某个已通过全量门禁的 `dev` 提交
-  （快进提权，不产生新提交，因此 `main` 的每个提交都逐字节等于 `dev` 上的某提交）。
-- **`lkg`** 是 last-known-good 回滚锚点，每次 roll 覆写，**不受**保护。
-- **`sync/standalone-*`** 是同步流水线开出的短生命周期分支，允许 force。
+**没有 `lkg`、没有 `release`、没有 `staging`。** 回滚靠 `v*` tag + `git revert`（见 §6）。
 
-### 为什么默认分支是 `dev` 而不是 `main`
+---
 
-不同事件读的工作流定义来自不同 ref：
+## 2. `main` 是「指针」，不是「合并结果」
 
-| 事件 | 读哪个 ref 的定义 |
+这是本模型最反直觉的一点，务必先读。
+
+### 2.1 怎么更新 `main`
+
+`promote-dev-to-main.yml` 用**指针移动**更新 `main`：
+
+```bash
+git push --force-with-lease="refs/heads/main:${main_sha}" \
+  origin "origin/dev:refs/heads/main"
+```
+
+即：把 `origin/main` 这个 ref **指到** `origin/dev` 当前的位置。
+**不产生 merge commit。**
+
+### 2.2 为什么不用 merge
+
+| | 指针移动（本方案） | merge commit |
+|---|---|---|
+| `main` 与 `dev` 的关系 | 永远**同一个 sha** | 永远不同（main 多一个 merge commit） |
+| 历史可读性 | `main` 的历史 = `dev` 的历史 | network graph 出现来回交叉 |
+| 「main 上的东西验证过吗」 | **一定验证过**（逐字节等于某个 dev 提交） | 需额外论证 |
+| 回滚 | 对比两个 sha 即可 | 要区分 merge 前后 |
+
+### 2.3 三条触发方式
+
+| 方式 | 怎么做 | 说明 |
+|---|---|---|
+| **A. 推 `dev`（推荐）** | 提交信息**以** `[merge]` 或 `chore(release):` **开头** | 前缀匹配是**锚定行首**的：`fix: xxx [merge]` **不会**触发 |
+| **B. 打 `chore.*` tag** | `git tag chore.merge-20260919 && git push origin chore.merge-20260919` | 把 promote 与代码提交解耦 |
+| **C. 手动触发** | Actions → Promote Dev to Main → Run workflow | 应急 |
+
+> ⚠️ `[merge]` 与 `chore(release):` 是**保留前缀**。开发人员**不得**在自己的
+> 提交信息里使用它们 —— 那会意外触发发布会把 `dev` 当成发布点。
+
+### 2.4 ⚠️ `main` **不能**开启 PR 保护
+
+**这是全套配置里最重要的一条，也是唯一与通用最佳实践相反的地方。**
+
+分支保护的 **"Require a pull request before merging"**
+（API 字段 `required_pull_request_reviews`）会拒绝**所有**直接推送到 `main`
+的 ref 更新 —— 包括 promote 工作流自己的推送。**一旦开启，Promote 直接失效。**
+
+失效的表现极具误导性：`main` 永远停在旧位置，而工作流会红在「推送被拒」上，
+看起来像是权限问题，实际上是被自己配的保护挡住了。
+
+所以 `main` 的策略是：
+
+- ✅ 用 `required_status_checks` 保证质量
+- ✅ 用 `enforce_admins: true` 实现「只有 CI 能改 main」
+- ✅ 用 `main-pr-target-guard.yml` 拦住以 `main` 为 base 的 PR
+- ❌ **不用** `required_pull_request_reviews`
+
+> 参考实现 [SnowLuma/SnowLuma](https://github.com/SnowLuma/SnowLuma) 的
+> `CONTRIBUTING.md` 有同样的警告：「不要给 `main` 套『必须走 PR』…
+> 如果给 `main` 打开 Require a pull request before merging 或禁止更新引用，
+> Promote 会失效。」
+
+---
+
+## 3. 分支保护期望值
+
+### 3.1 `main`
+
+```jsonc
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": [
+      "lint (ruff / actionlint / zizmor)",
+      "typecheck (mypy)",
+      "test (pytest + vendor verify)"
+    ]
+  },
+  "enforce_admins": true,                  // 管理员也不能绕过（核心承诺）
+  "required_pull_request_reviews": null,   // ★ 必须为 null，见 §2.4
+  "restrictions": null,
+  "allow_force_pushes": true,              // ★ promote 需要
+  "allow_deletions": false,
+  "required_linear_history": false,
+  "required_conversation_resolution": false
+}
+```
+
+### 3.2 `dev`
+
+```jsonc
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": [ /* 同上三项 */ ]
+  },
+  "enforce_admins": false,                 // 工作分支：CI 故障时管理员可救急
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 0,  // ★ 必须是 0，见 §4.3
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_linear_history": false,
+  "required_conversation_resolution": false
+}
+```
+
+### 3.3 四个反直觉的取值，逐条说明
+
+| 取值 | 为什么 |
 |---|---|
-| `push` | 被推送的那个 ref |
-| `pull_request` | PR 的合并提交 |
-| `schedule`（cron） | **默认分支** |
-| `workflow_dispatch`（无 `--ref`） | **默认分支** |
-
-把默认分支设为 `dev`，则 cron 与无 ref 的 dispatch 都读 **`dev` 的定义** ——
-而 `dev` 正是改动的落点。于是「改了定时工作流但 cron 仍跑旧版本」
-这个坑**直接消失**，不需要等一次 promote 才生效。
-
-代价：GitHub UI 默认展示 `dev` 而非 `main`。这是**正确的语义** ——
-本仓库的权威版本就是 `dev`，`main` 只是发布指针。
+| `main: allow_force_pushes: true` | promote 用 `--force-with-lease`。快进语义下这不构成 force push，但**非快进场景**（例如 `main` 曾被移动过）会被 `false` 挡住。宁可显式允许（`enforce_admins` 已保证只有 CI 能推），也不让 promote 在异常历史下静默失败 |
+| `required_approving_review_count: 0` | 单人维护者**无法批准自己的 PR**。设 `1` 会导致你自己永远合不了自己的 PR —— **自我死锁**，且 GitHub 不给任何解释 |
+| `strict: false` | `strict: true` 要求 PR 合并前已包含 base 最新提交，每次别人合了 PR 你的 PR 就卡在 `BEHIND`。单人维护场景纯摩擦。**代价**：可能出现「两次 PR 分绿、合起来坏」的语义冲突；若将来多人协作应改回 `true` |
+| `dev: enforce_admins: false` | `dev` 是工作分支。CI 因基础设施故障卡住时，维护者需要能直推救急。对开发人员（非管理员）保护仍然生效 |
 
 ---
 
-## 2. `main` 的分支保护（期望值）
+## 4. 必需检查
 
-| 字段 | 期望值 | 为什么 |
-|---|---|---|
-| `required_status_checks.strict` | `true` | 分支必须最新才能合并，防「绿着过期」 |
-| `required_status_checks.contexts` | 4 个（见下） | job name 逐字一致，写错会永久卡住 |
-| `enforce_admins` | **`true`** | 核心承诺：管理员也不能绕过 |
-| `required_pull_request_reviews` | `null` | 见下方决策记录 |
-| `restrictions` | `null` | 不限用户 |
-| `allow_force_pushes` | `false` | main 历史不可改写 |
-| `allow_deletions` | `false` | main 不可删除 |
-| `required_linear_history` | `true` | 与快进提权模型一致 |
+### 4.1 三项，名字必须逐字一致
 
-### 必需状态检查（context 必须与 job name 逐字一致）
-
-```
-lint (ruff / actionlint / zizmor)     ← ci.yml  的 job: lint
-typecheck (mypy)                      ← ci.yml  的 job: typecheck
-test (pytest + vendor verify)         ← ci.yml  的 job: test
-analyze (python)                      ← codeql.yml 的 job: analyze
-```
-
-> **这是最容易配错的一处。** context 指的是 workflow 里的 **job name**
-> （`jobs.<id>.name`），不是文件名、不是 workflow name、也不是 job id。
-> 写错的后果不是报错，而是 PR 永久停在
-> `Expected — Waiting for status to be reported` —— 没有任何错误信息。
-
-**改名纪律**：改任何 workflow 的 `jobs.<id>.name`，必须同步改
-① 本文件 ② `scripts/apply_branch_protection.sh` 的 `REQUIRED_CHECKS`
-③ `protection-audit.yml` 的 `EXPECTED_CHECKS`。
-三处不同步 → PR 卡死或巡检误报。
-
-### 决策记录：为什么 `required_approving_review_count` 是 0
-
-本模型的强制力核心是**「必需检查必须过」**，而不是「必须有人 approve」。
-
-- 单人维护下 `count >= 1` 会**自我死锁**：你无法批准自己开的 PR。
-- 绕过它需要 bypass 权限，而 bypass 与 `enforce_admins: true` **语义冲突** ——
-  后者正是本设计的核心承诺。
-- 因此取 `0`：强制力全落在「检查必须过」上，这在单人仓库里已足够
-  （4 个 job 覆盖 lint / 类型 / 契约测试 / SAST）。
-
-**协作方变多后**（≥2 人常驻）应提到 `1`，届时需重新评估
-`enforce_admins` 与 bypass 的取舍，并把 `prevent_self_review` 打开。
-
----
-
-## 3. `release` 环境的保护规则
-
-public + Free 下环境保护规则**可用**（private 下不可用 —— 这正是本次重构
-之前 `environment: release` 是一道**不存在的门**的原因）。
-
-| 项 | 期望 | 为什么 |
-|---|---|---|
-| required reviewers | ≥ 1 | 发布需人工放行 |
-| prevent self review | **关** | 单人维护下开了会**永久卡死发布**（无法批准自己的 run） |
-| deployment branches | `v*` tag | 只允许从发布 tag 部署 |
-
-**超时注意**：`release` job 的 `timeout-minutes` **包含等待人工审批的时间**。
-默认 15 分钟意味着 reviewer 必须在 15 分钟内点批准，否则 job 直接失败。
-本仓库设为 **60 分钟**，并在 workflow 注释里写明这一点。
-
----
-
-## 4. 强制力清单（哪些是真的，哪些没有）
-
-仓库为 **public + Free** 后的实际能力：
-
-| 能力 | 状态 | 落点 |
-|---|---|---|
-| 分支保护 + 必需检查 | ✅ **真** | 服务端，本文件第 2 节 |
-| 禁止直推 main | ✅ **真** | `enforce_admins: true` |
-| Rulesets | ✅ 可用 | 未启用（branch protection 已够；rulesets 是超集，迁移收益不足以抵消复杂度） |
-| CodeQL (SAST) | ✅ 免费 | `codeql.yml` |
-| secret scanning | ✅ 免费 | 服务端开关 |
-| Dependabot alerts | ✅ 免费 | 服务端开关 |
-| 环境 required reviewers | ✅ 可用 | 第 3 节 |
-| CODEOWNERS 强制 review | ✅ 可用 | 需配合 `count >= 1`，当前为 0 → **写了但不强制** |
-| 私有安全公告 | ✅ 可用 | `.github/SECURITY.md` 指向 |
-
-### 仍然做不到 / 未做的
-
-| 项 | 原因 |
+| 检查名 | 来自 |
 |---|---|
-| CODEOWNERS 强制 | `count = 0`（单人维护决策），见第 2 节 |
-| gitleaks 类历史扫描 | 未接入 CI；push 前手动扫过一次（无命中），列为可选增强 |
-| commit signing / vigilant mode | 未强制；需签名 key 分发，单人仓库收益有限 |
-| Sigstore 之外的签名（`.asc`） | 用 attestation（`.intoto.jsonl`）已满足最高档 |
+| `lint (ruff / actionlint / zizmor)` | `ci.yml` |
+| `typecheck (mypy)` | `ci.yml` |
+| `test (pytest + vendor verify)` | `ci.yml` |
+
+**取值来源是工作流里 `jobs.<id>.name`。** 对不上时 GitHub **不报错**，
+PR 只会永远卡在：
+
+```
+Expected — Waiting for status to be reported
+```
+
+这是全套配置里**最容易错、且报错最不友好**的地方。所以这三个名字被钉在**四处**
+并由 `tests/test_branch_model.py` 断言一致：
+
+1. `.github/workflows/ci.yml` 的 `jobs.<id>.name` ← 事实来源
+2. `scripts/apply_branch_protection.sh` 的 `REQUIRED_CHECKS`
+3. `.github/workflows/*.yml` 的 `jobs.<id>.name`（实际存在的 job name 集合）
+4. `CONTRIBUTING.md` §8.3 与本文件
+
+**改名时必须同时改这四处**，否则会出现「PR 莫名卡住」或「必需检查根本不存在」。
+
+### 4.2 `main-pr-target-guard.yml` 不是必需检查
+
+它只在 base=`main` 的 PR 上触发并 `exit 1`，作用是**显式、可读的拒绝**。
+因为 `main` 不开 PR 保护（§2.4），服务端不会拦以 `main` 为 base 的 PR ——
+若不恢复这个守卫，有人合并一个 base=`main` 的 PR 就会在 `main` 上造出
+`dev` 没有的提交，随后 promote 会失败（§5.2）。守卫让错误**在开 PR 时就暴露**。
+
+### 4.3 为什么批准数是 0
+
+见 §3.3。补充一点：强制力**不靠**人工批准，而靠
+`enforce_admins` + 「只有 promote 这一条路能进 main」。
 
 ---
 
-## 5. 本地钩子（软约束，仍然保留）
+## 5. promote 工作流的行为
 
-服务端已有硬约束，本地钩子作为**快速反馈**保留：
+### 5.1 完整逻辑
 
-- `no-force-push-main`：拦对 `main` / `dev` 的非快进推送（`pre-push` 阶段）
-- 它**可以被 `--no-verify` 绕过** —— 这没关系，因为它不再是唯一防线，
-  服务端的 `allow_force_pushes: false` 才是。
+```
+decide job
+  ├─ workflow_dispatch        → 跑
+  ├─ push chore.* tag         → 跑
+  ├─ push dev + 保留前缀      → 跑
+  └─ push dev + 普通提交      → 跳过（main 不动）
 
-保留的价值：本地拦截提供**即时反馈**，而服务端拒绝发生在推送之后，
-排查成本更高。
+promote job（仅当 decide 说跑）
+  ├─ checkout dev（persist-credentials: false）
+  ├─ 注入凭据
+  ├─ fetch origin dev main
+  ├─ main == dev ?            → 提示「无需 promote」并成功退出
+  ├─ main 有 dev 之外提交 ?    → ::error:: 并 exit 1
+  └─ git push --force-with-lease … origin/dev:refs/heads/main
+```
+
+### 5.2 `main` 有独有提交时必须**响亮失败**
+
+若静默改用 merge，就会造出一个 `dev` 从未验证过的合并提交进入发布线 ——
+破坏「`main` 上的每个提交都逐字节等于某个已过 CI 的 `dev` 提交」这一保证。
+破坏它，整个模型就失去意义。
+
+出现这种情况说明**有人绕过工作流直接写了 `main`**。处理方式：
+
+```bash
+# 1) 看 main 上哪些提交是 dev 没有的
+git fetch origin
+git cherry origin/dev origin/main | awk '/^\+/ {print $2}' | while read -r sha; do
+  git log --oneline -1 "$sha"
+done
+
+# 2) 把这些提交收回 dev（cherry-pick 或重新提交）
+# 3) 回到 Actions 重新跑 promote
+```
+
+### 5.3 `--force-with-lease` 的作用
+
+它钉住「工作流校验过的那个 `main`」。若有人在校验与推送之间动了 `main`，
+推送会被拒，而不是把对方的提交抹掉。这是 race-free 的提权。
+
+**为什么用 `--force-with-lease` 而不是裸 `git push`**：
+裸 push 在非快进时直接失败（好），但在 lease 语义下能给出更精确的失败原因，
+且它是唯一能在「校验→推送」窗口内提供保护的形态。
+
+### 5.4 `GITHUB_TOKEN` 的代价
+
+用 `GITHUB_TOKEN` 推的提交**不会触发**后续工作流。
+
+**影响**：`main` 移动之后**不会**出现新的 CI 运行。
+**这是刻意的**：`main` 与 `dev` 是同一个提交，`dev` 上的 CI 已经跑过，再跑一遍纯属冗余。
+「`main` 是绿的」这一事实由 promote run 自身承载。
 
 ---
 
-## 6. 配置漂移的处理流程
+## 6. 合并规则一览
 
-巡检（`protection-audit`）报 `protection drift` issue 时：
-
-1. **分支保护类**：重放期望配置
-   ```bash
-   bash scripts/apply_branch_protection.sh
-   ```
-   它是幂等的（PUT 全量替换）且**自带回读校验** —— 写成功 ≠ 生效，
-   API 返回 200 但字段被服务端规范化是真实发生过的。
-2. **安全开关类**（secret scanning / Dependabot）：Settings → Code security 手动开。
-3. **环境类**：Settings → Environments → `release` 检查 reviewers。
-4. issue 会在下一轮巡检全绿时**自动关闭**。
-
----
-
-## 7. 常见故障
-
-| 症状 | 根因 | 处理 |
+| # | 规则 | 强制力来自 |
 |---|---|---|
-| PR 停 `Expected — Waiting for status to be reported` | 分支保护的 context 与 job name 不一致 | 核对第 2 节的四处同步点 |
-| 无法合并自己的 PR | 误开了 `required_approving_review_count >= 1` | 改回 0，或加 bypass（但要重新评估 enforce_admins） |
-| release 卡住不结束 | ① `prevent_self_review` 开着 ② reviewer 超时 | 见第 3 节 |
-| `gh workflow run <wf>` 报 422 | 该工作流文件不在默认分支上 | 用 `--ref dev`，或先 promote |
-| cron 跑了旧版本 | 默认分支不是 `dev` | 确认 default branch 设置 |
-| 直推 main 成功了 | 分支保护失效 | 跑巡检看漂移原因，重放配置 |
+| R1 | 开发人员只能向 `dev` 提 PR | `dev` 是默认分支 + required checks |
+| R2 | PR 必须以 `dev` 为 base | `main-pr-target-guard.yml`（判红） |
+| R3 | 合入 `dev` 必须通过三项必需检查 | `dev` 的分支保护 |
+| R4 | 合并方式统一 **squash merge** | 仓库设置（关闭其他合并方式） |
+| R5 | **任何人**不得直接推送 `main` | `main` 的 `enforce_admins: true` |
+| R6 | `main` 只能由 promote 移动 | 唯一有权推 `main` 的路径 |
+| R7 | `main` 有 `dev` 之外的提交 → promote 失败 | promote 内的 `git cherry` 检查 |
+| R8 | 禁止删除 `main` / `dev` | `allow_deletions: false` |
+| R9 | 发布只能在 `main` 上打 `v*` tag | `release.yml` 的 tag 过滤 |
+
+---
+
+## 7. 回滚策略
+
+| 场景 | 做法 |
+|---|---|
+| 刚 promote，发现 `dev` 有严重问题 | 在 `dev` 上 `git revert <bad>` → 合入 → 重新 promote |
+| 已发 `v1.2.0`，线上出问题 | `git revert` 到 `dev` → promote → 打 `v1.2.1` |
+| 用户需要旧版本 | 直接装旧 `v*` Release 的产物 |
+| `main` 被搞坏 | `v*` tag 仍不可变，从旧 tag 重新指：`git push origin <good-tag>:refs/heads/main`（注意可能需 `--force`） |
+
+**为什么不需要 `lkg` 分支**：`v*` tag 是真正的不可变锚点 —— 分支可以被 force
+push，tag 需要显式删了重建。上一版用 `lkg` 是因为当时有自动上游同步需要
+「上一已验证快照」；本版没有自动同步，tag 足够。
+
+---
+
+## 8. 运维速查
+
+### 8.1 日常
+
+```bash
+# 开 PR（base = dev）
+git checkout dev && git pull
+git checkout -b feat/my-change
+# ...写代码...
+git push origin feat/my-change
+# → GitHub 上开 PR，base 选 dev，等三项检查绿，Squash and merge
+
+# 发布（两步）
+git checkout dev && git pull
+git commit --allow-empty -m "[merge] release v1.2.0"   # 或直接推带前缀的提交
+git push origin dev                                     # → 自动 promote
+
+# promote 完成后打 tag
+git fetch origin
+git push origin origin/main:refs/heads/main   # 对齐本地 main（可选）
+git tag v1.2.0 <main 的 sha>
+git push origin v1.2.0                          # → 触发 release
+```
+
+### 8.2 手动 promote（应急）
+
+```bash
+gh workflow run promote-dev-to-main --ref dev
+```
+
+> **为什么带 `--ref dev`**：默认分支是 `dev`，所以不带 `--ref` 也能工作；
+> 但显式写出来可以避免「默认分支被改回 `main` 时静默跑旧定义」。
+
+### 8.3 重新应用分支保护（配置被误改后）
+
+```bash
+bash scripts/apply_branch_protection.sh --dry-run   # 先预览
+bash scripts/apply_branch_protection.sh             # 应用并回读校验
+```
+
+---
+
+## 9. ⚠️ 服务端配置没有自动巡检（已知缺口）
+
+**这是本方案一个真实存在的缺口，如实声明。**
+
+分支保护是**服务端配置**：它真的硬（`enforce_admins` 下连管理员都绕不过），
+但它**可以被人手在 Settings 上点两下关掉，而代码仓库里没有任何痕迹**。
+
+上一版用 `protection-audit.yml` 每日巡检来堵这个缺口。本版为了「更简单」
+撤掉了巡检，**所以缺口重新打开了**。
+
+### 缓解措施
+
+1. **promote 是唯一改 `main` 的路径，而它每次运行都会真的推 `main`。**
+   若保护被关掉，promote **反而会更顺畅地成功**（不再有服务端拒绝），
+   所以 promote 本身**不**能作为探测手段。
+
+2. **真正的探测器是 §5.2 的 `git cherry` 检查。**
+   若保护被关掉且有人直推 `main`，那么 `main` 会多出 `dev` 没有的提交，
+   下一次 promote 会**响亮失败**并列出那些提交。这会把问题暴露出来 ——
+   但**只在下次 promote 时**，不是实时的。
+
+3. **人工确认**：改动仓库 Settings 后，跑一遍
+   `bash scripts/apply_branch_protection.sh --dry-run` 对比，或直接重放脚本。
+
+### 若要把缺口堵上
+
+重新引入一个每日巡检工作流，检查
+`/branches/main/protection` 的 `enforce_admins`、`required_pull_request_reviews`
+未被启用、三项必需检查齐全，以及 `/secret-scanning` 与 `/vulnerability-alerts`
+的开闭状态。这需要 `issues: write` 权限来开告警。
+
+> **取舍记录**：这是「简单」与「完备」之间的一次明确取舍，用户选择了简单。
+> 记录在此，以便将来需要时能快速加回。
+
+---
+
+## 10. 明确**不做**的项
+
+| 项 | 为什么不做 |
+|---|---|
+| **SAST / CodeQL** | public 下免费可用，但会引入一个异步的失败来源（首次扫描 5–10 分钟）且需人判读。对单人维护 + 运维使用收益低于理解成本 |
+| **配置漂移每日巡检** | 见 §9。为「简单」撤掉，缺口已如实声明 |
+| **secret scanning / Dependabot alerts** | 不做自动巡检，靠人工在 Settings 确认（**建议**开启，属平台开关、零维护） |
+| **提交签名 / vigilant mode** | 单人仓库收益低、日常摩擦高 |
+| **CODEOWNERS 强制** | 需要 `count ≥ 1`，会与 §3.3 的「避免自我死锁」冲突 |
+| **上游自动同步** | 上一版的 `sync-upstream.yml` 依赖 `lkg` 分支，本版一并移除 |
+| **`release` 环境人工放行** | **能力保留**（`release.yml` 仍声明 `environment: release`），但需你自己去 Settings 创建该环境。属于可选增强 |
+
+---
+
+## 11. 已知陷阱速查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| PR 卡在 `Expected — Waiting for status to be reported` | 必需检查名与 `jobs.<id>.name` 不逐字一致 | 对照 §4.1 四处取值，注意括号与空格 |
+| promote 报「推送被拒」 | 有人给 `main` 开了 PR 保护 | 移除 `required_pull_request_reviews`（§2.4） |
+| promote 报「main 存在 dev 之外的提交」 | 有人绕过工作流直接写了 `main` | 按 §5.2 收回提交 |
+| 推 `dev` 之后 `main` 没动 | 提交信息没有 `[merge]` / `chore(release):` **前缀** | 前缀必须锚定行首（§2.3） |
+| 你自己 `git push origin main` 竟然成功 | `enforce_admins` 没生效 | 重跑 `apply_branch_protection.sh` |
+| `release` 卡在 `Waiting for approval` 直到超时 | 误勾了 `Prevent self-review` | 关闭它，否则单人维护者无法批准自己的发布 |
+| 改了工作流但 cron / 手动触发仍跑旧版本 | 默认分支不是改动的那个分支 | 默认分支已设为 `dev`，改动会在 `dev` 生效 |

@@ -1,45 +1,36 @@
 name: promote-dev-to-main
 
-# 把**已验证的 dev** 提为 main —— main 是纯粹的发布指针，永远等于某个已通过
-# 全量门禁的 dev 快照。这是分支模型的唯一一条「向 main 写」通道。
+# 把 dev 的尖端**移动**到 main —— main 是纯粹的发布指针，永远与 dev 是同一个提交。
 #
-# ── 与旧方案（private + Free）的关键差异 ────────────────────────────────
-# 旧仓库是 private + Free：分支保护不可用（/rulesets 与
-# /branches/*/protection 均 403 "Upgrade to GitHub Pro"）。那时本 job 自带
-# 的全套门禁是 main 的**唯一防线**，且必须在文档里承认「有写权限的人可以
-# 直推 main，没人拦得住」。
+# ── 模型说明（参考 SnowLuma/SnowLuma 的 promote-dev-to-main.yml）────────
+# main 不是「合并」出来的，而是被**指**过去的：
+#   git push --force-with-lease origin origin/dev:refs/heads/main
+# 这样做的收益：
+#   1. 不产生 merge commit —— GitHub 的 network graph 不会出现 dev/main 来回交叉
+#   2. main 的历史 = dev 的历史，逐字节相等，不存在「main 上有 dev 没验证过的东西」
+#   3. 回滚时对比简单：main 与 dev 只可能是同一个或不同一个 sha
 #
-# 现在仓库是 **public + Free**：分支保护完整可用（见 docs/BRANCHING.md），
-# `enforce_admins: true` 让**管理员也不能直推 main**。所以本 job 的门禁
-# 从「唯一防线」降为**第二道防线** —— 但这道防线仍然保留，理由变了：
+# ── 与「PR 合并」的对比：一条硬约束必须记住 ──────────────────────────────
+# 本模型要求 main **不能**开启分支保护的
+# "Require a pull request before merging"（API 字段 required_pull_request_reviews），
+# 因为那会拒绝**所有**直接推送 —— 包括本工作流自己的推送，Promote 会直接失效。
+# 这与常规最佳实践相反，是有意的取舍。详见 doc/BRANCHING.md。
 #
-#   promote 是**不可逆的发布动作**（main 的移动即对外发布信号）。
-#   在不可逆动作前独立复算一遍门禁（~25s）比信任上游信号更便宜。
-#   上游 dev 上的 CI 绿是**必要条件**，不是充分条件：
-#   它证明的是「那个提交在当时的上下文里是绿的」，而提权发生在此刻。
+# ── 强制力来自哪里 ──────────────────────────────────────────────────────
+# 仓库为 public，分支保护真实可用：
+#   main 上 enforce_admins=true → **任何人（含管理员）都不能直推 main**
+# 所以「只有本工作流能改 main」是**服务端强制**，不是工作流约定。
 #
-# 新增的一条断言见 job 末尾「断言 main 的分支保护仍在」——
-# 那是**配置漂移探测器**：若有人把分支保护关了，这个 job 会红。
-#
-# 为什么用 GITHUB_TOKEN 而不是 GitHub App / PAT：零配置即可用，且 GITHUB_TOKEN
-# 推的提交**不会**触发后续工作流——这恰是我们要的：门禁已在 promote job 内跑过，
-# main 上再跑一遍 CI 是冗余的。代价如实声明：main 推上去之后不会出现新的 CI 运行，
-# 「main 是绿的」这一事实由 promote run 自身承载（它的结论即 main 的门禁结论）。
-#
-# dev 的推进方式（与 main 的关系）：
-#   feature 分支 → PR（base=dev）→ CI required checks → squash 合入 dev
-#   dev ──promote-dev-to-main──▶ main（fast-forward，不产生新提交）
-# 因此 main 的每个提交都**逐字节等于** dev 上某个已过 CI 的提交。
+# ── 为什么用 GITHUB_TOKEN ────────────────────────────────────────────────
+# 零配置即可用。代价如实声明：GITHUB_TOKEN 推的提交**不会**触发后续工作流，
+# 所以 main 移动之后不会出现新的 CI 运行 —— 这是刻意的，dev 上的 CI 已经跑过，
+# main 与 dev 是同一个提交，再跑一遍纯属冗余。
 
 on:
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "只做校验与预演，不推 main"
-        type: boolean
-        default: false
   push:
     branches: [dev]
+    tags: ['chore.*'] # chore.* tag 是与代码提交解耦的 promote 开关
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,50 +45,64 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      run: ${{ steps.gate.outputs.run }}
-      reason: ${{ steps.gate.outputs.reason }}
+      run: ${{ steps.check.outputs.run }}
+      reason: ${{ steps.check.outputs.reason }}
     steps:
-      - name: 判定门（前缀 / 手动放行）
-        id: gate
+      - name: 判定是否应当 promote
+        id: check
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
           HEAD_MSG: ${{ github.event.head_commit.message }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
-          # 手动 dispatch 一律放行（人已经显式表达了意图）
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "reason=手动触发（workflow_dispatch）" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # push 到 dev：只有带 [promote] 前缀的提交才自动提为 main。
-          # 前缀是**显式意图**——dev 上绝大多数提交（feature 合入、每日 sync roll）
-          # 都不该自动改 main，否则 main 的移动就失去了「人决定何时发」的语义。
-          first_line="$(printf '%s' "$HEAD_MSG" | head -1)"
-          case "$first_line" in
-            *"[promote]"*)
-              echo "run=true" >> "$GITHUB_OUTPUT"
-              echo "reason=提交信息含 [promote] 前缀：${first_line}" >> "$GITHUB_OUTPUT"
+          run='false'
+          reason=''
+
+          case "${EVENT_NAME}" in
+            workflow_dispatch)
+              run='true'
+              reason='手动触发（workflow_dispatch）'
+              ;;
+            push)
+              if [ "${REF_TYPE}" = 'tag' ]; then
+                run='true'
+                reason="chore.* tag：${REF}"
+              elif [ "${REF}" = 'refs/heads/dev' ]; then
+                # 前缀匹配（不是任意位置）：'[merge] fix: xxx' 触发，
+                # 'fix: xxx [merge]' 不触发。开发人员不得使用这两个前缀，
+                # 否则会意外触发发布 —— 这条写进 CONTRIBUTING 并有契约测试钉住。
+                first_line="$(printf '%s' "${HEAD_MSG:-}" | head -1)"
+                if printf '%s' "$first_line" | grep -qiE '^\[merge\]|^chore\(release\):'; then
+                  run='true'
+                  reason="dev 提交信息以保留前缀开头：${first_line}"
+                else
+                  reason='dev 上的普通提交（无 [merge] / chore(release): 前缀），main 不动'
+                fi
+              else
+                reason="未处理的 ref：${REF}"
+              fi
               ;;
             *)
-              echo "run=false" >> "$GITHUB_OUTPUT"
-              echo "reason=提交信息无 [promote] 前缀，跳过（dev 照常推进，main 不动）" >> "$GITHUB_OUTPUT"
+              reason="未处理的事件：${EVENT_NAME}"
               ;;
           esac
 
-      - name: 判定摘要
-        env:
-          RUN_PROMOTE: ${{ steps.gate.outputs.run }}
-          REASON: ${{ steps.gate.outputs.reason }}
-        run: |
+          {
+            echo "run=${run}"
+            echo "reason=${reason}"
+          } >> "$GITHUB_OUTPUT"
+
           {
             echo "### promote 判定"
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
-            echo "| 是否提权 | \`${RUN_PROMOTE}\` |"
-            echo "| 依据 | ${REASON} |"
+            echo "| 事件 | \`${EVENT_NAME}\` |"
+            echo "| ref | \`${REF}\` |"
+            echo "| 是否 promote | \`${run}\` |"
+            echo "| 依据 | ${reason} |"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   promote:
@@ -105,189 +110,87 @@ jobs:
     needs: decide
     if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
       contents: write # 唯一向 main 写的通道；zizmor 要求 job 级显式声明
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # 需要全历史：后面的 git cherry / merge-base 祖先判定要跨 dev/main 取对象
-          fetch-depth: 0
+          fetch-depth: 0 # 需要全历史：git cherry 要跨 dev/main 取对象
           ref: dev
-          # 凭据不留在 .git/config 里：推 main 时在「校验」步骤内显式注入
-          # （zizmor artipacked；与 ci.yml / release.yml 的既有约定一致）
-          persist-credentials: false
+          persist-credentials: false # 凭据在下面的校验步骤内显式注入（zizmor artipacked）
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      # ---- 门禁：与 ci.yml 的 test job 同构 -------------------------------------
-      # 为什么在 promote 里重跑一遍而不是复用 dev 上的 CI 结论：见文件头
-      # 「与旧方案的关键差异」——promote 是不可逆的发布动作，独立复算比信任
-      # 上游信号更便宜（全量契约测试 ~25s）。刻意与 ci.yml 保持同一组命令，
-      # 避免两套门禁漂移。
-      # 依赖安装统一走复合 action（.github/actions/setup-env），extras=gate。
-      #
-      # 为什么必须显式声明 gate 而不是沿用默认值：本 job 直接跑
-      # `python -m ruff` / `scripts/typecheck.py`，**不走** pre-commit 的隔离
-      # 环境，故 ruff / mypy 必须装进 venv。漏装会让门禁以 `No module named
-      # ruff` 假红 —— 那是环境缺失不是代码问题，却会把**整条提权通道锁死**
-      # （门禁过不了 → main 永远推不动）。2026-09-19 实测踩过。
-      # ruff 版本由复合 action 从 config/.pre-commit-config.yaml 的 rev 推导，
-      # 与走 pre-commit 的 ci.yml lint job 天然同版本，不会产生格式化判定分歧。
-      - uses: ./.github/actions/setup-env  # zizmor: ignore[self-repository] actionlint 尚不支持 $/
-        with:
-          extras: gate
-
-      - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
-        run: python scripts/check_test_deps.py
-
-      - name: lint（ruff check）
-        run: python -m ruff check --config config/pyproject.toml .
-
-      - name: 格式（ruff format --check）
-        run: python -m ruff format --config config/pyproject.toml --check .
-
-      - name: 类型（mypy）
-        run: python scripts/typecheck.py
-
-      - name: vendor 三层校验
-        run: python scripts/verify_vendor.py
-
-      - name: pytest
-        run: python -m pytest -c config/pyproject.toml --rootdir=. -q
-
-      # ---- 关系校验：main 必须能被 dev 快进 -----------------------------------
-      - name: 校验 main 可快进到 dev（防 main 出现 dev 没有的提交）
-        id: relation
+      - name: 移动 main 指针到 dev
         env:
-          # ${{ }} 必须经 env 传递：直接写进 run: 块会被 zizmor 判为模板注入
-          # （template-injection，audit confidence High）——展开结果会成为 shell 代码。
-          # sync-upstream.yml 的同类步骤遵循同一约定。
           GH_TOKEN: ${{ github.token }}
+          REASON: ${{ needs.decide.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          # 凭据经 env 注入而非直接写进 run: 块 —— 表达式直接展开进 shell
+          # 会被 zizmor 判为模板注入（template-injection, High）。
           git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
           git fetch --quiet origin dev main
           dev_sha="$(git rev-parse origin/dev)"
           main_sha="$(git rev-parse origin/main)"
           dev_short="$(git rev-parse --short origin/dev)"
-          {
-            echo "dev_sha=${dev_sha}"
-            echo "main_sha=${main_sha}"
-            echo "dev_short=${dev_short}"
-          } >> "$GITHUB_OUTPUT"
+          main_short="$(git rev-parse --short origin/main)"
 
           if [ "$dev_sha" = "$main_sha" ]; then
-            echo "::notice::main 已等于 dev（${dev_short}），无需提权"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git merge-base --is-ancestor "$main_sha" "$dev_sha"; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::main 是 dev 的祖先，可快进提权"
-            exit 0
-          fi
-
-          # main 有 dev 之外的历史 → 快进不可能。响亮失败：这是「有人绕过工作流
-          # 直接写 main」的信号，若静默改用 merge，就会造出一个 dev 从未验证过的
-          # 合并提交进入发布线。必须人先处理。
-          echo "::error::main 存在 dev 之外的提交，无法快进提权。先把这些提交落回 dev，或确认后重置 main。"
-          echo "main 独有的提交："
-          # 这里刻意不用 `git log --no-walk $(git cherry ...)`：未加引号的命令替换
-          # 会被 actionlint 的 shellcheck 判为 SC2046（word splitting）。用 while read
-          # 逐行消费，语义相同且没有引号陷阱；--no-walk 也不需要了（每行单独 show）。
-          git cherry origin/dev origin/main | awk '/^\+/ { print $2 }' | while read -r sha; do
-            [ -n "$sha" ] && git log --oneline -1 "$sha"
-          done || true
-          exit 1
-
-      - name: 快进 main 到 dev
-        if: steps.relation.outputs.skip == 'false'
-        env:
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
-          MAIN_SHA: ${{ steps.relation.outputs.main_sha }}
-          DEV_SHA: ${{ steps.relation.outputs.dev_sha }}
-        run: |
-          set -euo pipefail
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "::notice::dry_run=true —— 门禁与关系校验均通过，跳过实际推送"
+            echo "::notice::main 已等于 dev（${dev_short}），无需 promote"
             {
-              echo "### promote 预演（dry-run）"
-              echo ""
-              echo "门禁全绿，\`main\` 可快进至 \`dev\` @ \`${DEV_SHA}\`。未推送。"
+              echo "main 已等于 dev @ \`${dev_short}\`，无需 promote。"
             } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           fi
-          # --force-with-lease 而非裸 push：快进语义下两者等价，但 lease 钉住
-          # 「我校验过的那个 main」——若有人在校验与推送之间动了 main，推送被拒
-          # 而不是把对方的提交抹掉（race-free 的提权）。
+
+          # main 上若有 dev 没有的提交 → 本模型下**必须失败**。
+          # 若静默改用 merge，就会造出一个 dev 从未验证过的合并提交进入发布线，
+          # 而「main 上的每个提交都逐字节等于某个已过 CI 的 dev 提交」是这套
+          # 分支模型唯一的正确性保证。破坏它，整个模型就失去意义。
+          unique="$(git cherry origin/dev origin/main | awk '/^\+/ { print $2 }' || true)"
+          if [ -n "$unique" ]; then
+            echo "::error::main 存在 dev 之外的提交，无法快进。请先把这些提交收回 dev。"
+            echo "main 独有的提交："
+            # 不用未加引号的命令替换（actionlint 的 shellcheck 会判 SC2046），
+            # 用 while read 逐行消费。
+            printf '%s\n' "$unique" | while read -r sha; do
+              [ -n "$sha" ] && git log --oneline -1 "$sha"
+            done || true
+            exit 1
+          fi
+
+          # --force-with-lease 钉住「我校验过的那个 main」：
+          # 若有人在校验与推送之间动了 main，推送被拒而不是抹掉对方的提交。
           #
-          # 注：分支保护要求 `strict` + 线性历史 + 禁止强推。本推送虽带
-          # --force-with-lease，但在快进语义下**不构成**强推（远端是新提交的
-          # 祖先），故不受 allow_force_pushes=false 阻断。这正是本模型选择
-          # 快进而非 merge 的原因之一。
-          git push --force-with-lease="refs/heads/main:${MAIN_SHA}" \
+          # 注：快进语义下这不构成 force push（远端 sha 是新提交的祖先），
+          # 因此不受 allow_force_pushes=false 阻断 —— 本模型选指针移动而非
+          # merge 的原因之一，也是 doc/BRANCHING.md 里记的「已实测」项之一。
+          git push --force-with-lease="refs/heads/main:${main_sha}" \
             origin "origin/dev:refs/heads/main"
+
+          echo "::notice::main ${main_short} → dev@${dev_short}"
           {
             echo "### promote 完成"
             echo ""
-            echo "\`main\` → \`${DEV_SHA}\`（原 \`${MAIN_SHA}\`）"
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| \`main\` 原值 | \`${main_sha}\` |"
+            echo "| \`main\` 现值 | \`dev\` @ \`${dev_sha}\` |"
+            echo "| 依据 | ${REASON} |"
+            echo "| 运行 | ${RUN_URL} |"
             echo ""
-            # 不用 printf + 单引号格式串：actionlint 的 shellcheck 会把
-            # '发布 tag：`git push ...`' 里的 $ 相关文本判为 SC2016（单引号内不展开）。
-            # 直接把变量放进双引号 echo，语义相同且无歧义。
-            echo "发布 tag：\`git tag v<metadata 版本> ${DEV_SHA} && git push origin <tag>\`"
+            echo "发版：\`git tag v<版本> && git push origin v<版本>\`"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-
-      # ---- 配置漂移探测：强制力还在不在？ -------------------------------------
-      # 这是 public 方案**独有**的一步。旧方案（private）的强制力是模拟的，
-      # 但它写在 YAML 里、改它要过 review 留痕迹。新方案的强制力在**服务端配置**里：
-      # 真的硬，但可以被人在 Settings 上随手点掉，不留任何代码痕迹。
-      #
-      # 每日巡检（protection-audit.yml）负责发现漂移；本步骤是**第二重**：
-      # 在「即将向 main 写入」这个最需要保护的时刻，确认保护仍然在位。
-      # 若这里红了，说明有人关了分支保护 —— 提权通道不应继续可用。
-      #
-      # 放在推送**之后**：先完成动作，再报告环境健康度。若放在推送前，
-      # 一个误关的保护会阻断正常发布；而真正的风险（保护失效时被直推）
-      # 需要的是**告警**而不是阻断提权本身。
-      # 唯一例外：分支保护无 admin 权限读不到时会红。workflow 的 GITHUB_TOKEN
-      # 拿得到 read 权限（保护配置读操作只需 repo 权限），故不会误红。
-      - name: 断言 main 的分支保护仍在（防配置漂移）
-        if: ${{ always() && steps.relation.outputs.skip == 'false' && github.event.inputs.dry_run != 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if ! prot="$(gh api "repos/${REPO}/branches/main/protection" 2>/dev/null)"; then
-            echo "::error::main 的分支保护不存在或不可读 —— 强制力已失效。"
-            echo "::error::请重放期望配置：bash scripts/apply_branch_protection.sh"
-            exit 1
-          fi
-          # 关键字段抽查（完整比对由 protection-audit.yml 负责，
-          # 这里只做「还在不在」的快速判断，避免两处逻辑漂移）
-          ea="$(echo "$prot" | jq -r '.enforce_admins.enabled')"
-          if [ "$ea" != "true" ]; then
-            echo "::error::main 的 enforce_admins 为 ${ea}，期望 true —— 管理员可绕过保护"
-            exit 1
-          fi
-          echo "::notice::main 分支保护在位（enforce_admins=true）"
 
       - name: 汇总
         if: ${{ always() }}
         env:
-          DECIDE_REASON: ${{ needs.decide.outputs.reason }}
-          SKIP: ${{ steps.relation.outputs.skip }}
+          REASON: ${{ needs.decide.outputs.reason }}
         run: |
           {
-            echo "### promote-dev-to-main 汇总"
             echo ""
-            echo "| 项 | 值 |"
-            echo "|---|---|"
-            echo "| 触发依据 | ${DECIDE_REASON} |"
-            echo "| main 已等于 dev | \`${SKIP:-false}\` |"
+            echo "触发依据：${REASON}"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

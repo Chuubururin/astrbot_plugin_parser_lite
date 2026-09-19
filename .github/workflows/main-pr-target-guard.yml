@@ -1,0 +1,33 @@
+name: main-pr-target-guard
+
+# main 是发布指针，只由 promote-dev-to-main 移动。所有功能开发先落到 dev。
+#
+# 拦截以 main 为 base 的 PR：本模型下 main 与 dev 永远同一个提交，
+# 合并一个 PR 进 main 只会制造出 dev 没有的提交，随后 promote 就会因为
+# 「main 有独有提交」而失败。与其等到那时才发现，不如在 PR 打开时就拒绝。
+#
+# 本工作流的 job **不**是必需的 status check（dev 的分支保护只要求 ci 的三项）。
+# 它的作用是**显式、可读的拒绝**：给出可操作的错误信息，而不是让人猜为什么
+# main 上的东西对不上。
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-pr-target-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reject:
+    name: reject PRs targeting main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 拒绝以 main 为 base 的 PR
+        run: |
+          echo '::error::请把 PR 开向 dev，不要开向 main。main 只由 promote-dev-to-main 移动。'
+          exit 1

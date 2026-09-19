@@ -1,142 +1,179 @@
 #!/usr/bin/env bash
-# 把分支保护幂等地打到 main 上。
-#
-# 为什么需要这个脚本：仓库从 private 转为 **public** 后，分支保护从「不可用
-# （403 Upgrade to GitHub Pro）」变成「完整可用」。这是本次重构最大的收益 ——
-# 强制力第一次真的落在服务端，而不是靠 CI 判红去「模拟」拦截。
-#
-# 但服务端配置有个致命特性：**它可以被人随手在 UI 上点掉，且不会留下任何
-# 代码痕迹**。代码有 git 历史与 review，配置没有。所以：
-#   ① 本脚本把期望配置**写成代码**（可评审、可 diff、可回滚）；
-#   ② .github/workflows/protection-audit.yml 每日巡检实际配置是否仍等于期望；
-#   ③ tests/test_branch_model.py 断言本脚本的期望值与 docs/BRANCHING.md 一致。
-# 三者合起来才构成「配置不会悄悄漂移」的保证。
+# 应用 main / dev 的分支保护 —— 幂等，可重复执行。
 #
 # 用法：
-#   GH_TOKEN 需有 admin:repo 或 repo 权限（workflow 的 GITHUB_TOKEN 权限不够）
-#   bash scripts/apply_branch_protection.sh [--dry-run]
+#   bash scripts/apply_branch_protection.sh --dry-run   # 只打印将要发送的内容
+#   bash scripts/apply_branch_protection.sh             # 应用并回读校验
 #
-# 幂等：重复执行结果相同（PUT 语义即为全量替换）。
-set -euo pipefail
-
-REPO="${REPO:-${GITHUB_REPOSITORY:-Chuubururin/astrbot_plugin_parser_lite}}"
-BRANCH="${BRANCH:-main}"
-DRY_RUN="false"
-[ "${1:-}" = "--dry-run" ] && DRY_RUN="true"
-
-# ---- 期望值（单一事实来源：这里改，巡检与文档都跟着改）--------------------
+# 为什么用脚本而不是在 UI 上点：
+#   UI 点击无法 review、无法复现、无法在换台机器时重放。脚本进版本库，
+#   配置本身就成了可审计的代码。
 #
-# 必需状态检查的 context 必须与各工作流的 **job name** 逐字一致
-# （不是文件名、不是 workflow name）。写错的后果是 PR 永久卡在
-# "Expected — Waiting for status to be reported"，且不会报错，只会一直等。
+# ── 本模型最重要的一条：main 不能开 PR 保护 ──────────────────────────────
+# 分支保护的 "Require a pull request before merging"
+# （API 字段 required_pull_request_reviews）会拒绝**所有**直接推送到 main 的
+# ref 更新 —— 包括 promote-dev-to-main 工作流自己的推送。
+# 一旦开启，Promote 直接失效。
+# 因此 main 的配置里该字段必须是 null（见下方 MAIN_PAYLOAD），
+# 这是**有意为之**，不是遗漏。
+#
+# 与之配套：
+#   - main 用 required_status_checks 保证质量
+#   - main 用 enforce_admins=true 保证「只有 CI 能推」
+#   - 用 main-pr-target-guard.yml 拦住以 main 为 base 的 PR
+#
+# ── 必须与这三个地方保持一致（改动时同步改）────────────────────────────
+#   1. .github/workflows/*.yml 里各 job 的 name（事实来源）
+#   2. 本文件的 REQUIRED_CHECKS
+#   3. CONTRIBUTING.md 的必需检查表格
+# tests/test_branch_model.py 有断言把这三处钉死，改名会立刻变红。
+
+set -uo pipefail
+
+DRY_RUN=false
+case "${1:-}" in
+  --dry-run) DRY_RUN=true ;;
+  '') ;;
+  *) echo "未知参数：$1（只支持 --dry-run）" >&2; exit 2 ;;
+esac
+
+REPO="${REPO:-Chuubururin/astrbot_plugin_parser_lite}"
+
+# 必需检查名 —— 必须与 workflow 里 jobs.<id>.name **逐字一致**（含括号/空格/斜杠）。
+# 对不上时 GitHub 不报错，PR 只会永远卡在 "Expected — Waiting for status to be reported"。
 REQUIRED_CHECKS='[
   "lint (ruff / actionlint / zizmor)",
   "typecheck (mypy)",
-  "test (pytest + vendor verify)",
-  "analyze (python)"
+  "test (pytest + vendor verify)"
 ]'
 
-# enforce_admins=true：管理员也不能绕过。这是本设计的**核心承诺** ——
-# 若管理员可绕过，那「main 只由提权通道推进」就只是对普通贡献者的约束。
-#
-# required_approving_review_count=0 是刻意的（见 docs/BRANCHING.md §决策记录）：
-#   · 本模型的强制力核心是「必需检查必须过」，不是「必须有人 approve」；
-#   · 单人维护下 count>=1 会**自我死锁**（无法批准自己的 PR），
-#     除非同时开 bypass —— 而 bypass 与 enforce_admins=true 语义冲突。
-#   · 协作方变多后可提到 1；那时需要重新评估 enforce_admins 与 bypass 的取舍。
-PAYLOAD="$(cat <<JSON
+# ── main：发布指针 ────────────────────────────────────────────────────────
+MAIN_PAYLOAD=$(cat <<JSON
 {
   "required_status_checks": {
-    "strict": true,
+    "strict": false,
     "contexts": ${REQUIRED_CHECKS}
   },
   "enforce_admins": true,
   "required_pull_request_reviews": null,
   "restrictions": null,
-  "allow_force_pushes": false,
+  "allow_force_pushes": true,
   "allow_deletions": false,
-  "required_linear_history": true,
+  "required_linear_history": false,
   "required_conversation_resolution": false
 }
 JSON
-)"
+)
 
-# 注：required_pull_request_reviews 传 null 而非缺省 —— 缺省在某些 API 版本
-# 下会被解释为「保持不变」而不是「清空」，于是重复执行不清除历史配置。
-# null 是明确的「不要 review 要求」。
-#
-# required_linear_history=true 与 fast-forward 提权模型一致：
-# promote 做的是 `main ← dev` 快进，从不产生合并提交，所以线性历史是本模型的
-# 自然属性而非额外约束。开着它能防止有人用 merge PR 往 main 里塞合并提交。
+# ── dev：工作分支 ────────────────────────────────────────────────────────
+DEV_PAYLOAD=$(cat <<JSON
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": ${REQUIRED_CHECKS}
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 0,
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_linear_history": false,
+  "required_conversation_resolution": false
+}
+JSON
+)
 
-echo "== 应用分支保护 =="
-echo "仓库：${REPO}"
-echo "分支：${BRANCH}"
-echo "期望配置："
-echo "${PAYLOAD}"
-echo
+apply_one() {
+  local branch="$1" payload="$2"
 
-if [ "${DRY_RUN}" = "true" ]; then
-    echo "::notice::--dry-run：仅打印，不调用 API"
-    exit 0
-fi
+  echo "────────────────────────────────────────"
+  echo "分支：${branch}"
+  echo "────────────────────────────────────────"
+  echo "${payload}" | python3 -m json.tool
+  echo
 
-if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
-    echo "::error::需要 GH_TOKEN 或 GITHUB_TOKEN（且具备仓库 admin 权限）" >&2
-    exit 1
-fi
+  if [ "${DRY_RUN}" = true ]; then
+    echo "[dry-run] 跳过实际 PUT"
+    echo
+    return 0
+  fi
 
-# ---- 应用 ----------------------------------------------------------------
-# PUT 全量替换：这就是幂等性的来源，无需先 GET 再 diff。
-gh api \
-    --method PUT \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "repos/${REPO}/branches/${BRANCH}/protection" \
-    --input - <<< "${PAYLOAD}" \
-    > /dev/null
+  if ! printf '%s' "${payload}" \
+      | gh api -X PUT "repos/${REPO}/branches/${branch}/protection" --input - >/dev/null; then
+    echo "::error::PUT ${branch} 分支保护失败" >&2
+    return 1
+  fi
+  echo "已应用 ${branch} 的保护配置。"
+  echo
 
-echo "✅ 分支保护已应用"
-echo
-
-# ---- 回读校验：写成功 ≠ 生效 ---------------------------------------------
-# 这一步不是多余的：API 返回 200 但字段被服务端规范化（例如把 contexts
-# 拆成 checks 数组、或忽略未知字段）是真实发生过的。回读比对才是「生效」的证据。
-echo "== 回读校验 =="
-ACTUAL="$(gh api "repos/${REPO}/branches/${BRANCH}/protection")"
-
-fail=0
-check() {
-    local label="$1" actual="$2" expected="$3"
-    if [ "${actual}" = "${expected}" ]; then
-        echo "  ✓ ${label} = ${actual}"
+  # ── 回读校验 ────────────────────────────────────────────────────────────
+  # PUT 成功 ≠ 配置生效：组织的 Actions policy、套餐限制、
+  # 或服务端字段语义差异都可能让实际值与请求值不同。逐字段比对。
+  local got expect rc=0
+  check() { # $1=jq 表达式  $2=期望值  $3=字段名
+    got="$(gh api "repos/${REPO}/branches/${branch}/protection" --jq "$1" 2>/dev/null)"
+    if [ "${got}" != "$2" ]; then
+      echo "::error::${branch} 的 $3 期望 '$2'，实得 '${got}'" >&2
+      rc=1
     else
-        echo "  ✗ ${label}：期望 ${expected}，实际 ${actual}" >&2
-        fail=1
+      echo "  ✓ $3 = ${got}"
     fi
+  }
+
+  check '.required_status_checks.strict'               'false' 'strict'
+  check '.required_status_checks.contexts | length'    '3'     '必需检查数量'
+  check '.allow_deletions.enabled'                     'false' 'allow_deletions'
+  check '.required_linear_history.enabled'             'false' 'required_linear_history'
+
+  if [ "${branch}" = 'main' ]; then
+    check '.enforce_admins.enabled'      'true'  'enforce_admins'
+    check '.allow_force_pushes.enabled'  'true'  'allow_force_pushes'
+    # main **必须没有** PR 保护，否则 promote 会失效。这条是本模型的关键断言。
+    if [ "$(gh api "repos/${REPO}/branches/main/protection" --jq 'has("required_pull_request_reviews")' 2>/dev/null)" = 'true' ]; then
+      echo "::error::main 开了 PR 保护 —— promote-dev-to-main 会失效，必须移除" >&2
+      rc=1
+    else
+      echo "  ✓ required_pull_request_reviews 未启用（promote 可用）"
+    fi
+  else
+    check '.enforce_admins.enabled'     'false' 'enforce_admins'
+    check '.allow_force_pushes.enabled' 'false' 'allow_force_pushes'
+  fi
+
+  # 逐个核对必需检查名确实被服务端接受（写错名字在 PUT 时不报错）
+  local ctx
+  for ctx in "lint (ruff / actionlint / zizmor)" "typecheck (mypy)" "test (pytest + vendor verify)"; do
+    if gh api "repos/${REPO}/branches/${branch}/protection" \
+         --jq '.required_status_checks.contexts[]' 2>/dev/null | grep -Fxq "${ctx}"; then
+      echo "  ✓ 必需检查：${ctx}"
+    else
+      echo "::error::${branch} 缺少必需检查 '${ctx}'" >&2
+      rc=1
+    fi
+  done
+
+  echo
+  return "${rc}"
 }
 
-check "enforce_admins" \
-    "$(echo "${ACTUAL}" | jq -r '.enforce_admins.enabled')" "true"
-check "strict" \
-    "$(echo "${ACTUAL}" | jq -r '.required_status_checks.strict')" "true"
-check "allow_force_pushes" \
-    "$(echo "${ACTUAL}" | jq -r '.allow_force_pushes.enabled')" "false"
-check "allow_deletions" \
-    "$(echo "${ACTUAL}" | jq -r '.allow_deletions.enabled')" "false"
-check "required_linear_history" \
-    "$(echo "${ACTUAL}" | jq -r '.required_linear_history.enabled')" "true"
-
-# contexts 顺序不保证一致，故排序后比对
-actual_checks="$(echo "${ACTUAL}" | jq -r '.required_status_checks.contexts | sort | join(" | ")')"
-expected_checks="$(echo "${REQUIRED_CHECKS}" | jq -r 'sort | join(" | ")')"
-check "required_status_checks.contexts" "${actual_checks}" "${expected_checks}"
-
-if [ "${fail}" -ne 0 ]; then
-    echo >&2
-    echo "::error::分支保护未按期望生效 —— 上面的 ✗ 项需人工排查（详见 docs/BRANCHING.md）" >&2
-    exit 1
-fi
-
+echo "仓库：${REPO}"
+[ "${DRY_RUN}" = true ] && echo "模式：dry-run（不写入）" || echo "模式：应用"
 echo
-echo "✅ 回读校验全部通过：main 的强制力已在服务端生效"
+
+rc=0
+apply_one main "${MAIN_PAYLOAD}" || rc=1
+apply_one dev  "${DEV_PAYLOAD}"  || rc=1
+
+echo "────────────────────────────────────────"
+if [ "${DRY_RUN}" = true ]; then
+  echo "dry-run 结束。去掉 --dry-run 以实际应用。"
+elif [ "${rc}" = 0 ]; then
+  echo "全部应用并校验通过。"
+else
+  echo "存在校验失败项，请查看上方 ::error:: 输出。" >&2
+fi
+exit "${rc}"
