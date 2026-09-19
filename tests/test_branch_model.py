@@ -396,6 +396,15 @@ def test_main_protection_has_no_pull_request_requirement() -> None:
     assert '"allow_force_pushes": true' in main_payload, (
         "main 必须允许 force push，否则 --force-with-lease 在非快进场景会被拒"
     )
+    # main 上不跑 CI（ci.yml 的 push 只跟 dev），所以不能挂 required checks。
+    # 漏掉这条断言就会重演 2026-09-19 的真实失误：脚本里写着三条 contexts，
+    # 而文档写着 null，两边不一致却**没有任何测试发现**（只断言了 PR 保护那三项）。
+    assert '"required_status_checks": null' in main_payload, (
+        "main 的 required_status_checks 必须为 null —— main 上不跑 CI，"
+        "挂上必需检查会让 main 在缺失 check run 时永久卡在 "
+        "'Expected — Waiting for status to be reported'，且无任何报错。"
+        "「main 是绿的」由 dev 上那次 CI 承载（两者同 sha）。"
+    )
 
 
 def test_dev_protection_requires_checks_but_not_admins() -> None:
@@ -413,6 +422,24 @@ def test_dev_protection_requires_checks_but_not_admins() -> None:
     assert "required_approving_review_count" in dev_payload, (
         "dev 应显式声明批准数（说明为什么是 0）"
     )
+    # dev 是唯一跑必需检查的分支 —— 三条必须真的在它的 payload 里。
+    #
+    # ⚠️ 不能直接断言三个检查名出现在 DEV_PAYLOAD 里：payload 用的是
+    # `${REQUIRED_CHECKS}` 变量插值（shell heredoc），字面名字只在变量定义处出现。
+    # 第一版这么写就红了（2026-09-19）。正确判据分两步：
+    #   ① dev 的 payload 必须引用 REQUIRED_CHECKS 变量；
+    #   ② REQUIRED_CHECKS 变量里必须有全部三条（含精确的括号/斜杠/空格）。
+    assert "required_status_checks" in dev_payload, "dev 必须有必需检查"
+    assert "${REQUIRED_CHECKS}" in dev_payload, (
+        "dev 的 contexts 应引用 ${REQUIRED_CHECKS} 变量，而不是各抄一份字面清单 —— "
+        "抄字面清单就是「清单漂移」的入口"
+    )
+    for check in REQUIRED_CHECKS:
+        assert check in text, (
+            f"REQUIRED_CHECKS 变量里缺必需检查：{check}。"
+            "它是三条检查名的唯一来源，写错不报错，只让 PR 永久卡在 "
+            "'Expected — Waiting for status to be reported'。"
+        )
     # 批准数必须是 0 —— 单人维护者无法批准自己的 PR
     assert re.search(r'"required_approving_review_count":\s*0', dev_payload), (
         "批准数必须为 0：单人维护者无法批准自己的 PR，设 1 会自我死锁"

@@ -179,15 +179,14 @@ feature 分支 ──PR(base=dev)──▶ dev ──promote-dev-to-main──�
 | 配置 | 值 | 含义 |
 |---|---|---|
 | `enforce_admins` | `true` | **管理员也不能绕过**——这是本设计的核心承诺 |
-| `required_status_checks` | 3 个必需检查 | 见 8.3 |
+| `required_status_checks` | **`null`** | ★ 必须**不挂** —— `main` 上不跑 CI，见下方警告二 |
 | `required_pull_request_reviews` | **`null`** | ★ **必须不开**，见下方警告 |
 | `allow_force_pushes` | `true` | ★ promote 用 `--force-with-lease` 移动指针需要它 |
 | `allow_deletions` | `false` | 不可删除 |
-| `strict` | `false` | 不要求分支最新（单人维护场景减少摩擦） |
 
-> ### ⚠️ `main` 必须**不开**「Require a pull request before merging」
+> ### ⚠️ 警告一：`main` 必须**不开**「Require a pull request before merging」
 >
-> 这是本模型唯一与通用最佳实践相反的地方，**改了会静默搞坏发布**。
+> 这是本模型与通用最佳实践相反的地方之一，**改了会静默搞坏发布**。
 >
 > 该选项（API 字段 `required_pull_request_reviews`）会拒绝**所有**直接推送到
 > `main` 的 ref 更新 —— **包括 `promote-dev-to-main` 工作流自己的推送**。
@@ -200,6 +199,18 @@ feature 分支 ──PR(base=dev)──▶ dev ──promote-dev-to-main──�
 > 参考实现 [SnowLuma/SnowLuma](https://github.com/SnowLuma/SnowLuma) 的
 > `CONTRIBUTING.md` 有同样警告。
 
+> ### ⚠️ 警告二：`main` **也不要**挂必需检查
+>
+> `main` 与 `dev` 是**同一个提交**，三条必需检查是在 `dev` 推它时跑出来的
+> （`ci.yml` 的 `push` 只跟 `dev`）。**`main` 上永远不会出现 CI 运行** ——
+> 这是设计，不是缺陷。
+>
+> 挂上必需检查有两个问题：① 让人误以为「`main` 上有 CI」，与事实相反；
+> ② 一旦某个 promote 目标的 sha 上缺对应 check run，`main` 会永久卡在
+> `Expected — Waiting for status to be reported`，**且无任何报错**说明原因。
+>
+> 「`main` 是绿的」这个结论由 **`dev` 上那次 CI** 承载（两者同 sha）。
+
 **`dev`：**
 
 | 配置 | 值 | 含义 |
@@ -208,6 +219,7 @@ feature 分支 ──PR(base=dev)──▶ dev ──promote-dev-to-main──�
 | `required_status_checks` | 3 个必需检查 | 同上 |
 | `required_approving_review_count` | `0` | 单人维护者无法批准自己的 PR，设 1 会自我死锁 |
 | `allow_force_pushes` / `allow_deletions` | `false` | 保护他人的提交 |
+| `strict` | `false` | 不要求分支最新 —— 减少单人维护的 rebase 摩擦，代价见 `doc/BRANCHING.md` §3.5 |
 
 纵深防御仍有另外三层（**保留**，但已不是主要防线）：
 

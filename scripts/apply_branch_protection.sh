@@ -18,8 +18,9 @@
 # 这是**有意为之**，不是遗漏。
 #
 # 与之配套：
-#   - main 用 required_status_checks 保证质量
 #   - main 用 enforce_admins=true 保证「只有 CI 能推」
+#   - main **不**挂 required_status_checks（它上面不跑 CI，见 MAIN_PAYLOAD 注释）
+#   - dev 挂 required_status_checks（3 条）—— 门禁真正生效的地方
 #   - 用 main-pr-target-guard.yml 拦住以 main 为 base 的 PR
 #
 # ── 必须与这三个地方保持一致（改动时同步改）────────────────────────────
@@ -48,12 +49,18 @@ REQUIRED_CHECKS='[
 ]'
 
 # ── main：发布指针 ────────────────────────────────────────────────────────
+# ⚠️ required_status_checks 必须是 **null**，不是那三条检查。理由：
+#   main 上是 dev 那个**同一个提交**，而 ci.yml 的 push 只跟 dev
+#   （GITHUB_TOKEN 推的提交也不触发工作流）—— 所以 main 上**不会**跑 CI，
+#   这是模型的设计而不是缺陷。给 main 挂 required checks 会引出两个问题：
+#     ① 它让人以为「main 上跑 CI」，与事实相反；
+#     ② 一旦某个 promote 目标的 sha 上没有对应 check run，
+#        main 会永久卡在 "Expected — Waiting for status to be reported"，
+#        且这个表现极难定位（没有任何报错）。
+#   「main 是绿的」这个结论由 dev 上那次 CI 承载（两者同 sha）。
 MAIN_PAYLOAD=$(cat <<JSON
 {
-  "required_status_checks": {
-    "strict": false,
-    "contexts": ${REQUIRED_CHECKS}
-  },
+  "required_status_checks": null,
   "enforce_admins": true,
   "required_pull_request_reviews": null,
   "restrictions": null,
@@ -124,15 +131,26 @@ apply_one() {
     fi
   }
 
-  check '.required_status_checks.strict'               'false' 'strict'
-  check '.required_status_checks.contexts | length'    '3'     '必需检查数量'
-  check '.allow_deletions.enabled'                     'false' 'allow_deletions'
-  check '.required_linear_history.enabled'             'false' 'required_linear_history'
+  # 这两个字段与分支无关，两边都查
+  check '.allow_deletions.enabled'          'false' 'allow_deletions'
+  check '.required_linear_history.enabled'  'false' 'required_linear_history'
 
+  # ── 按分支区分：required_status_checks 的语义在 main / dev 上**相反** ────
   if [ "${branch}" = 'main' ]; then
     check '.enforce_admins.enabled'      'true'  'enforce_admins'
     check '.allow_force_pushes.enabled'  'true'  'allow_force_pushes'
-    # main **必须没有** PR 保护，否则 promote 会失效。这条是本模型的关键断言。
+
+    # main 必须**没有** required_status_checks —— 它上面不跑 CI。
+    # 挂了它会让 main 在缺失 check run 时永久卡在
+    # "Expected — Waiting for status to be reported"，且无任何报错。
+    if [ "$(gh api "repos/${REPO}/branches/main/protection" --jq 'has("required_status_checks")' 2>/dev/null)" = 'true' ]; then
+      echo "::error::main 挂了 required_status_checks —— main 上不跑 CI，这会永久卡住；必须移除" >&2
+      rc=1
+    else
+      echo "  ✓ required_status_checks 未启用（main 不跑 CI，符合模型）"
+    fi
+
+    # main 必须**没有** PR 保护，否则 promote 会失效。本模型的关键断言。
     if [ "$(gh api "repos/${REPO}/branches/main/protection" --jq 'has("required_pull_request_reviews")' 2>/dev/null)" = 'true' ]; then
       echo "::error::main 开了 PR 保护 —— promote-dev-to-main 会失效，必须移除" >&2
       rc=1
@@ -142,19 +160,23 @@ apply_one() {
   else
     check '.enforce_admins.enabled'     'false' 'enforce_admins'
     check '.allow_force_pushes.enabled' 'false' 'allow_force_pushes'
-  fi
+    check '.required_status_checks.strict'            'false' 'strict'
+    check '.required_status_checks.contexts | length' '3'     '必需检查数量'
 
-  # 逐个核对必需检查名确实被服务端接受（写错名字在 PUT 时不报错）
-  local ctx
-  for ctx in "lint (ruff / actionlint / zizmor)" "typecheck (mypy)" "test (pytest + vendor verify)"; do
-    if gh api "repos/${REPO}/branches/${branch}/protection" \
-         --jq '.required_status_checks.contexts[]' 2>/dev/null | grep -Fxq "${ctx}"; then
-      echo "  ✓ 必需检查：${ctx}"
-    else
-      echo "::error::${branch} 缺少必需检查 '${ctx}'" >&2
-      rc=1
-    fi
-  done
+    # 逐个核对必需检查名确实被服务端接受（写错名字在 PUT 时不报错，
+    # 只是让 PR 永远停在 "Expected — Waiting for status to be reported"）
+    local ctx
+    while IFS= read -r ctx; do
+      [ -n "${ctx}" ] || continue
+      if gh api "repos/${REPO}/branches/${branch}/protection" \
+           --jq '.required_status_checks.contexts[]' 2>/dev/null | grep -Fxq "${ctx}"; then
+        echo "  ✓ 必需检查：${ctx}"
+      else
+        echo "::error::${branch} 缺少必需检查 '${ctx}'" >&2
+        rc=1
+      fi
+    done < <(printf '%s' "${REQUIRED_CHECKS}" | python3 -c 'import json,sys; [print(c) for c in json.load(sys.stdin)]')
+  fi
 
   echo
   return "${rc}"

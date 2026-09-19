@@ -75,10 +75,24 @@ git push --force-with-lease="refs/heads/main:${main_sha}" \
 
 所以 `main` 的策略是：
 
-- ✅ 用 `required_status_checks` 保证质量
 - ✅ 用 `enforce_admins: true` 实现「只有 CI 能改 main」
 - ✅ 用 `main-pr-target-guard.yml` 拦住以 `main` 为 base 的 PR
 - ❌ **不用** `required_pull_request_reviews`
+- ❌ **也不用** `required_status_checks` —— `main` 上不跑 CI（见下）
+
+### 为什么 `main` 也不挂必需检查
+
+`main` 与 `dev` 是**同一个提交**。三条必需检查是在 `dev` 推这个提交时跑出来的
+（`ci.yml` 的 `push` 只跟 `dev`；且 `GITHUB_TOKEN` 推的提交不触发工作流）。
+所以 **`main` 上永远不会出现 CI 运行** —— 这是模型的设计，不是缺陷。
+
+给 `main` 挂必需检查会引出两个问题：
+
+1. 它让读配置的人以为「`main` 上会跑 CI」，与事实相反；
+2. 一旦某个 promote 目标的 sha 上缺对应的 check run，`main` 会永久卡在
+   `Expected — Waiting for status to be reported`，**且不会有任何报错**说明原因。
+
+> 「`main` 是绿的」这个结论由 **`dev` 上那次 CI** 承载 —— 两者同 sha，所以等价。
 
 > 参考实现 [SnowLuma/SnowLuma](https://github.com/SnowLuma/SnowLuma) 的
 > `CONTRIBUTING.md` 有同样的警告：「不要给 `main` 套『必须走 PR』…
@@ -93,14 +107,7 @@ git push --force-with-lease="refs/heads/main:${main_sha}" \
 
 ```jsonc
 {
-  "required_status_checks": {
-    "strict": false,
-    "contexts": [
-      "lint (ruff / actionlint / zizmor)",
-      "typecheck (mypy)",
-      "test (pytest + vendor verify)"
-    ]
-  },
+  "required_status_checks": null,          // ★ 必须为 null，见 §2.4（main 上不跑 CI）
   "enforce_admins": true,                  // 管理员也不能绕过（核心承诺）
   "required_pull_request_reviews": null,   // ★ 必须为 null，见 §2.4
   "restrictions": null,
@@ -110,6 +117,9 @@ git push --force-with-lease="refs/heads/main:${main_sha}" \
   "required_conversation_resolution": false
 }
 ```
+
+这四个字段里有两个是 `null`、一个是 `true`，全部**与常规最佳实践相反**。
+理由逐条见 §3.3。
 
 ### 3.2 `dev`
 
