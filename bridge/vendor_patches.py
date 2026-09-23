@@ -50,7 +50,13 @@ if TYPE_CHECKING:
 
     from ..vendor.nonebot_plugin_parser_lite.data import ContentItem
 
-_applied = False
+_APPLIED: set[str] = set()
+"""已成功挂载的补丁名集合（per-patch 幂等）。
+
+按名记录使失败项可单独重试；单一布尔标志无法表达「部分成功」的中间态
+——重跑已成功的补丁会经 _mount 二次追加 _MOUNTED，并把 VENDOR_* 留存
+的上游原件覆盖为桥实现，行为哨兵随之失真。
+"""
 
 VENDOR_BUFF_CONTENT: property | None = None
 """挂载前留存的上游 ``News.content``；行为哨兵直接调用其 fget 验证缺陷仍在。"""
@@ -126,17 +132,20 @@ def _mount(
 
 
 def apply_vendor_patches() -> None:
-    """应用全部 vendor 运行态补丁；幂等，可重复调用。
+    """应用全部 vendor 运行态补丁；按名幂等，可重复调用。
 
-    任一挂载点缺失或形态不符即抛 RuntimeError（响亮失败），不静默降级。
+    任一挂载点缺失或形态不符即抛 RuntimeError（响亮失败），不静默降级；
+    已成功的补丁下次调用跳过，失败项可重试。
     """
-    global _applied
-    if _applied:
-        return
-    _patch_buff_news_content()
-    _patch_hupu_iter_media_and_text()
-    _patch_ffmpeg_hls_ssrf()
-    _applied = True
+    for name, patcher in (
+        ("buff_news_content", _patch_buff_news_content),
+        ("hupu_iter_media_and_text", _patch_hupu_iter_media_and_text),
+        ("ffmpeg_hls", _patch_ffmpeg_hls_ssrf),
+    ):
+        if name in _APPLIED:
+            continue
+        patcher()
+        _APPLIED.add(name)
 
 
 # ---------------------------------------------------------------- buff
@@ -314,8 +323,9 @@ def _build_hls_guard(original: Any, ssrf_module: Any) -> Any:
 
     async def guarded(cls: Any, url: str, *args: Any, **kwargs: Any) -> Any:
         # 子进程出站无法钉扎 IP，入口处按桥内 SSRF 白名单校验（尽力而为，
-        # 见模块文档局限说明）；拒绝异常由 vendor 调用点包装为
-        # DownloadException，与其它下载失败同路径降级
+        # 见模块文档局限说明）。UrlBlockedError 是 BaseException：vendor
+        # 调用点的 except Exception 包不住它，安全拒绝直达插件入口
+        # （main 的 except UrlBlockedError），不与普通下载失败混淆。
         await to_thread.run_sync(ssrf_module.validate_url, url)
         return await original(url, *args, **kwargs)
 

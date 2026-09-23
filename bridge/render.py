@@ -224,30 +224,53 @@ def make_safe_src(budget: InlineBudget) -> Callable[..., Awaitable[Markup | None
         *,
         return_none_on_fail: bool = False,
     ) -> Markup | None:
+        # fail 为 None 时（avatar/logo 等装饰路径）失败不计 degraded；
+        # fail 为 PLACEHOLDER 时是**可见灰块**，必须计入整页降级判据——
+        # 否则「方法缺失/异常/None src」的灰块卡会被当成功缓存（灰块永久卡）。
         fail = None if return_none_on_fail else Markup(PLACEHOLDER_IMAGE)
+
+        def _note_placeholder(reason: str) -> None:
+            if fail is not None:
+                # 去重键按 reason:type:method 折叠不同对象，是刻意取舍：
+                # 占位图为 1×1 透明 GIF（非可见灰块），评论头像/回复头像
+                # （macros.jinja:80/105）不带 return_none_on_fail——逐对象
+                # 计数会让多条无头像评论的正常卡片误触整页降级。内容图的
+                # 预算类降级按文件路径逐张计数（_inline_image），不受此
+                # 折叠影响；结构性失败（vendor 改名等）同时命中多个不同
+                # (type, method) 组合，折叠后仍能触发阈值。
+                budget.note_degraded(f"{reason}:{type(obj).__name__}:{method}")
+
         try:
             if obj is None:
+                _note_placeholder("obj-none")
                 return fail
             attr = getattr(obj, method, None)
             if attr is None:
                 logger.warning("对象 %s 不存在方法 '%s'", type(obj).__name__, method)
+                _note_placeholder("no-method")
                 return fail
             if not callable(attr):
                 logger.warning("%s 的属性 '%s' 不是可调用对象", type(obj).__name__, method)
+                _note_placeholder("not-callable")
                 return fail
             src = attr()
             if hasattr(src, "__await__"):
                 src = await src
             if src is None:
+                _note_placeholder("src-none")
                 return fail
             # vendor 返回 anyio.Path / pathlib.Path，统一取文件系统路径
             inlined = await _inline_image(str(src), budget)
-            return Markup(inlined) if inlined else fail
+            if inlined:
+                return Markup(inlined)
+            _note_placeholder("inline-miss")
+            return fail
         except Exception as e:
             # 上游同处有 3 处 logger.warning；桥此前一律静默 return fail ——
             # vendor 改名这类事故会表现为「卡片上几张图变灰块」而日志里
             # 一个字都没有（2026-09-18 复核）
             logger.warning("safe_src(%s) 处理 %s 时失败: %r", method, type(obj).__name__, e)
+            _note_placeholder("error")
             return fail
 
     return safe_src
@@ -296,6 +319,7 @@ def _escaped_author(author: Any) -> Any:
         return None
     return replace(
         author,
+        id=_esc(getattr(author, "id", None)),
         name=_esc(author.name),
         location=_esc(author.location),
         description=_esc(author.description),
@@ -303,12 +327,17 @@ def _escaped_author(author: Any) -> Any:
 
 
 def _escaped_comment(comment: Any) -> Any:
-    """评论文本副本：作者与正文（含图片之外的文本项）按模板插值口径转义。"""
+    """评论文本副本：作者、正文、统计均按模板插值口径转义。
+
+    模板对 ``comment.stats.like_count`` 等做裸插值（macros.jinja:90-115），
+    计数字段同样是解析侧文本，必须经桥转义后才进模板数据面。
+    """
     content = [_esc(item) if isinstance(item, str) else item for item in (comment.content or [])]
     return replace(
         comment,
         author=_escaped_author(comment.author),
         content=content,
+        stats=_escaped_stats(comment.stats),
         replies=[_escaped_comment(reply) for reply in (comment.replies or [])],
     )
 
@@ -319,13 +348,15 @@ def _escaped_stats(stats: Any) -> Any:
     ``extra`` 先经 ``_translate_stats_extra`` 归一为模板要求的二元组契约，
     再按二元组逐项转义——顺序不能反：标量形状下按 ``value[0]`` 取值会把
     数值字符串切碎（"321" → ("3","2")），形状翻译随之失效。
+    ``extra`` 的**键**进模板 ``fa-{{ key }}`` class 名（macros.jinja），同样
+    须转义——键来自解析侧（如 B 站 danmaku/coin），可被上游数据污染。
     """
     translated = _translate_stats_extra(stats)
     extra = {
-        key: (
+        _esc(str(key)) if isinstance(key, str) else key: (
             (_esc(value[0]), _esc(value[1]))
             if isinstance(value, (tuple, list)) and len(value) == 2
-            else value
+            else (_esc(str(value)) if isinstance(value, str) else value)
         )
         for key, value in (getattr(translated, "extra", None) or {}).items()
     }
@@ -382,7 +413,14 @@ async def resolve_parse_result(result: ParseResult) -> dict[str, Any]:
         "title": _esc(result.title),
         "formatted_datetime": _esc(result.formatted_datetime),
         "extra": _escaped_extra(result.extra),
-        "platform": result.platform,
+        # platform.display_name 进两模板裸插值（macros.jinja:414 /
+        # music.html.jinja:59）；platform 本身还被 _select_template 读
+        # .name 选模板——只转义 display_name 副本，不污染 name。
+        "platform": (
+            replace(result.platform, display_name=_esc(result.platform.display_name))
+            if result.platform is not None and getattr(result.platform, "display_name", None)
+            else result.platform
+        ),
         "content": result.content,  # render_content_items 内逐字段 `| e`
         "stats": _escaped_stats(result.stats),  # 内含形状翻译，勿另包一层
         # 切片前必须钳制：WebUI 面板不校验 int 范围，负数会让 [:-1] 变成
@@ -393,6 +431,10 @@ async def resolve_parse_result(result: ParseResult) -> dict[str, Any]:
         "ai_summary": _esc(result.ai_summary),
         "rendering_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "bot_name": _esc(_nickname),
+        # music 模板裸插值 result.url / result.qr_code_path（music.html.jinja:
+        # 37/74-80）；default 用 qrcode_path 键。两者都进模板数据面。
+        "url": _esc(result.url),
+        "qr_code_path": None,
     }
     if result.repost:
         data["repost"] = await resolve_parse_result(result.repost)
@@ -410,9 +452,11 @@ async def resolve_parse_result(result: ParseResult) -> dict[str, Any]:
         img = qr.make_image(fill_color="black", back_color="white")
         buffer = BytesIO()
         cast(Any, img).save(buffer, format="PNG")
-        data["qrcode_path"] = (
-            f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode()}"
-        )
+        qr_uri = f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode()}"
+        data["qrcode_path"] = qr_uri
+        # music 模板读 qr_code_path（无 qrcode_path）；键名是上游模板契约，
+        # 桥侧补别名而非改模板（templates/* 逐字节镜像）
+        data["qr_code_path"] = qr_uri
     return data
 
 
@@ -501,10 +545,14 @@ async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> b
     return await Path(str(image_path)).read_bytes()
 
 
-RENDER_CACHE_REV = "2"
+RENDER_CACHE_REV = "3"
 """桥本地渲染行为版本：桥侧渲染管线变更（如 2026-09-14 zoom 缩放补丁）
 时递增，使旧键缓存整体失效——上游模板变更走注入的 RENDER_TEMPLATE_VERSION，
-桥自身变更走这里，两把钥匙互不覆盖。"""
+桥自身变更走这里，两把钥匙互不覆盖。
+
+v3：safe_src 占位计入 degraded、comment.stats/author.id/platform.display_name
+转义、music qr_code_path/url 补键、JPEG 魔数校验——旧缓存里的灰块/未转义
+产物必须整体重建。"""
 
 
 MAX_COMMENTS_LIMIT = 100
@@ -556,16 +604,29 @@ def render_cache_key(result: ParseResult, theme: Theme) -> str:
     )
 
 
+_JPEG_MAGIC = b"\xff\xd8\xff"
+"""JPEG SOI 魔数（前 3 字节）。png_to_jpeg 失败可能返回非 JPEG 字节，
+仅判非空会把坏产物写进缓存并当命中（灰块/花屏卡永久复用）。"""
+
+
+def _is_jpeg(data: bytes) -> bool:
+    return len(data) >= 3 and data.startswith(_JPEG_MAGIC)
+
+
 async def _cache_artifact_usable(path: Path) -> bool:
-    """缓存产物可用 = 存在且非空。
+    """缓存产物可用 = 存在且为合法 JPEG（SOI 魔数 + 非空）。
 
     只判存在会把 0 字节产物（PNG→JPEG 失败、上次写入被中断）当成命中缓存
     到下次清理；vendor 每 2h 的清理任务也可能刚好删掉文件（2026-09-17
-    评审 L10）。
+    评审 L10）。魔数校验补上「非空但不是 JPEG」的第三类坏产物。
     """
     try:
+        async with await path.open("rb") as fh:
+            head = await fh.read(3)
+        if len(head) < 3 or not head.startswith(_JPEG_MAGIC):
+            return False
         return (await path.stat()).st_size > 0
-    except FileNotFoundError:
+    except OSError:  # 含 FileNotFoundError：文件缺失/不可读一律按缓存未命中
         return False
 
 
@@ -573,9 +634,9 @@ async def cache_or_render_image(result: ParseResult, renderer: Any) -> Path:
     """上游 cache_or_render_image 等价移植：命中渲染缓存直接复用。
 
     以模板族版本+桥渲染行为版本+主题+渲染相关配置态摘要+结果 URL 为稳定键
-    生成缓存文件名：产物存在且非空即复用不重渲（跨重启可复用）；否则渲染，
-    并把 PNG 转 JPEG（体积约为原图 1/8，多数场景落回图片段而非 5MB 文件段，
-    与上游发送语义一致）后原子落盘，并复验产物非空。
+    生成缓存文件名：产物存在且为合法 JPEG 即复用不重渲（跨重启可复用）；
+    否则渲染，并把 PNG 转 JPEG（体积约为原图 1/8，多数场景落回图片段而非
+    5MB 文件段，与上游发送语义一致）后原子落盘，并复验产物可用。
     """
     theme = get_theme()
     cache_dir = await CacheManager.ensure_dir(CacheManager.RENDER)
@@ -588,9 +649,11 @@ async def cache_or_render_image(result: ParseResult, renderer: Any) -> Path:
     dest = cache_dir / f"{uuid.uuid5(uuid.NAMESPACE_URL, key)}.jpeg"
     if not await _cache_artifact_usable(dest):
         jpeg = await FFmpeg.png_to_jpeg(await render_image(result, renderer, theme=theme))
-        if not jpeg:
-            logger.warning("渲染产物为空（png_to_jpeg 返回 0 字节），拒绝写入缓存：%s", dest.name)
-            raise RenderArtifactError("empty render artifact (png_to_jpeg returned 0 bytes)")
+        if not _is_jpeg(jpeg):
+            logger.warning(
+                "渲染产物非 JPEG 或为空（len=%d），拒绝写入缓存：%s", len(jpeg or b""), dest.name
+            )
+            raise RenderArtifactError("render artifact is not JPEG (png_to_jpeg failed?)")
         temp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
         try:
             await temp.write_bytes(jpeg)
@@ -601,7 +664,7 @@ async def cache_or_render_image(result: ParseResult, renderer: Any) -> Path:
         if not await _cache_artifact_usable(dest):
             with contextlib.suppress(FileNotFoundError):
                 await dest.unlink()
-            logger.warning("缓存产物写入后为空：%s", dest.name)
-            raise RenderArtifactError(f"cache artifact empty after write: {dest.name}")
+            logger.warning("缓存产物写入后不可用：%s", dest.name)
+            raise RenderArtifactError(f"cache artifact unusable after write: {dest.name}")
     result.render_image = dest
     return dest

@@ -74,6 +74,8 @@ def test_user_facing_strings_flow_through_texts() -> None:
     extractor = _load_extractor()
     # 上游无对应文案的桥 glue（各项均为规则层显式声明）：
     # 「解析失败：」前缀——ParseException 文案本身上游驱动；
+    # 「请求被安全策略拒绝：」前缀——SSRF 拦截的桥侧安全终态提示
+    #   （main 的 except UrlBlockedError；vendor 无对应上游文案）；
     # 『』——命令包裹符（占位数据的桥侧呈现格式）。
     # 已归源出白名单的条目：
     # 「项」——候选扫描发现上游 render send_content 尾段整句
@@ -81,7 +83,7 @@ def test_user_facing_strings_flow_through_texts() -> None:
     # 标点切分集——渲染参数注入层 text_split_punctuation，sender 消费；
     # 「弹幕」「硬币」——显示文本注入层（parsers/bilibili，equals_repeated
     #   锚点），render.py 从 texts.py 消费
-    allowlist = {"解析失败：", "『", "』"}
+    allowlist = {"解析失败：", "请求被安全策略拒绝：", "『", "』"}
     offenders: dict[str, list[str]] = {}
     for name in ("main.py", "bridge/sender.py", "bridge/render.py"):
         hits = [v for v in _han_strings(extractor, REPO_ROOT / name) if v not in allowlist]

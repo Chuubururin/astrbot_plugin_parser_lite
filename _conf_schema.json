@@ -158,7 +158,7 @@
     "default": false
   },
   "plite_lazy_download_timeout": {
-    "description": "懒下载模式等待命令超时时间",
+    "description": "懒下载模式等待命令超时时间（有效范围 5-300，超出范围按边界值处理）",
     "type": "int",
     "default": 30
   },

@@ -1,43 +1,39 @@
 """SSRF 防护（参照 GitLab lib/gitlab/url_blocker.rb 四层模型）。
 
-覆盖 vendor 的两条出站 HTTP 面（vendor 文件零修改）：
+覆盖 vendor 的出站 HTTP 面（vendor 文件零修改）：
 1. 下载器 DOWNLOADER.client：桥接启动时把其 httpx 客户端替换为带钉扎
    transport 的客户端，并包装 curl_cffi 会话的 request 入口；
 2. parser API 面 BaseParser.httpx（28 个平台 parser 的接口请求，含
    kuaishou 等短链重定向目标直连）：包装 BaseParser.__init__，实例化后
-   替换为带同一钉扎 transport 的客户端。
+   替换为带同一钉扎 transport 的客户端；
+3. 辅助客户端：weibo AuthHelper.SESSION、bilibili HTTP_CLIENT /
+   GRPC_CLIENT._client（模块级 from-import 绑定，只能就地换 transport，
+   不能重绑模块属性）。
 
 四层：
 1. scheme 白名单 {http, https}；
 2. 端口规则（80/443 与 >=1024 放行）；
-3. getaddrinfo 全部结果逐 IP 校验（环回/私网/链路本地/保留/多播/未指定 全拒）；
+3. getaddrinfo 全部结果逐 IP 校验（环回/私网/链路本地/保留/多播/未指定 全拒；
+   IPv4-mapped IPv6 归一到 IPv4 再判定，拦 ::ffff:127.0.0.1 等）；
 4. 解析即连接钉扎：把 TCP 连接钉在已验证 IP 上（httpx 走 httpcore network
    backend，URL/SNI 保留原 hostname；curl_cffi 走会话级 CurlOpt.RESOLVE），
    DNS 二次解析被绕开，rebinding 失效。
 
-重定向（httpx 与 curl 两条面能力不同，不是等价四层）：
+重定向（httpx 与 curl 两条面均在 Python 侧逐跳校验）：
 httpx 侧 follow_redirects=True 由 httpx 在 Python 侧逐跳重发，每跳都重回
 _PinnedTransport.handle_async_request，即每跳都过完整四层校验。
-curl 侧不同：重定向由 libcurl 在 C 层内部完成，不会重回被包装的
-session.request，RESOLVE 只钉首个 host；故 wrapper 强制
-allow_redirects=CurlFollow.SAFE，由 libcurl 拒绝指向内网的重定向目标
-（实测报错：curl: (7) Redirect to internal IP <ip> rejected (SSRF protection)）。
-
-重定向层的覆盖面差异（不宣称与 _ip_forbidden 等价）：CurlFollow.SAFE 用的是
-libcurl 自己的 internal/private 判定，与本项目 _ip_forbidden 的集合不重合。
-本机实测（curl_cffi 0.16.3 + libcurl 8.21.0-IMPERSONATE，重定向目标）：
-SAFE 拒绝 127.0.0.1、::1、10/8、172.16/12、192.168/16、169.254/16（含元数据
-端点）、fe80::/10；SAFE **不拒绝** 100.64.0.0/10（CGNAT）、198.18.0.0/15、
-192.0.2.0/24 与 203.0.113.0/24（TEST-NET）、224/4、240/4、0.0.0.0、
-2001:db8::/32、64:ff9b::/96（NAT64，可映射到 127.0.0.1）——这些只被
-_ip_forbidden 拦住。即：重定向跳转仅享有 libcurl 的判定口径，弱于首跳。
-若上游后续能在 Python 侧逐跳校验（或 libcurl 扩大判定范围），应优先于本折衷。
-老版本 curl_cffi 无 CurlFollow.SAFE 成员时 fail-closed：退化为
-allow_redirects=False（不跟随重定向，短链类下载功能降级），绝不静默放行。
+curl 侧：libcurl 在 C 层内部跟随重定向不会重回被包装的 session.request，
+故 wrapper 强制 allow_redirects=False，由 Python 手动跟随，每跳先
+validate_url 再发请求——与 httpx 同口径。CurlFollow.SAFE 把跳转判定交给
+libcurl，口径弱于 _ip_forbidden（CGNAT/TEST-NET/224/4/0.0.0.0/NAT64
+漏拦），不作为重定向依据。
 
 代理：配置代理时连接目标是代理而非对端，httpx 侧退回「请求目标改写为已
 验证 IP 字面量」路径（本地校验语义 fail-closed 不变）；curl_cffi 语义同前。
 任何校验失败一律拒绝（fail-closed）。
+
+安装：整装锁 + 全部成功后才置 _ssrf_guarded——中途失败时下次 install
+仍可重试，不产生半包装通道。
 """
 
 from __future__ import annotations
@@ -53,15 +49,17 @@ import socket
 import threading
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import anyio
 import httpcore
 import httpx
-from curl_cffi.const import CurlFollow, CurlOpt
+from curl_cffi.const import CurlOpt
 
 # anyio 为 vendor 运行链硬依赖（nonebot2 与 render.py 均直接导入），无回退路径
 _offload = anyio.to_thread.run_sync
+
+logger = logging.getLogger(__name__)
 
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
@@ -76,8 +74,13 @@ _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 _INHERIT_VENDOR_VERIFY: bool = False
 
 
-class UrlBlockedError(Exception):
-    """URL 未通过 SSRF 校验。"""
+class UrlBlockedError(BaseException):
+    """URL 未通过 SSRF 校验。
+
+    继承 BaseException（而非 Exception）：vendor 的 @retry 与各
+    ``except Exception`` 包装点不会吞掉或重试被拦截的请求——SSRF 拒绝是
+    安全终态，不是可恢复的传输错误。插件入口须显式 except 本类。
+    """
 
 
 EXTRA_FORBIDDEN_NETWORKS = tuple(
@@ -94,7 +97,14 @@ EXTRA_FORBIDDEN_NETWORKS = tuple(
 
 
 def _ip_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """GitLab validate_internal_addresses 语义：非公网单播一律拒绝。"""
+    """GitLab validate_internal_addresses 语义：非公网单播一律拒绝。
+
+    IPv4-mapped IPv6（``::ffff:127.0.0.1`` 等）先归一为 IPv4 再判定：
+    stdlib 对 mapped 形态的 ``is_loopback/is_private`` 在部分版本不触发，
+    会漏拦经该形态表达的环回/内网地址。
+    """
+    if isinstance(ip, ipaddress.IPv6Address) and (mapped := ip.ipv4_mapped) is not None:
+        ip = mapped
     if (
         ip.is_loopback
         or ip.is_private
@@ -145,7 +155,20 @@ def _resolve_and_validate(hostname: str) -> list[str]:
 
 
 def validate_url(url: str) -> ValidatedUrl:
-    """校验 URL 的 scheme/端口/解析结果；失败抛 UrlBlockedError。"""
+    """校验 URL 的 scheme/端口/解析结果；失败抛 UrlBlockedError。
+
+    拒绝在此统一落审计日志（httpx transport / curl guard / HLS guard 三条
+    通道都经本函数收口）：异常传播链只体现安全终态，日志留下被拒目标与
+    原因，是运维侧审计「SSRF 拦了什么」的唯一入口。
+    """
+    try:
+        return _validate_url(url)
+    except UrlBlockedError as exc:
+        logger.warning("SSRF 拒绝出站请求: url=%s 原因=%s", url, exc)
+        raise
+
+
+def _validate_url(url: str) -> ValidatedUrl:
     parts = urlsplit(url)
     scheme = (parts.scheme or "").lower()
     if scheme not in ALLOWED_SCHEMES:
@@ -172,6 +195,19 @@ def validate_url(url: str) -> ValidatedUrl:
         ips = _resolve_and_validate(trimmed)
 
     return ValidatedUrl(url=url, scheme=scheme, host=hostname, port=port, ips=ips)
+
+
+def _resolve_pinned_fallback(host: str) -> list[str]:
+    """无预验证上下文（如代理连接目标）时现场解析并逐 IP 校验；拒绝落审计日志。"""
+    trimmed = host.strip("[]").rstrip(".")
+    try:
+        try:
+            return [_validate_ip_literal(trimmed)]
+        except ValueError:
+            return _resolve_and_validate(trimmed)
+    except UrlBlockedError as exc:
+        logger.warning("SSRF 拒绝拨号目标（无预验证上下文）: host=%s 原因=%s", host, exc)
+        raise
 
 
 class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -202,14 +238,9 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options: Any = None,
     ) -> httpcore.AsyncNetworkStream:
         pinned = _PINNED_IPS.get()
-        if pinned is not None:
-            ips = pinned
-        else:
-            trimmed = host.strip("[]").rstrip(".")
-            try:
-                ips = [_validate_ip_literal(trimmed)]
-            except ValueError:
-                ips = _resolve_and_validate(trimmed)
+        # 回退解析内的 getaddrinfo 是阻塞调用，而 connect_tcp 跑在事件循环上：
+        # 与 handle_async_request 同口径投线程池，DNS 慢/黑洞不冻结整个循环
+        ips = pinned if pinned is not None else await _offload(_resolve_pinned_fallback, host)
         last_error: Exception | None = None
         for ip in ips:
             try:
@@ -283,22 +314,8 @@ RESOLVE 是「域名 → IP」映射表，天然可跨请求累积复用；每�
 """
 
 
-def _safe_redirect_policy() -> Any:
-    """重定向跟随策略：CurlFollow.SAFE 优先，缺失时 fail-closed 退化为不跟随。
-
-    curl_cffi 0.16.3 + libcurl 8.21.0-IMPERSONATE 的 ``CurlFollow.SAFE``(=4)
-    由 libcurl 在 C 层拒绝重定向到 internal/private 地址（覆盖面见模块
-    docstring）。老版本无该成员时**绝不静默退回 True**——那正是重定向绕过
-    SSRF 的成因——而是退化为 allow_redirects=False（功能降级，不放行）。
-    """
-    policy = getattr(CurlFollow, "SAFE", None)
-    if policy is None:
-        logging.getLogger(__name__).warning(
-            "curl_cffi 缺少 CurlFollow.SAFE：curl 通道不再跟随重定向（fail-closed，"
-            "短链类下载可能失败）；请升级 curl_cffi"
-        )
-        return False
-    return policy
+_MAX_CURL_REDIRECTS = 30
+"""curl 通道手动跟随重定向的跳数上限（与 libcurl 默认一致，防循环）。"""
 
 
 def _publish_resolve_entries(validated: ValidatedUrl) -> list[str]:
@@ -328,22 +345,123 @@ def _wrap_curl_session(session: Any) -> None:
     TypeError（curl 通道整体不可用，2026-09-16 评审实测确认）；真正被
     _request_once 读取的是 self.curl_options。
 
-    重定向只能交给 libcurl：follow 由 C 层完成，不会重回本包装函数，故强制
-    allow_redirects=CurlFollow.SAFE 覆盖 vendor 传入的 True。
+    重定向在 Python 侧手动跟随（allow_redirects=False）：每跳先 validate_url
+    再发请求，与 httpx _PinnedTransport 同口径；CurlFollow.SAFE 判定弱于
+    _ip_forbidden（见模块 docstring），不作为重定向依据。
     """
+    if getattr(session, "_ssrf_guarded", False):
+        return
     original = session.request
-    redirect_policy = _safe_redirect_policy()
 
     async def guarded_request(method: str, url: str = "", **kwargs: Any) -> Any:
-        validated = await _offload(validate_url, str(url))
         # 注入的 kwargs 必须全部是 AsyncSession.request 的合法形参（冒烟测试守护）
-        kwargs["allow_redirects"] = redirect_policy
-        options = dict(getattr(session, "curl_options", None) or {})
-        options[CurlOpt.RESOLVE] = _publish_resolve_entries(validated)
-        session.curl_options = options
-        return await original(method, url, **kwargs)
+        kwargs["allow_redirects"] = False
+        current_url = str(url)
+        current_method = method
+        for _hop in range(_MAX_CURL_REDIRECTS + 1):
+            validated = await _offload(validate_url, current_url)
+            options = dict(getattr(session, "curl_options", None) or {})
+            options[CurlOpt.RESOLVE] = _publish_resolve_entries(validated)
+            session.curl_options = options
+            response = await original(current_method, current_url, **kwargs)
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status not in (301, 302, 303, 307, 308):
+                return response
+            location = response.headers.get("location") or response.headers.get("Location")
+            if not location:
+                return response
+            if _hop >= _MAX_CURL_REDIRECTS:
+                raise UrlBlockedError(f"重定向超过 {_MAX_CURL_REDIRECTS} 跳：{current_url}")
+            # 相对 Location 按当前响应 URL 解析
+            base = str(getattr(response, "url", "") or current_url)
+            current_url = urljoin(base, location)
+            # RFC 7231：303 恒改 GET；301/302 对非安全方法改 GET（与 curl 默认一致）。
+            # 改 GET 后请求体参数全部弃用（libcurl 同语义），否则 data/content/
+            # files 会让部分服务器拒绝 GET 或以体内容影响响应
+            if status == 303 or (
+                status in (301, 302) and current_method.upper() not in ("GET", "HEAD")
+            ):
+                current_method = "GET"
+                for body_kwarg in ("data", "json", "content", "files"):
+                    kwargs.pop(body_kwarg, None)
+        raise UrlBlockedError(f"重定向超过 {_MAX_CURL_REDIRECTS} 跳：{url}")
 
     session.request = guarded_request
+    session._ssrf_guarded = True
+
+
+def _proxy_pool_origin(pool: Any) -> httpx.Proxy | None:
+    """从 httpcore 代理池还原原始 httpx.Proxy（URL + 认证/附加头）。
+
+    httpcore 的 ``_proxy_url`` 是 httpcore.URL（scheme/host 为 bytes，``str()``
+    产出 repr 而非 URL 串），须手工重组；httpx 的 Proxy 把 auth 折叠进
+    headers（Proxy-Authorization），``_proxy_headers`` 即完整头集合。
+    结构漂移（属性缺失/形态不符）返回 None，由调用方退化就地换后端。
+    """
+    proxy_url = getattr(pool, "_proxy_url", None)
+    if proxy_url is None:
+        return None
+    try:
+        scheme = proxy_url.scheme.decode("ascii")
+        host = proxy_url.host.decode("ascii")
+        if not scheme or not host:
+            return None
+        url = f"{scheme}://{host}" + (f":{proxy_url.port}" if proxy_url.port else "")
+        return httpx.Proxy(url, headers=getattr(pool, "_proxy_headers", None))
+    except (AttributeError, UnicodeDecodeError):
+        return None
+
+
+def _pin_existing_httpx(client: Any, *, verify: bool = True, http2: bool = False) -> None:
+    """就地把已构造的 httpx.AsyncClient 换到钉扎 transport（幂等）。
+
+    模块级 ``from .client import HTTP_CLIENT`` 绑定的是对象引用，重绑
+    模块属性不会传播到已绑定的调用点——必须换对象内部的 transport。
+    TLS/http2 姿态按调用方声明重建（见 _wrap_aux_clients 各客户端原构造参数）。
+
+    ``_mounts`` 一并处理：trust_env 客户端构造时读环境代理生成挂载，挂载
+    命中的请求不经 ``_transport``——不处理等于「配置了代理的机器上，该
+    客户端全部请求绕过钉扎校验」。代理挂载按原代理参数重建为
+    _PinnedTransport（与下载器代理路径同语义：目标校验改写 + 代理拨号受
+    校验）；重建失败或非代理挂载退化为就地换连接池后端（拨号面仍受逐 IP
+    校验，目标 URL 校验缺失按结构漂移告警）。
+    """
+    if getattr(client, "_ssrf_pinned", False):
+        return
+    client._transport = _PinnedTransport(verify=verify, http2=http2)
+    mounts = getattr(client, "_mounts", None)
+    if mounts:
+        for pattern, transport in dict(mounts).items():
+            pool = getattr(transport, "_pool", None)
+            proxy = _proxy_pool_origin(pool)
+            if proxy is not None:
+                mounts[pattern] = _PinnedTransport(proxy=proxy, verify=verify, http2=http2)
+                continue
+            if pool is not None and hasattr(pool, "_network_backend"):
+                logger.warning(
+                    "挂载 transport 无法还原代理参数，退化为就地换后端（目标 URL 校验缺失）: "
+                    "pattern=%r pool=%s",
+                    str(pattern),
+                    type(pool).__name__,
+                )
+                pool._network_backend = _PinnedNetworkBackend(pool._network_backend)
+    client._ssrf_pinned = True
+
+
+def _wrap_aux_clients() -> None:
+    """把 weibo/bilibili 辅助出站客户端一并纳入钉扎（就地换 transport）。"""
+    from ..vendor.nonebot_plugin_parser_lite.parsers.weibo.auth import AuthHelper
+    from ..vendor.nonebot_plugin_parser_lite.utils.bilibili.client import (
+        GRPC_CLIENT,
+        HTTP_CLIENT,
+    )
+
+    # AuthHelper.SESSION = AsyncClient(timeout=COMMON_TIMEOUT) → 默认 verify=True
+    _pin_existing_httpx(AuthHelper.SESSION, verify=True, http2=False)
+    # HTTP_CLIENT = AsyncClient(verify=True, trust_env=True, follow_redirects=True)
+    _pin_existing_httpx(HTTP_CLIENT, verify=True, http2=False)
+    # BiliGRPCClient._client = AsyncClient(http2=True, verify=True, trust_env=False)
+    _pin_existing_httpx(GRPC_CLIENT._client, verify=True, http2=True)
 
 
 def _wrap_parser_clients() -> None:
@@ -383,43 +501,54 @@ def _wrap_parser_clients() -> None:
     BaseParser._ssrf_guarded = True
 
 
+_INSTALL_LOCK = threading.Lock()
+"""守护 install_ssrf_guard：插件重载可能并发进入；整装成功前不置守卫标志。"""
+
+
 def install_ssrf_guard() -> None:
     """替换 vendor 下载器客户端为带防护的实例（vendor 文件零修改，幂等）。
 
     依赖 vendor 内部结构 `DOWNLOADER.client._httpx/_curl`——契约测试守护该
     缝合点；若上游改名，测试红、本函数抛 AttributeError，插件按降级路径运行。
+
+    顺序：锁内先完成全部包装（下载器 + parser + 辅助客户端），**全部成功后**
+    才置 ``_ssrf_guarded``——中途失败时下次 install 仍可重试，不产生
+    半包装通道（早置标志会让未完成的通道永久失去守卫）。
     """
-    from ..vendor.nonebot_plugin_parser_lite.download import DOWNLOADER
+    with _INSTALL_LOCK:
+        from ..vendor.nonebot_plugin_parser_lite.download import DOWNLOADER
 
-    client = DOWNLOADER.client
-    if getattr(client, "_ssrf_guarded", False):
-        return
-    old_httpx = client._httpx
-    old_curl = client._curl
+        client = DOWNLOADER.client
+        if getattr(client, "_ssrf_guarded", False):
+            return
+        old_httpx = client._httpx
+        old_curl = client._curl
 
-    client._httpx = httpx.AsyncClient(
-        timeout=old_httpx.timeout,
-        # 继承上游 vendor 客户端的 TLS 姿态（_upstream/download/client.py 同款，
-        # Chromium "MUST NOT modify" 约束下不改其行为）；CDN 证书链兼容是上游
-        # 的既定取舍，风险与缓解见 README 安全小节。
-        verify=_INHERIT_VENDOR_VERIFY,
-        follow_redirects=True,
-        transport=_PinnedTransport(),
-    )
-    _wrap_curl_session(client._curl)
-    client._ssrf_guarded = True
-    _wrap_parser_clients()
+        client._httpx = httpx.AsyncClient(
+            timeout=old_httpx.timeout,
+            # 继承上游 vendor 客户端的 TLS 姿态（_upstream/download/client.py 同款，
+            # Chromium "MUST NOT modify" 约束下不改其行为）；CDN 证书链兼容是上游
+            # 的既定取舍，风险与缓解见 README 安全小节。
+            verify=_INHERIT_VENDOR_VERIFY,
+            follow_redirects=True,
+            transport=_PinnedTransport(),
+        )
+        _wrap_curl_session(client._curl)
+        _wrap_parser_clients()
+        _wrap_aux_clients()
+        # 全部成功后才置标志（见 docstring）
+        client._ssrf_guarded = True
 
-    # 旧客户端尚未发过请求；在事件循环内异步清理，无循环时交给 GC。
-    with contextlib.suppress(RuntimeError):
-        loop = asyncio.get_running_loop()
-        for coro_fn, target in (
-            (_aclose_quietly, old_httpx),
-            (_close_curl_quietly, old_curl),
-        ):
-            task = loop.create_task(coro_fn(target))
-            _BACKGROUND_TASKS.add(task)
-            task.add_done_callback(_BACKGROUND_TASKS.discard)
+        # 旧客户端尚未发过请求；在事件循环内异步清理，无循环时交给 GC。
+        with contextlib.suppress(RuntimeError):
+            loop = asyncio.get_running_loop()
+            for coro_fn, target in (
+                (_aclose_quietly, old_httpx),
+                (_close_curl_quietly, old_curl),
+            ):
+                task = loop.create_task(coro_fn(target))
+                _BACKGROUND_TASKS.add(task)
+                task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 async def _aclose_quietly(client: httpx.AsyncClient) -> None:

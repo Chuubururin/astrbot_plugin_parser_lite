@@ -319,10 +319,15 @@ def test_hupu_bbs_and_comment_bindings_reach_patched_iter() -> None:
 
 
 def test_apply_vendor_patches_is_idempotent() -> None:
-    before = hupu_util.parse_rich_content
     vendor_patches.apply_vendor_patches()
+    after_first = vendor_patches.mounted_points()
+    content = buff_news.News.content
+    it = hupu_util._iter_media_and_text
     vendor_patches.apply_vendor_patches()
-    assert hupu_util.parse_rich_content is before
+    # 挂载点清单不得因二次调用重复追加；承载对象引用不变（不得被二次挂载覆盖）
+    assert vendor_patches.mounted_points() == after_first
+    assert buff_news.News.content is content
+    assert hupu_util._iter_media_and_text is it
 
 
 # ---------------------------------------------------------------- ffmpeg HLS SSRF

@@ -32,11 +32,16 @@ os.environ.setdefault(
 )
 
 from .bridge import render_params, texts
-from .bridge.config_sync import sync_import_time_config
+from .bridge.config_sync import rearm_runtime, sync_import_time_config
 from .bridge.gen_config import BRIDGE_DEFAULTS, BRIDGE_FIELDS, VENDOR_FIELDS
 from .bridge.render import cache_or_render_image
-from .bridge.sender import ask_lazy_download, send_result, set_video_file_threshold_mb
-from .bridge.ssrf import install_ssrf_guard
+from .bridge.sender import (
+    VIDEO_FILE_THRESHOLD_DEFAULT_MB,
+    ask_lazy_download,
+    send_result,
+    set_video_file_threshold_mb,
+)
+from .bridge.ssrf import UrlBlockedError, install_ssrf_guard
 from .bridge.vendor_patches import apply_vendor_patches
 from .vendor.nonebot_plugin_parser_lite import Parser, configure, shutdown_runtime
 from .vendor.nonebot_plugin_parser_lite.config import pconfig
@@ -44,6 +49,11 @@ from .vendor.nonebot_plugin_parser_lite.constants import EMOJI_MAP
 from .vendor.nonebot_plugin_parser_lite.exception import ParseException, TipException
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'，。；！？】》（【]+", re.IGNORECASE)
+
+# pconfig.max_comments 的入口钳制上界：vendor 模板/配置面无上界，超大值
+# 会把分页拉成 OOM；与 vendor Config.MAX_COMMENTS_LIMIT 同口径（render.py
+# 已有同名常量做发送面钳制，此处在 configure 入口先兜一层）。
+_MAX_COMMENTS_HARD_CAP = 100
 
 # 分享文案常把链接与标点直接相连（"…（分享了视频）"、"链接。"、"(见)"），
 # 而排除集只列了独占性强的 CJK 标点，抽取结果可能带尾随字符。带脏字符的
@@ -161,9 +171,26 @@ class ParserLitePlugin(star.Star):
     def __init__(self, context: star.Context, config: AstrBotConfig):
         super().__init__(context, config)
         self.config = config
+        # 保存配置会重载插件实例：上一实例 terminate 已把 DOWNLOADER.client
+        # aclose（不可逆），新实例须先重建出站客户端再装守卫
+        global _runtime_shutdown_done
+        if _runtime_shutdown_done:
+            rearm_runtime()
+            _runtime_shutdown_done = False
         # 只透传上游识别的字段：不依赖 vendor pydantic extra 策略（上游改
         # extra="forbid" 时存量陈旧键也不会炸加载）；桥自有键不在 VENDOR_FIELDS
-        configure(**{k: v for k, v in config.items() if k in VENDOR_FIELDS})
+        vendor_cfg = {k: v for k, v in config.items() if k in VENDOR_FIELDS}
+        if "plite_max_comments" in vendor_cfg:
+            raw = vendor_cfg["plite_max_comments"]
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                vendor_cfg["plite_max_comments"] = 0
+            else:
+                vendor_cfg["plite_max_comments"] = max(0, min(_MAX_COMMENTS_HARD_CAP, raw))
+        try:
+            configure(**vendor_cfg)
+        except Exception as e:
+            # configure 失败不应阻断插件加载：vendor 落默认配置继续运行
+            self.logger.warning("vendor configure 失败，使用默认配置: %r", e)
         # vendor 类体在导入期快照的配置点（MAX_RETRIES / 两平台 cookies）
         # 在上游环境中导入时配置已就绪；桥的 configure 晚于导入，须回写
         sync_import_time_config()
@@ -175,13 +202,33 @@ class ParserLitePlugin(star.Star):
         )
         if stale:
             self.logger.warning("以下配置键已不被上游识别（可能已随上游同步改名或移除）：%s", stale)
-        threshold_mb = int(self._cfg("plite_video_file_threshold_mb"))
+        raw_threshold = self._cfg("plite_video_file_threshold_mb")
+        try:
+            threshold_mb = int(raw_threshold)
+        except (TypeError, ValueError):
+            default_mb = BRIDGE_DEFAULTS["plite_video_file_threshold_mb"]
+            threshold_mb = (
+                default_mb
+                if isinstance(default_mb, int) and not isinstance(default_mb, bool)
+                else VIDEO_FILE_THRESHOLD_DEFAULT_MB
+            )
+            self.logger.warning(
+                "plite_video_file_threshold_mb 非法(%r)，回落默认 %s", raw_threshold, threshold_mb
+            )
         set_video_file_threshold_mb(threshold_mb)
         self._parser = Parser()
-        install_ssrf_guard()
+        try:
+            install_ssrf_guard()
+        except Exception as e:
+            # UrlBlockedError 是 BaseException，不会落到这里；普通安装失败
+            # 降级告警——插件仍可运行，但出站请求缺钉扎/校验
+            self.logger.error("SSRF 守卫安装失败，出站请求可能不受保护: %r", e)
         # vendor 运行态缺陷的桥内注入补丁（kuwo 参数名 / buff、hupu 视频块
         # decompose 截断迭代），幂等；详见 bridge/vendor_patches.py 模块文档
-        apply_vendor_patches()
+        try:
+            apply_vendor_patches()
+        except Exception as e:
+            self.logger.error("vendor 补丁挂载失败（部分运行态缺陷未修复）: %r", e)
         self.logger.info(
             "parser_lite 桥就绪：渲染=%s，懒下载=%s，阈值=%sMB",
             self._cfg("plite_render"),
@@ -227,44 +274,67 @@ class ParserLitePlugin(star.Star):
             return
 
         await self._react(event, "resolving")
+        # settled：生成器在 yield 点被消费方放弃（GeneratorExit）时，finally
+        # 仍须 stop_event——否则事件继续向后续插件传播。_fail/_react 的终态
+        # 收尾已在各分支完成；finally 只兜底「未走完就退出」的路径。
+        settled = False
         try:
-            result = await self._parser.parse(url)
-        except TipException as exc:
-            # 上游 matcher：提示性异常（如 up 主黑名单）的 message 必达用户，
-            # 不受 verbose_error 门控
-            self.logger.warning("解析失败: %s", exc.message)
-            yield event.plain_result(exc.message)
-            await self._fail(event)
-            return
-        except ParseException as exc:
-            self.logger.warning("解析失败: %s", exc.message)
-            await self._fail(event)
-            if self._cfg("plite_verbose_error"):
-                yield event.plain_result(f"解析失败：{exc.message}")
-            return
-        except Exception:
-            self.logger.exception("解析异常")
-            await self._fail(event)
-            return
-
-        try:
-            if self._cfg("plite_render"):
-                yield event.chain_result(await self._build_card_chain(result))
-            if pconfig.lazy_download and not await ask_lazy_download(event):
-                # 用户拒绝：撤销 resolving 表情（否则 🔨 永久残留），已发的
-                # 卡片保留——用户主动拒绝的是媒体下载而非卡片
-                await self._react(event, "cancel")
-                _stop_event(event)
+            try:
+                result = await self._parser.parse(url)
+            except UrlBlockedError as exc:
+                # BaseException（不进 except Exception）：SSRF 安全终态
+                self.logger.warning("解析被 SSRF 守卫拒绝: %s", exc)
+                await self._fail(event)
+                if self._cfg("plite_verbose_error"):
+                    yield event.plain_result(f"请求被安全策略拒绝：{exc}")
                 return
-            async for chain in send_result(result, event):
-                yield event.chain_result(chain)
-        except Exception:
-            self.logger.exception("发送解析结果异常")
-            await self._fail(event)
-            return
+            except TipException as exc:
+                # 上游 matcher：提示性异常（如 up 主黑名单）的 message 必达用户，
+                # 不受 verbose_error 门控
+                self.logger.warning("解析失败: %s", exc.message)
+                yield event.plain_result(exc.message)
+                await self._fail(event)
+                return
+            except ParseException as exc:
+                self.logger.warning("解析失败: %s", exc.message)
+                await self._fail(event)
+                if self._cfg("plite_verbose_error"):
+                    yield event.plain_result(f"解析失败：{exc.message}")
+                return
+            except Exception:
+                self.logger.exception("解析异常")
+                await self._fail(event)
+                return
 
-        await self._react(event, "done")
-        _stop_event(event)
+            try:
+                if self._cfg("plite_render"):
+                    yield event.chain_result(await self._build_card_chain(result))
+                if pconfig.lazy_download and not await ask_lazy_download(event):
+                    # 用户拒绝：撤销 resolving 表情（否则 🔨 永久残留），已发的
+                    # 卡片保留——用户主动拒绝的是媒体下载而非卡片
+                    await self._react(event, "cancel")
+                    _stop_event(event)
+                    settled = True
+                    return
+                async for chain in send_result(result, event):
+                    yield event.chain_result(chain)
+            except UrlBlockedError as exc:
+                self.logger.warning("发送被 SSRF 守卫拒绝: %s", exc)
+                await self._fail(event)
+                return
+            except Exception:
+                self.logger.exception("发送解析结果异常")
+                await self._fail(event)
+                return
+
+            await self._react(event, "done")
+            _stop_event(event)
+            settled = True
+        finally:
+            if not settled:
+                # GeneratorExit / 未处理提前退出：至少阻断后续插件
+                # （_react 无法在 GeneratorExit 里 await，表情可能残留 resolving）
+                _stop_event(event)
 
     async def _fail(self, event: AstrMessageEvent) -> None:
         """统一失败收尾：表情回应 + 阻断后续插件。"""

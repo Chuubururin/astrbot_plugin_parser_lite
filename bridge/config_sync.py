@@ -26,3 +26,19 @@ def sync_import_time_config() -> None:
     StreamDownloader.MAX_RETRIES = pconfig.max_retries
     LinuxDoParser.linuxdo_ck = ck2dict(pconfig.linuxdo_ck) if pconfig.linuxdo_ck else {}
     ZhiHuParser.zhihu_ck = ck2dict(pconfig.zhihu_ck) if pconfig.zhihu_ck else {}
+
+
+def rearm_runtime() -> None:
+    """shutdown_runtime 后在新插件实例里重建下载器出站客户端。
+
+    vendor 的 ``DOWNLOADER`` 单例跨实例共享：AstrBot 保存配置会重载插件，
+    旧实例 terminate 已把 DOWNLOADER.client aclose（不可逆）；新实例若直接
+    复用该 client，所有下载静默失败。此处以构造参数重建 UniHttpClient
+    （与 download/__init__ 同款）。新 client 天然无 ``_ssrf_guarded``，
+    install_ssrf_guard 会重新包装钉扎面。
+    """
+    from ..vendor.nonebot_plugin_parser_lite.constants import DOWNLOAD_TIMEOUT
+    from ..vendor.nonebot_plugin_parser_lite.download import DOWNLOADER, UniHttpClient
+
+    DOWNLOADER.client = UniHttpClient(timeout=DOWNLOAD_TIMEOUT)
+    DOWNLOADER._active_downloads = {}

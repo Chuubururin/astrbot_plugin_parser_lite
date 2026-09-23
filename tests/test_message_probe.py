@@ -25,7 +25,11 @@ PROBE_PATH = REPO_ROOT / "scripts" / "message_structure_probe.py"
 SENDER_PATH = REPO_ROOT / "bridge" / "sender.py"
 UPSTREAM_RENDER = "src/nonebot_plugin_parser_lite/render/__init__.py"
 _SPLIT_FUNCTIONS = ("_find_text_split_end", "split_text_by_length_with_punct")
-_FORWARD_TEXT_METHODS = ("split", "text")
+# ``_ForwardText.split`` **刻意不对齐上游**：protected 块硬超 max_len 时
+# 桥内按 max_len 硬切（保护语义让位于不可发送的硬上限，见 sender.py 与
+# tests/test_sender_chain.py::test_sender_forward_text_protected_block_not_split）。
+# 故结构指纹只钉 ``text``；上游改写 split 由 test_sender_chain 行为用例覆盖。
+_FORWARD_TEXT_METHODS = ("text",)
 
 
 def _load(name: str, path: Path) -> ModuleType:

@@ -76,13 +76,15 @@ STRING_OPTIONS: dict[str, list[str]] = {
 # 无法拦住非法值，至少要让**描述**如实说明代码在运行期会钳制到什么区间，
 # 否则用户按描述以为自己受保护（2026-09-20 审计缺陷 1/2/7）。
 #
-# 注意：这里只改描述，**真正的强制力在两处运行期钳制**：
+# 注意：这里只改描述，**真正的强制力在运行期钳制**：
 #   - bridge/render.py   max_comments_count()            → [0, MAX_COMMENTS_LIMIT]
 #   - bridge/sender.py   forward_text_threshold()         → [1, 4500]
+#   - bridge/sender.py   _clamp_lazy_timeout()            → [5, 300]
 # 二者与本表的区间由 tests/test_config_bounds.py 机械对账，防止描述漂移。
 RANGE_NOTES: dict[str, str] = {
     "plite_max_comments": "有效范围 0-100，超出范围按边界值处理",
     "plite_forward_text_threshold": "有效范围 1-4500，超出范围按边界值处理",
+    "plite_lazy_download_timeout": "有效范围 5-300，超出范围按边界值处理",
 }
 
 # 上游描述里已经写明的上界（形如「(最大4500)」）。命中时不再追加区间注记，

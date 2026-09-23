@@ -71,8 +71,28 @@ AstrBot 4.28 的插件配置面板对 int 字段不做范围校验（`minimum`/`
 自由输入），因此上下界必须由运行期钳制兜住（2026-09-20 审计缺陷 2/7）。
 """
 
-_video_file_threshold_mb: int = 100
-"""视频转文件发送的阈值（MB）；main.py 在配置桥时注入，测试可直接覆写"""
+VIDEO_FILE_THRESHOLD_DEFAULT_MB = 100
+"""视频转文件发送阈值的默认值（MB）：模块初值、非法配置回落、main.py
+入口解析兜底共用（单点定义）。"""
+
+_video_file_threshold_mb: int = VIDEO_FILE_THRESHOLD_DEFAULT_MB
+"""当前生效阈值；main.py 在配置桥时注入，测试可直接覆写"""
+
+LAZY_TIMEOUT_MIN = 5
+"""懒下载问询超时下界（与 session_waiter 最小可用超时对齐）"""
+LAZY_TIMEOUT_MAX = 300
+"""懒下载问询超时上界：WebUI 不校验 int，无上界会让一次拒绝挂 3 天。"""
+
+
+def _clamp_lazy_timeout(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return LAZY_TIMEOUT_MIN
+    return max(LAZY_TIMEOUT_MIN, min(LAZY_TIMEOUT_MAX, value))
+
+
+def lazy_download_timeout() -> int:
+    """本次问询实际生效的懒下载超时（已钳制到 [5, 300]）。"""
+    return _clamp_lazy_timeout(pconfig.lazy_download_timeout)
 
 
 def _clamp_forward_text_threshold(value: Any) -> int:
@@ -103,7 +123,11 @@ def _sync_path(path: Any) -> SyncPath:
 
 def set_video_file_threshold_mb(mb: int) -> None:
     global _video_file_threshold_mb
-    _video_file_threshold_mb = max(1, int(mb))
+    try:
+        _video_file_threshold_mb = max(1, int(mb))
+    except (TypeError, ValueError):
+        # WebUI/陈旧配置可能给到 str/None；回落默认而非炸加载
+        _video_file_threshold_mb = VIDEO_FILE_THRESHOLD_DEFAULT_MB
 
 
 class _SenderFilter(SessionFilter):
@@ -164,7 +188,7 @@ async def ask_lazy_download(event: AstrMessageEvent) -> bool:
 
 async def _ask_lazy_download(event: AstrMessageEvent) -> bool:
     """实际问询（调用方已持有该会话的锁，保证 USER_SESSIONS 单槽不被覆盖）。"""
-    timeout = max(5, pconfig.lazy_download_timeout)
+    timeout = lazy_download_timeout()
     if pconfig.lazy_download_tip:
         # 与上游 matchers/__init__.py:162-168 同构：提示受 plite_lazy_download_tip
         # 门控（schema 默认 false）。此前无条件发送，用户在 WebUI 关掉开关后
@@ -245,7 +269,8 @@ async def _mediafile_to_comp_strict(mf: MediaFile) -> Comp.BaseMessageComponent:
         file_size = video_path.stat().st_size
         if file_size == 0:
             return Comp.Plain(texts.VIDEO_ZERO_SIZE)
-        if file_size > _video_file_threshold_mb * 1024 * 1024:
+        # 边界含阈值本身（>=）：「等于阈值也改文件」与配置描述一致
+        if file_size >= _video_file_threshold_mb * 1024 * 1024:
             return Comp.File(name=video_path.name, file=str(video_path))
         if pconfig.use_base64:
             comp: Comp.BaseMessageComponent = Comp.Video.fromBase64(
@@ -298,8 +323,22 @@ async def _handle_immediate_media(
         size = getattr(cont, "_size_bytes", None)
         threshold_bytes = _video_file_threshold_mb * 1024 * 1024
         path = await cont.get_path()
-        if pconfig.need_upload_video or (size is not None and size > threshold_bytes):
-            yield [Comp.File(name=_sync_path(path).name, file=str(path))]
+        # vendor get_path 返回 anyio.Path：其 stat() 是协程，同步取 st_size 会
+        # 抛 AttributeError（except OSError 接不住，整个发送段崩溃）——必须先
+        # 转同步 pathlib。零字节闸覆盖 File 分支：HEAD 失败（size=None）时以
+        # 本地 stat 兜底，空文件不进聊天。
+        sync_path = _sync_path(path)
+        try:
+            path_size = sync_path.stat().st_size
+        except OSError:
+            path_size = -1  # 缺失交给下游 OSError 降级
+        if path_size == 0:
+            yield [Comp.Plain(texts.VIDEO_ZERO_SIZE)]
+            return
+        if pconfig.need_upload_video or (
+            (size if size is not None else path_size) >= threshold_bytes
+        ):
+            yield [Comp.File(name=sync_path.name, file=str(sync_path))]
         else:
             seg = await UniHelper.video_seg(path, thumbnail=await cont.get_cover_path())
             yield [await mediafile_to_comp(seg)]
@@ -388,10 +427,28 @@ class _ForwardText:
 
         for part in self.parts:
             if part.protected:
-                # 受保护块可以超过软拆分阈值，但不会在块内部切开
+                # 受保护块可以超过软拆分阈值，但默认不内切；若块本身硬超
+                # max_len（远超单节点容量），继续整塞会产出超长节点——
+                # 此时按 max_len 硬切（保护语义让位于不可发送的硬上限）。
                 if current and current != prefix and len(current) + len(part.text) > max_len:
                     flush()
-                current += part.text
+                remaining = part.text
+                if len(remaining) <= max_len and len(current) + len(remaining) <= max_len:
+                    current += remaining
+                    continue
+                while remaining:
+                    room = max_len - len(current)
+                    if room <= 0:
+                        # current==prefix 且前缀本身已超 max_len：前缀是原子
+                        # 单元不单独成块，继续塞入（宁可超限也不切碎作者名）
+                        if current != prefix:
+                            flush()
+                        room = max_len
+                    take = remaining[:room]
+                    current += take
+                    remaining = remaining[room:]
+                    if remaining:
+                        flush()
                 continue
 
             start = 0

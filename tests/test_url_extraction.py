@@ -173,6 +173,30 @@ def test_query_with_trailing_dot_keeps_query() -> None:
     assert got == ["https://example.com/p?q=1&r=2"]
 
 
+# ---- 对抗性输入 ----
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # 多种未配对括号连缀：逐个剥净
+        ("https://b23.tv/x)]}", ["https://b23.tv/x"]),
+        # 半角左括号 + 全角右括号（跨括号族不配对）：右括号按未配对剥除
+        ("(https://b23.tv/a）", ["https://b23.tv/a"]),
+        # 百分号编码括号不受配对裁剪影响，尾随句点照剥
+        ("https://ex.com/a%28b%29.", ["https://ex.com/a%28b%29"]),
+        # 多 URL 同文：按出现顺序全部抽出，各自独立裁剪
+        ("先看 https://x.com/1 再看 https://x.com/2.", ["https://x.com/1", "https://x.com/2"]),
+        # CJK 标点连缀（正则排除集已挡住，裁剪兜底双保险）
+        ("https://b23.tv/a。！？；，", ["https://b23.tv/a"]),
+        # 无 URL 文本
+        ("今天天气不错", []),
+    ],
+)
+def test_adversarial_inputs(text: str, expected: list[str]) -> None:
+    assert extract(text) == expected
+
+
 def test_strip_is_idempotent() -> None:
     once = strip_trailing("https://b23.tv/AbCdEf.)")
     assert strip_trailing(once) == once == "https://b23.tv/AbCdEf"

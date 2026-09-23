@@ -78,3 +78,37 @@ def test_non_container_inputs_yield_nothing() -> None:
     assert main_mod._urls_from_json("https://x.com/1") == []
     assert main_mod._urls_from_json(None) == []
     assert main_mod._urls_from_json(42) == []
+
+
+# ---- 广度与混合形态 ----
+
+
+def test_wide_fanout_is_fully_collected() -> None:
+    """大扇出卡片（数千子项）不得丢项——显式栈遍历无递归/截断上限。"""
+    data = {"items": [{"jump_url": f"https://x.com/{i}"} for i in range(5000)]}
+    urls = main_mod._urls_from_json(data)
+    assert len(urls) == 5000
+    assert urls[0] == "https://x.com/0"
+    assert urls[-1] == "https://x.com/4999"
+
+
+def test_non_string_leaves_are_ignored() -> None:
+    """int/float/bool/None 叶子安全跳过，不影响同层容器继续抽取。"""
+    data = {"a": 1, "b": None, "c": True, "d": 3.5, "e": {"jump_url": "https://x.com/1"}}
+    assert main_mod._urls_from_json(data) == ["https://x.com/1"]
+
+
+def test_mixed_nested_containers_keep_preorder() -> None:
+    """dict/list 混合嵌套保持先序；list 内裸字符串仍不是候选（契约不漂移）。"""
+    data = {
+        "list": [
+            {"jump_url": "https://x.com/1"},
+            ["deep", {"url": "https://x.com/2"}],
+        ],
+        "tail": "见 https://x.com/3",
+    }
+    assert main_mod._urls_from_json(data) == [
+        "https://x.com/1",
+        "https://x.com/2",
+        "https://x.com/3",
+    ]

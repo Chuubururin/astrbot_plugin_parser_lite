@@ -458,9 +458,12 @@ async def test_build_html_keeps_placeholders_below_degrade_threshold(
 ) -> None:
     """降级媒体数未超阈值时保持单图占位降级（不整页降级）。
 
-    单张图（加上可能的平台 logo）至多 2 张降级，不触发整页降级。
+    占位计数含装饰面（logo/头像/环境光等安全占位），1 张内容图在预算=1
+    时实测可累计 >2 张降级；本用例只锁「未超阈值 → 不整页降级」，故抬高
+    阈值排除装饰面噪声（整页降级的「超阈值」分支由上一用例覆盖）。
     """
     monkeypatch.setattr(render, "INLINE_BUDGET_BYTES", 1)
+    monkeypatch.setattr(render, "INLINE_DEGRADE_THRESHOLD", 50)
     result = _result_with_images(tmp_path, 1)
     html = await render.build_html(result, "light")
     assert render.PLACEHOLDER_IMAGE in html
@@ -476,6 +479,37 @@ def test_inline_budget_degrades_are_deduped_by_media(tmp_path: Path, monkeypatch
         assert render._inline_image_sync(str(img), budget) is None
     assert budget.used == 0, "超预算仍记账"
     assert budget.degraded == 1, "同一张图的内联失败被重复计数"
+
+
+async def test_placeholder_degraded_folds_across_objects() -> None:
+    """占位降级按 reason:type:method 折叠不同对象（刻意取舍）。
+
+    占位图是 1×1 透明 GIF（非可见灰块）；评论头像（macros.jinja:80/105）
+    不带 return_none_on_fail——若逐对象计数，≥3 条无头像评论的正常卡片
+    会误触整页降级（INLINE_DEGRADE_THRESHOLD=2），整卡退化为纯文本。
+    内容图的预算类降级按文件路径逐张计数（test_inline_budget_degrades_
+    are_deduped_by_media），不受此折叠影响。
+    """
+    budget = render.InlineBudget()
+    safe_src = render.make_safe_src(budget)
+
+    class _NoMedia:
+        pass
+
+    objs = [_NoMedia() for _ in range(3)]
+    for obj in objs:
+        placeholder = await safe_src(obj, "get_path")
+        assert placeholder is not None
+    assert budget.degraded == 1, "同类结构失败被逐对象计数——会误触整页降级"
+
+    # 不同方法（结构性失败的不同侧面）仍分别计数
+    await safe_src(objs[0], "get_cover_path")
+    assert budget.degraded == 2
+
+    # 装饰路径（return_none_on_fail=True）返回 None 且完全不计数
+    before = budget.degraded
+    assert await safe_src(None, "get_avatar_path", return_none_on_fail=True) is None
+    assert budget.degraded == before
 
 
 def test_inline_read_failure_does_not_consume_budget(tmp_path: Path, monkeypatch: Any) -> None:
@@ -556,7 +590,7 @@ async def test_cache_hit_rejects_empty_artifact(tmp_path: Path, monkeypatch: Any
 
 
 async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: Any) -> None:
-    """png_to_jpeg 返回 0 字节时拒绝写缓存，且不留 0 字节产物（L10）。"""
+    """png_to_jpeg 返回 0 字节或非 JPEG 时拒绝写缓存（L10 + 魔数校验）。"""
     from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.utils.ffmpeg import (
         FFmpeg,
     )
@@ -565,14 +599,14 @@ async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: 
     shot.write_bytes(_MINIMAL_PNG)
 
     async def _ok(png_data: bytes, quality: int = 85) -> bytes:
-        return b"ok-jpeg"
+        return b"\xff\xd8\xffok-jpeg"
 
     monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_ok))
     calls: list[int] = []
     renderer = _ShotRenderer(shot, calls)
     result = _result(url="https://www.bilibili.com/video/av-empty-artifact")
     dest = await render.cache_or_render_image(result, renderer=renderer)
-    assert await dest.read_bytes() == b"ok-jpeg"
+    assert await dest.read_bytes() == b"\xff\xd8\xffok-jpeg"
 
     async def _empty(png_data: bytes, quality: int = 85) -> bytes:
         return b""
@@ -582,3 +616,11 @@ async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: 
     with pytest.raises(render.RenderArtifactError):
         await render.cache_or_render_image(result, renderer=renderer)
     assert not await dest.exists(), "0 字节产物被写进了缓存"
+
+    async def _not_jpeg(png_data: bytes, quality: int = 85) -> bytes:
+        return b"not-a-jpeg"
+
+    monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_not_jpeg))
+    with pytest.raises(render.RenderArtifactError):
+        await render.cache_or_render_image(result, renderer=renderer)
+    assert not await dest.exists(), "非 JPEG 产物被写进了缓存"

@@ -79,12 +79,17 @@ VENDOR_IMPORT_WHITELIST: dict[str, frozenset[str]] = {
             "nonebot_plugin_parser_lite.download",
             # _wrap_parser_clients 包装 BaseParser.__init__（parser API 面钉扎）
             "nonebot_plugin_parser_lite.parsers.base",
+            # _wrap_aux_clients：weibo SESSION / bilibili HTTP_CLIENT+GRPC_CLIENT 就地钉扎
+            "nonebot_plugin_parser_lite.parsers.weibo.auth",
+            "nonebot_plugin_parser_lite.utils.bilibili.client",
         },
     ),
-    # 导入期配置快照回写（MAX_RETRIES / 两平台 cookies），只写标量/dict
+    # 导入期配置快照回写（MAX_RETRIES / 两平台 cookies），只写标量/dict；
+    # rearm_runtime 重建 DOWNLOADER.client 时取 DOWNLOAD_TIMEOUT
     "config_sync": frozenset(
         {
             "nonebot_plugin_parser_lite.config",
+            "nonebot_plugin_parser_lite.constants",
             "nonebot_plugin_parser_lite.download",
             "nonebot_plugin_parser_lite.parsers.linuxdo",
             "nonebot_plugin_parser_lite.parsers.zhihu",

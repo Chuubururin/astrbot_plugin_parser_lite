@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import Any, cast
 
 import httpcore
 import httpx
@@ -26,7 +27,7 @@ import pytest
 from astrbot_plugin_parser_lite.bridge import ssrf
 from astrbot_plugin_parser_lite.bridge.ssrf import UrlBlockedError, validate_url
 from curl_cffi import AsyncSession
-from curl_cffi.const import CurlFollow, CurlOpt
+from curl_cffi.const import CurlOpt
 
 BLOCKED_URLS = (
     "ftp://example.com/file",  # scheme 白名单外
@@ -163,6 +164,52 @@ def test_dns_resolving_to_private_is_blocked(monkeypatch):
         validate_url("http://attacker.example.com/")
 
 
+# ---------------------------------------------------------------------------
+# 审计日志：拒绝事件必须留痕（异常传播链只体现安全终态，日志是运维侧
+# 「SSRF 拦了什么」的唯一入口，覆盖目标 URL 与拒绝原因）
+# ---------------------------------------------------------------------------
+
+_SSRF_LOGGER = "astrbot_plugin_parser_lite.bridge.ssrf"
+
+
+def test_blocked_url_is_audit_logged(caplog: pytest.LogCaptureFixture):
+    with (
+        caplog.at_level(logging.WARNING, logger=_SSRF_LOGGER),
+        pytest.raises(UrlBlockedError),
+    ):
+        validate_url("http://169.254.169.254/latest/meta-data/")
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("SSRF" in m and "169.254.169.254" in m for m in messages), (
+        f"拒绝事件未落审计日志：{messages}"
+    )
+
+
+def test_allowed_url_is_not_audit_logged(caplog: pytest.LogCaptureFixture):
+    with caplog.at_level(logging.WARNING, logger=_SSRF_LOGGER):
+        validate_url("https://8.8.8.8")
+    assert not [r for r in caplog.records if "SSRF" in r.getMessage()], "放行请求不应产生审计噪音"
+
+
+def test_backend_fallback_block_is_audit_logged(monkeypatch, caplog: pytest.LogCaptureFixture):
+    """无预验证上下文的拨号路径（代理连接目标）拒绝时同样留痕。"""
+    import socket
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    backend = ssrf._PinnedNetworkBackend(httpcore.AsyncNetworkBackend())
+    with (
+        caplog.at_level(logging.WARNING, logger=_SSRF_LOGGER),
+        pytest.raises(UrlBlockedError),
+    ):
+        _run(backend.connect_tcp("attacker.example.com", 443))
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("SSRF" in m and "attacker.example.com" in m for m in messages), (
+        f"拨号拒绝未落审计日志：{messages}"
+    )
+
+
 class _FakeBaseBackend(httpcore.AsyncNetworkBackend):
     """拨号桩：记录 dial 序列，可指定首个 IP 拒连（模拟故障转移）。"""
 
@@ -256,7 +303,7 @@ def test_pinned_transport_proxy_rewrites_target(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# curl 通道回归（H1：curl_options 必须挂会话级 / H2：重定向必须由 SAFE 拦）
+# curl 通道回归（H1：curl_options 必须挂会话级 / H2：重定向必须逐跳校验）
 #
 # 这些用例一律用真实 curl_cffi.AsyncSession + 真实（本地）HTTPServer。
 # ---------------------------------------------------------------------------
@@ -329,12 +376,20 @@ def _pin_host_to_local(monkeypatch, host: str, port: int) -> list[str]:
 
     本机没有公网可达的监听端口，无法构造真实公网第一跳；第 1~3 层由上面的
     IP 清单用例覆盖，这里只针对第 4 层（钉扎）与重定向跟随行为。
+
+    只对 ``host`` 开绿灯（首跳）；其余 URL 委托真实 validate_url——重定向
+    第二跳是字面量 127.0.0.1，须由真实校验拦截（Python 手动跟随语义）。
     """
     calls: list[str] = []
+    real_validate = ssrf.validate_url
 
     def fake_validate(url: str) -> ssrf.ValidatedUrl:
         calls.append(url)
-        return ssrf.ValidatedUrl(url=url, scheme="http", host=host, port=port, ips=["127.0.0.1"])
+        if url.startswith(f"http://{host}:") or url.startswith(f"http://{host}/"):
+            return ssrf.ValidatedUrl(
+                url=url, scheme="http", host=host, port=port, ips=["127.0.0.1"]
+            )
+        return real_validate(url)
 
     monkeypatch.setattr(ssrf, "validate_url", fake_validate)
     return calls
@@ -368,7 +423,7 @@ def test_curl_guard_injected_kwargs_are_legal_request_params(monkeypatch, clean_
 
     assert injected, "wrapper 未把调用透传给底层 request"
     assert set(injected[0]) <= request_params
-    assert injected[0]["allow_redirects"] is CurlFollow.SAFE
+    assert injected[0]["allow_redirects"] is False  # Python 手动跟随，每跳校验
     assert session.curl_options[CurlOpt.RESOLVE] == ["8.8.8.8:80:8.8.8.8"]
 
 
@@ -468,77 +523,84 @@ def test_curl_guard_blocks_private_before_any_io():
 
 
 def test_curl_guard_blocks_redirect_to_internal(monkeypatch, clean_resolve_table):
-    """H2 端到端：第一跳真实抵达，第二跳重定向到内网被 libcurl 拒绝。
+    """H2 端到端：第一跳真实抵达，第二跳重定向到内网由 Python 校验拒绝。
 
     本机没有公网可达的监听端口，无法构造「第一跳公网、第二跳内网」；这里用
     RESOLVE 把 host 钉到 127.0.0.1 让第一跳落地，重定向目标仍是字面量
-    127.0.0.1——对 CurlFollow.SAFE 而言即「第一跳放行、第二跳内网」，
-    正是要防的形态（实测 SAFE 只审查重定向目标，不审查首个 URL）。
+    127.0.0.1——wrapper 强制 allow_redirects=False 并在 Python 侧逐跳
+    validate_url，第二跳由真实校验拦下（与 httpx 同口径，不依赖 libcurl SAFE）。
     """
     with _redirect_pair() as (port, hop_hits, secret_hits):
+        location = f"http://127.0.0.1:{secret_hits_port_from_location(port)}/secret"
         calls = _pin_host_to_local(monkeypatch, "hop.example.com", port)
         session: Any = AsyncSession(impersonate="chrome146", verify=False, allow_redirects=True)
         ssrf._wrap_curl_session(session)
-        error: Exception | None = None
+        error: BaseException | None = None
         try:
             _run(session.get(f"http://hop.example.com:{port}/redir"))
-        except Exception as exc:
+        except UrlBlockedError as exc:
+            error = exc
+        except Exception as exc:  # pragma: no cover - 非 SSRF 路径不期望
             error = exc
         finally:
             _run(session.close())
 
+        # _redirect_pair 的 Location 在 _local_http_server 内部生成，
+        # 这里从 hop 服务拿不到——改为断言第二跳已被调用且被真实校验拒。
+        _ = location
+
     assert hop_hits == ["/redir"], "第一跳必须真实抵达，否则本用例是假绿"
     assert secret_hits == [], "重定向到内网被放行（H2 回归）"
-    assert error is not None and "SSRF protection" in str(error), f"未由 SAFE 拦截：{error!r}"
-    # SAFE 在 libcurl C 层拦截，Python 侧不会对被跟随的跳转二次调用 validate_url
-    assert calls == [f"http://hop.example.com:{port}/redir"]
+    assert isinstance(error, UrlBlockedError), f"未由 Python 校验拦截：{error!r}"
+    assert len(calls) == 2, f"第二跳未走 validate_url：{calls!r}"
+    assert calls[0] == f"http://hop.example.com:{port}/redir"
+    assert calls[1].startswith("http://127.0.0.1:"), f"第二跳应是内网字面量：{calls[1]!r}"
 
 
-def test_redirect_leak_is_real_without_safe(monkeypatch, clean_resolve_table):
-    """敏感度对照：重定向策略退回 True（= 未修复 H2）时 secret 必然泄漏。
+def secret_hits_port_from_location(port: int) -> int:
+    """占位：_redirect_pair 的 secret 端口在 context 内才可知；测试改用 calls 断言。"""
+    return 0
 
-    证明上一条「重定向被拒」不是恒绿——它真的能抓到 H2。
-    """
-    monkeypatch.setattr(ssrf, "_safe_redirect_policy", lambda: True)
-    with _redirect_pair() as (port, hop_hits, secret_hits):
-        _pin_host_to_local(monkeypatch, "hop.example.com", port)
-        session: Any = AsyncSession(impersonate="chrome146", verify=False, allow_redirects=True)
-        ssrf._wrap_curl_session(session)
-        try:
-            resp = _run(session.get(f"http://hop.example.com:{port}/redir"))
-        finally:
-            _run(session.close())
 
+def test_curl_guard_manual_redirect_follows_and_validates(monkeypatch, clean_resolve_table):
+    """手动跟随语义：首跳 302 → 同 host 第二跳被跟到且二次 validate_url。"""
+    with _local_http_server() as (final_server, final_hits):
+        final_port = final_server.server_address[1]
+        with _local_http_server(redirect_to=f"http://hop.example.com:{final_port}/ok") as (
+            hop_server,
+            hop_hits,
+        ):
+            port = hop_server.server_address[1]
+            session: Any = AsyncSession(impersonate="chrome146", verify=False, allow_redirects=True)
+            ssrf._wrap_curl_session(session)
+            calls: list[str] = []
+
+            def host_only(url: str) -> ssrf.ValidatedUrl:
+                calls.append(url)
+                from urllib.parse import urlsplit
+
+                parts = urlsplit(url)
+                return ssrf.ValidatedUrl(
+                    url=url,
+                    scheme=parts.scheme,
+                    host=parts.hostname or "hop.example.com",
+                    port=parts.port or 80,
+                    ips=["127.0.0.1"],
+                )
+
+            monkeypatch.setattr(ssrf, "validate_url", host_only)
+            try:
+                resp = _run(session.get(f"http://hop.example.com:{port}/redir"))
+            finally:
+                _run(session.close())
+
+    assert resp.status_code == 200
     assert hop_hits == ["/redir"]
-    assert secret_hits == ["/secret"], "对照失效：无 SAFE 也没泄漏，上一条用例无区分度"
-    assert resp.content == b"SECRET-LEAKED"
-
-
-def test_curl_guard_fails_closed_without_safe_member(monkeypatch, clean_resolve_table):
-    """老版本 curl_cffi 无 CurlFollow.SAFE：退化为不跟随重定向，绝不静默放行。"""
-
-    class _LegacyCurlFollow:  # 仅缺 SAFE 成员
-        ALL = 1
-        OBEYCODE = 2
-        FIRSTONLY = 3
-
-    monkeypatch.setattr(ssrf, "CurlFollow", _LegacyCurlFollow)
-    assert ssrf._safe_redirect_policy() is False
-
-    injected: list[dict] = []
-    session: Any = AsyncSession(impersonate="chrome146", verify=False, allow_redirects=True)
-
-    async def recording_original(method, url, **kwargs):
-        injected.append(dict(kwargs))
-        return "stub"
-
-    session.request = recording_original
-    ssrf._wrap_curl_session(session)
-    try:
-        assert _run(session.request("GET", "http://8.8.8.8/x")) == "stub"
-    finally:
-        _run(session.close())
-    assert injected[0]["allow_redirects"] is False
+    assert final_hits == ["/ok"]
+    assert calls == [
+        f"http://hop.example.com:{port}/redir",
+        f"http://hop.example.com:{final_port}/ok",
+    ]
 
 
 def test_install_ssrf_guard_idempotent():
@@ -566,3 +628,57 @@ def test_install_ssrf_guard_idempotent():
         client._ssrf_guarded = False
         if guarded_httpx is not None:
             _run(ssrf._aclose_quietly(guarded_httpx))
+
+
+# ---------------------------------------------------------------------------
+# 辅助客户端就地钉扎（_pin_existing_httpx）：环境代理 mounts 不得绕过
+# ---------------------------------------------------------------------------
+
+
+def test_pin_existing_httpx_rebuilds_proxy_mounts():
+    """trust_env 客户端的代理挂载命中请求不经 _transport：必须重建为钉扎。
+
+    不处理 mounts 等于「配置了环境代理的机器上，该客户端全部请求绕过
+    钉扎校验」。重建按原代理 URL 走 _PinnedTransport
+    的代理路径（目标改写为已验证 IP + 代理拨号受校验），与下载器同语义；
+    代理认证（httpx 折叠进 _proxy_headers 的 Proxy-Authorization）不丢失。
+    """
+    proxy_transport = httpx.AsyncHTTPTransport(
+        proxy=httpx.Proxy("http://1.2.3.4:3128", auth=("user", "pw"))
+    )
+    client = httpx.AsyncClient(mounts={"all://api.example.com": proxy_transport})
+    try:
+        ssrf._pin_existing_httpx(client, verify=True, http2=False)
+
+        mounted = next(iter(client._mounts.values()))
+        assert isinstance(mounted, ssrf._PinnedTransport), "代理挂载未重建为钉扎 transport"
+        assert mounted is not proxy_transport
+        assert isinstance(client._transport, ssrf._PinnedTransport)
+
+        # 代理参数无损重建：地址、端口、认证头（httpcore 私有面，Any 放宽）
+        pool = cast(Any, mounted._pool)
+        assert pool._proxy_url.host == b"1.2.3.4"
+        assert pool._proxy_url.port == 3128
+        header_keys = {k.lower() for k, _ in (getattr(pool, "_proxy_headers", None) or [])}
+        assert b"proxy-authorization" in header_keys, "代理认证头在重建中丢失"
+
+        # 幂等：重复调用不再包装
+        first_transport = client._transport
+        first_mount = next(iter(client._mounts.values()))
+        ssrf._pin_existing_httpx(client, verify=True, http2=False)
+        assert client._transport is first_transport
+        assert next(iter(client._mounts.values())) is first_mount
+    finally:
+        _run(client.aclose())
+
+
+def test_pin_existing_httpx_wraps_custom_mount_backend():
+    """非代理自定义挂载：就地换连接池后端，拨号面仍受逐 IP 校验。"""
+    custom = httpx.AsyncHTTPTransport()
+    client = httpx.AsyncClient(mounts={"all://x.example.com": custom})
+    try:
+        ssrf._pin_existing_httpx(client)
+        pool = cast(Any, custom._pool)
+        assert isinstance(pool._network_backend, ssrf._PinnedNetworkBackend)
+    finally:
+        _run(client.aclose())

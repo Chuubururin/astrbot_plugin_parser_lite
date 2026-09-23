@@ -63,6 +63,8 @@ def test_panel_does_not_enforce_int_bounds_so_code_must() -> None:
     assert "def _clamp_config_int(" in render_src, "render.py 缺通用 int 钳制辅助"
     assert "def forward_text_threshold(" in sender_src, "sender.py 缺转发阈值钳制入口"
     assert "def _clamp_forward_text_threshold(" in sender_src, "sender.py 缺转发阈值钳制辅助"
+    assert "def lazy_download_timeout(" in sender_src, "sender.py 缺懒下载超时钳制入口"
+    assert "def _clamp_lazy_timeout(" in sender_src, "sender.py 缺懒下载超时钳制辅助"
 
     # 消费点必须走钳制后的取值，不得再直接读裸配置。
     # 注意：裸读会**合法地**出现在钳制函数体内部（那正是钳制读它的地方），
@@ -77,6 +79,12 @@ def test_panel_does_not_enforce_int_bounds_so_code_must() -> None:
     sender_body = _strip_function(sender_body, "_clamp_forward_text_threshold")
     assert "pconfig.forward_text_threshold" not in sender_body, (
         "sender.py 在钳制函数之外仍直接读 pconfig.forward_text_threshold"
+    )
+    # 懒下载超时同款：入口 getter 与钳制辅助都被挖掉后不得再有裸读
+    lazy_body = _strip_function(sender_src, "lazy_download_timeout")
+    lazy_body = _strip_function(lazy_body, "_clamp_lazy_timeout")
+    assert "pconfig.lazy_download_timeout" not in lazy_body, (
+        "sender.py 在钳制函数之外仍直接读 pconfig.lazy_download_timeout"
     )
 
 
@@ -118,6 +126,19 @@ def test_forward_text_threshold_clamp_bounds_match_code_constants() -> None:
         assert int(stated.group(1)) == upper, f"描述上界 {stated.group(1)} != {upper}"
 
 
+def test_lazy_timeout_clamp_bounds_match_code_constants() -> None:
+    """schema 描述里的懒下载超时区间必须与代码常量逐字对齐。"""
+    schema = _schema()
+    description = str(schema["plite_lazy_download_timeout"]["description"])
+    sender_src = SENDER_PATH.read_text(encoding="utf-8")
+    lower = _const("bridge/sender.py", sender_src, "LAZY_TIMEOUT_MIN")
+    upper = _const("bridge/sender.py", sender_src, "LAZY_TIMEOUT_MAX")
+    match = re.search(r"有效范围\s*(\d+)-(\d+)", description)
+    assert match, f"plite_lazy_download_timeout 描述缺「有效范围 L-U」：{description!r}"
+    assert int(match.group(1)) == lower, f"描述下界 {match.group(1)} != {lower}"
+    assert int(match.group(2)) == upper, f"描述上界 {match.group(2)} != {upper}"
+
+
 def test_range_notes_keys_exist_in_schema() -> None:
     """RANGE_NOTES 的键必须真实存在于生成出的 schema（防止注记静默失效）。"""
     generator_src = GENERATOR_PATH.read_text(encoding="utf-8")
@@ -146,7 +167,10 @@ def test_clamp_is_actually_enforced_by_runtime() -> None:
 
     sys.path.insert(0, str(REPO_ROOT.parent))
     from astrbot_plugin_parser_lite.bridge.render import _clamp_config_int, max_comments_count
-    from astrbot_plugin_parser_lite.bridge.sender import _clamp_forward_text_threshold
+    from astrbot_plugin_parser_lite.bridge.sender import (
+        _clamp_forward_text_threshold,
+        _clamp_lazy_timeout,
+    )
 
     # 缺陷 1：负数必须落到 0，绝不透传给切片
     assert _clamp_config_int(-1, minimum=0, maximum=100) == 0
@@ -165,6 +189,14 @@ def test_clamp_is_actually_enforced_by_runtime() -> None:
     assert _clamp_forward_text_threshold(1000) == 1000
     assert _clamp_forward_text_threshold(999_999) == 4500
     assert _clamp_forward_text_threshold(None) == 1
+
+    # 懒下载超时：WebUI 无上界，须钳到 [5, 300]
+    assert _clamp_lazy_timeout(0) == 5
+    assert _clamp_lazy_timeout(-1) == 5
+    assert _clamp_lazy_timeout(30) == 30
+    assert _clamp_lazy_timeout(9999) == 300
+    assert _clamp_lazy_timeout(None) == 5
+    assert _clamp_lazy_timeout(True) == 5
 
     # 运行时入口读的是钳制后的值（默认配置 5 / 1000 应原样通过）
     assert max_comments_count() >= 0

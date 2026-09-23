@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import anyio
 import pytest
 
 pytest.importorskip("astrbot.api")
@@ -401,3 +402,53 @@ async def test_present_media_file_is_not_disturbed(tmp_path: Path) -> None:
     comp = await sender.mediafile_to_comp(sender.MediaFile("image", path=image))
 
     assert isinstance(comp, Comp.Image)
+
+
+# ---- 即时媒体视频路径：anyio.Path 形态契约 ----
+
+
+class _ImmediateVideo(sender.VideoContent):
+    """VideoContent 替身：get_path 返回真实 anyio.Path（与 vendor 同形态）。
+
+    契约：即时媒体视频路径消费的是 anyio.Path——其 stat() 是协程，同步取
+    st_size 抛 AttributeError（except OSError 接不住，发送段整体中断），
+    取大小前必须转同步 pathlib。
+    """
+
+    def __init__(self, path: object) -> None:
+        self._fake_path = path
+
+    async def get_display_size(self) -> str:
+        return ""  # 跳过真实 HEAD；_size_bytes 保持缺省 None
+
+    async def get_path(self) -> object:
+        return self._fake_path
+
+    async def get_cover_path(self) -> None:
+        return None
+
+
+async def test_immediate_video_stats_anyio_path_without_crash(tmp_path: Path) -> None:
+    configure(plite_use_base64=False, plite_need_upload=False, plite_need_upload_video=False)
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"video-bytes")
+    cont = _ImmediateVideo(anyio.Path(video))
+
+    chains = [chain async for chain in sender._handle_immediate_media(cont, cast(Any, None))]
+
+    assert len(chains) == 1
+    assert isinstance(chains[0][0], Comp.Video), "正常视频应产出 Video 组件而非崩溃"
+
+
+async def test_immediate_video_zero_size_gate_with_anyio_path(tmp_path: Path) -> None:
+    """零字节闸在 anyio.Path 形态下同样生效（yield 提示文本，不发空组件）。"""
+    configure(plite_use_base64=False, plite_need_upload=False, plite_need_upload_video=False)
+    video = tmp_path / "empty.mp4"
+    video.write_bytes(b"")
+    cont = _ImmediateVideo(anyio.Path(video))
+
+    chains = [chain async for chain in sender._handle_immediate_media(cont, cast(Any, None))]
+
+    assert len(chains) == 1
+    assert isinstance(chains[0][0], Comp.Plain)
+    assert chains[0][0].text == texts.VIDEO_ZERO_SIZE
