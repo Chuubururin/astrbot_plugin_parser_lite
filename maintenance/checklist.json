@@ -35,7 +35,7 @@
       "kind": "pytest_all",
       "cmd": "{py} -m pytest -c config/pyproject.toml --rootdir=. -q",
       "expect_exit": 0,
-      "note": "全量契约测试（本机 450 passed / 3 skipped；无上游克隆时 446 / 7）"
+      "note": "全量契约测试（本机 545 passed / 3 skipped；无上游克隆时 541 / 7）"
     },
     {
       "id": "DOD-02",
