@@ -5,8 +5,9 @@ name: CI
 #   PR 判红」的职责——那个职责已交给**服务端分支保护**（公开仓库下可用）。
 #   ci.yml 保留无过滤的 pull_request 只是为了让**任何** PR 都有信号，
 #   而不是作为强制力。强制力在分支保护上，不在这个文件里。
-# - push 只跟 dev：main 由 promote-dev-to-main 推进，promote job 内自带同构门禁
-#   （GITHUB_TOKEN 推的提交不触发本工作流，故不能依赖这里兜底）。
+# - push 只跟 dev：main 由 promote-dev-to-main 推进（GITHUB_TOKEN 推的提交
+#   不触发本工作流，故不能依赖这里兜底）。「main 是绿的」由同一 sha 在 dev 上
+#   的 CI 结论承载——promote 只做 ref 手术，不跑门禁。
 on:
   pull_request:
   push:
@@ -117,8 +118,24 @@ jobs:
       # 就会以 cryptic traceback 收场，或干脆无声降级。
       - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
         run: python scripts/check_test_deps.py
-      - name: vendor 三层校验（本地无 .sync-work 时为第 1/2 层）
+      # 浅克隆上游（branch 取 sync-state，钉在 standalone 快照）：启用
+      # verify_vendor 第 3 层 + 让 test_*_when_clone_present / generate_config
+      # --check / run_injection --offline --check 在 CI 上有活体对照。
+      # 无克隆时那 4 条按设计 SKIP，skip 门禁已按原因放行。
+      - name: 浅克隆上游（启用 vendor 第 3 层与生成工件 --check）
+        run: |
+          set -euo pipefail
+          BRANCH=$(python -c "import json; print(json.load(open('.github/sync-state.json'))['upstream_branch'])")
+          git clone --depth 1 --branch "$BRANCH" \
+            https://github.com/sokoko-org/nonebot-plugin-parser-lite.git \
+            .sync-work/upstream
+      - name: vendor 三层校验（含上游逐字节比对）
         run: python scripts/verify_vendor.py
+      # generate_config --check 依赖不入库的 vendor_analysis.json，CI 上改走
+      # run_injection --offline --check（缺分析产物时回退现场分析，覆盖第二层
+      # 生成工件与工作树逐字节一致）
+      - name: 注入流水线 --offline --check（防生成/注入面漂移）
+        run: python scripts/run_injection.py --offline --check
       - name: pytest
         run: python -m pytest -c config/pyproject.toml --rootdir=. -q --junit-xml=/tmp/pytest-junit.xml
       # 原实现是「skip 数 > BUDGET(3) 即失败」。阈值按开发机标定（那里有
