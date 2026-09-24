@@ -42,12 +42,23 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: >-
+          发版 tag（promote 自动派发时传入；GITHUB_TOKEN 的 tag push
+          不触发工作流，dispatch 才是可信的续链）。留空 = 由 push tag 触发。
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # 按 tag 名归组：tag push 与 promote 的显式 dispatch 双通道指向同一 tag 时
+  # 串行执行，配合「Release 已存在则跳过」消化重复。workflow 级没有 inputs
+  # 上下文（那是可复用工作流的），必须走 github.event。
+  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -68,26 +79,38 @@ jobs:
       attestations: write # 写入 GitHub attestation store（gh attestation verify 可验）
     env:
       GH_TOKEN: ${{ github.token }}
+      # 双触发通道下的统一 tag 名：push 时 = ref_name，dispatch 时 = 输入。
+      # 发布物文件名一律以它为准（原样用 tag 名，不重复补 v）。
+      TAG_NAME: ${{ github.event.inputs.tag_name || github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.inputs.tag_name || github.ref }}
           persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: tag 与 metadata 版本锁步校验
+      - name: tag 与 metadata 版本锁步校验 + tag 必指 main 尖端
         run: |
           set -euo pipefail
-          case "$GITHUB_REF_NAME" in
-            */*) echo "::error::tag 名含 '/'（${GITHUB_REF_NAME}）会破坏发布物文件路径，请使用无斜杠 tag"; exit 1 ;;
+          case "${TAG_NAME}" in
+            */*) echo "::error::tag 名含 '/'（${TAG_NAME}）会破坏发布物文件路径，请使用无斜杠 tag"; exit 1 ;;
           esac
+          # 「发布只能在 main 上打 tag」原是人工纪律（BRANCHING §8）——纪律会
+          # 被忘记，这里做成机器判定：非 main 尖端的 tag 发布的不是「当前发布态」。
+          MAIN_SHA="$(git ls-remote origin refs/heads/main | cut -f1)"
+          TAG_SHA="$(git rev-parse HEAD)"
+          if [ "${TAG_SHA}" != "${MAIN_SHA}" ]; then
+            echo "::error::tag ${TAG_NAME} 指向 ${TAG_SHA:0:12}，main 尖端是 ${MAIN_SHA:0:12}——发布 tag 必须落在 promote 后的 main 上（先 promote，tag 由 promote 自动打）"
+            exit 1
+          fi
           META_VERSION="$(python -c \
             "import re;print(re.search(r'(?m)^version: (.+)$', open('metadata.yaml', encoding='utf-8').read()).group(1).strip())")"
           # 版本直接沿用上游（去 v 前缀比对，容忍两侧前缀书写差异）
-          if [ "${GITHUB_REF_NAME#v}" != "${META_VERSION#v}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} 与 metadata.yaml version ${META_VERSION} 不一致；版本由两层注入流水线随 roll 再生，tag 必须与其锁步"
+          if [ "${TAG_NAME#v}" != "${META_VERSION#v}" ]; then
+            echo "::error::tag ${TAG_NAME} 与 metadata.yaml version ${META_VERSION} 不一致；版本由两层注入流水线随 roll 再生，tag 必须与其锁步"
             exit 1
           fi
 
@@ -117,14 +140,14 @@ jobs:
                 templates vendor _conf_schema.json README.md logo.png \
                 dist/astrbot_plugin_parser_lite/
           cd dist
-          zip -qr "../astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip" astrbot_plugin_parser_lite
+          zip -qr "../astrbot_plugin_parser_lite-${TAG_NAME}.zip" astrbot_plugin_parser_lite
           cd ..
-          sha256sum "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip"
+          sha256sum "astrbot_plugin_parser_lite-${TAG_NAME}.zip"
 
       - name: zip 结构断言（发布侧两层注入守卫）
         run: |
           set -euo pipefail
-          python - "$GITHUB_REF_NAME" <<'PYEOF'
+          python - "$TAG_NAME" <<'PYEOF'
           import sys, zipfile
           zip_path = f"astrbot_plugin_parser_lite-{sys.argv[1]}.zip"
           names = zipfile.ZipFile(zip_path).namelist()
@@ -204,7 +227,7 @@ jobs:
           }
           require_file provenance "$PROV_BUNDLE"
           require_file sbom "$SBOM_BUNDLE"
-          cp "$PROV_BUNDLE" "astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip.intoto.jsonl"
+          cp "$PROV_BUNDLE" "astrbot_plugin_parser_lite-${TAG_NAME}.zip.intoto.jsonl"
           cp "$SBOM_BUNDLE" "sbom.spdx.json.intoto.jsonl"
           ls -l ./*.intoto.jsonl sbom.spdx.json
 
@@ -223,9 +246,15 @@ jobs:
       - name: 创建 Release（附 zip、校验和、证明与 SBOM）
         run: |
           set -euo pipefail
-          ZIP="astrbot_plugin_parser_lite-${GITHUB_REF_NAME}.zip"
+          ZIP="astrbot_plugin_parser_lite-${TAG_NAME}.zip"
           sha256sum "$ZIP" > "${ZIP}.sha256"
-          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+          # tag push 与 dispatch 双通道 + 重放都收敛到这里：已有 Release 就
+          # 止步，绝不覆盖已签名发布物（不可变性在资产面兜底）。
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG_NAME} 已存在——跳过创建（双通道重复触发或重放）"
+            exit 0
+          fi
+          gh release create "${TAG_NAME}" --verify-tag --generate-notes \
             "$ZIP" \
             "${ZIP}.sha256" \
             "${ZIP}.intoto.jsonl" \

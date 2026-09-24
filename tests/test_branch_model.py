@@ -483,6 +483,38 @@ def test_protection_script_covers_both_branches() -> None:
 # ============================================================ release.yml
 
 
+def test_promote_autotags_release_at_main_tip() -> None:
+    """发布 tag 是 promote 尾部的机械推论，不是人敲的动作。
+
+    版本号唯一来自上游：「main 尖端版本 ≠ 已发布 tag」等价于
+    「有已验证未发布的版本」。人工打 tag 等于把同一判断做第二遍，
+    忘记就打 = main 绿着但发布面停滞的静默漂移。
+    """
+    text = PROMOTE_PATH.read_text(encoding="utf-8")
+    assert "自动打发布 tag" in text, "promote 尾部缺自动 tag 步骤"
+    assert "refs/tags/" in text, "自动 tag 必须先查远端同名 tag（tag 不可变，不顺指不重发）"
+    # 续链不赌 tag push：GITHUB_TOKEN 的 push 事件不触发工作流是平台语义
+    assert "gh workflow run release.yml" in text, (
+        "打完 tag 必须显式 dispatch release（tag push 不可信赖）"
+    )
+
+
+def test_release_accepts_dispatch_and_verifies_main_tip() -> None:
+    """release 双入口（v* push + dispatch tag_name），且机器校验 tag 指 main 尖端。
+
+    main 尖端校验把 BRANCHING「发布只在 main 上打 tag」从人工纪律升格为
+    门禁：非尖端 tag（dev 中途手打）不再可能产出 Release。
+    """
+    doc = _load(RELEASE_PATH)
+    triggers = _workflow_triggers(doc)
+    assert "workflow_dispatch" in triggers, "promote 的续链入口（dispatch tag_name）缺失"
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    assert "tag_name" in inputs, "dispatch 必须收 tag_name 输入"
+    text = RELEASE_PATH.read_text(encoding="utf-8")
+    assert "refs/heads/main" in text, "缺 tag→main 尖端的机器校验"
+    assert "gh release view" in text, "缺双通道重复触发的存在性消化"
+
+
 def test_release_triggers_on_version_tags_only() -> None:
     """发布只在 ``v*`` tag 上触发。"""
     triggers = _workflow_triggers(_load(RELEASE_PATH))
