@@ -395,7 +395,7 @@ bash scripts/apply_branch_protection.sh             # 应用并回读校验
 | **提交签名 / vigilant mode** | 单人仓库收益低、日常摩擦高 |
 | **CODEOWNERS 强制** | 需要 `count ≥ 1`，会与 §3.3 的「避免自我死锁」冲突 |
 | **上游 roll 的人工内容审阅** | 维护契约（§1.1）：人不批内容、只修管道红。安全面由机械判据承接——`scripts/upstream_sync.py` 的供应链「异常即红」+ vendor 三层校验 + 全量契约测试 |
-| **`release` 环境人工放行** | 单人全自动发布下它是停摆点（超时含审批等待、`prevent_self_review` 可致永久死锁），且在 private+Free 时代曾是想象中的门。安全闸已换为机器判定：sync 判据 → tag 必指 main 尖端 → required checks |
+| **`release` 环境人工放行** | 单人全自动发布下它是停摆点（超时含审批等待、`prevent_self_review` 可致永久死锁），且在 private+Free 时代曾是想象中的门。安全闸已换为机器判定：sync 判据 → tag 必在 main 历史线 → required checks |
 
 ---
 

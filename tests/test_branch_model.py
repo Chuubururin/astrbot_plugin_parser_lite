@@ -499,11 +499,13 @@ def test_promote_autotags_release_at_main_tip() -> None:
     )
 
 
-def test_release_accepts_dispatch_and_verifies_main_tip() -> None:
-    """release 双入口（v* push + dispatch tag_name），且机器校验 tag 指 main 尖端。
+def test_release_accepts_dispatch_and_verifies_main_lineage() -> None:
+    """release 双入口（v* push + dispatch tag_name），且机器校验 tag 在 main 历史线。
 
-    main 尖端校验把 BRANCHING「发布只在 main 上打 tag」从人工纪律升格为
-    门禁：非尖端 tag（dev 中途手打）不再可能产出 Release。
+    「tag ∈ main 历史（祖先）」校验把 BRANCHING「发布只在 main 上打 tag」从人工纪律升格为
+    门禁：dev 上未经 promote 的旁路 tag 不再可能产出 Release。
+    （判据取「祖先」而非「= 尖端」：版本未变的修复把 main 前移后补发上一
+    版本是合法补救，2026-09-25 实弹证明尖端相等判据会把它锁死。）
     """
     doc = _load(RELEASE_PATH)
     triggers = _workflow_triggers(doc)
@@ -511,7 +513,7 @@ def test_release_accepts_dispatch_and_verifies_main_tip() -> None:
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert "tag_name" in inputs, "dispatch 必须收 tag_name 输入"
     text = RELEASE_PATH.read_text(encoding="utf-8")
-    assert "refs/heads/main" in text, "缺 tag→main 尖端的机器校验"
+    assert "refs/heads/main" in text, "缺 tag→main 历史线的机器校验"
     assert "gh release view" in text, "缺双通道重复触发的存在性消化"
 
 
@@ -539,7 +541,7 @@ def test_release_is_fully_autonomous_without_approval_pause() -> None:
 
     环境门在仓库历史上要么是想象（private+Free 不供给），要么是单人
     自动发布下的停摆点（超时含审批等待、self-review 死锁）。安全闸已
-    前移为机器判定：sync 供应链判据 + 「tag 必指 main 尖端」+ PR 轨道
+    前移为机器判定：sync 供应链判据 + 「tag 必在 main 历史线」+ PR 轨道
     required checks。想恢复人拦环节，先改 BRANCHING 的维护契约，
     不要顺手加 environment。
     """

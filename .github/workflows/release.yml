@@ -1,7 +1,7 @@
 name: release
 
 # 发布信任链（SLSA 对标）：
-# v* tag（promote 尾部自动派发）→ tag 必指 main 尖端校验 → 确定性测试 →
+# v* tag（promote 尾部自动派发）→ tag ∈ main 推进线校验 → 确定性测试 →
 # 构建 zip（显式白名单）→ Syft 生成 SPDX SBOM → actions/attest 生成
 # SLSA provenance 与 SBOM 证明（id-token 短期 Sigstore 证书）→
 # 证明 bundle 落成 release 附件（离线可验）→ gh release。
@@ -12,7 +12,7 @@ name: release
 # ── 发布轨没有人工放行（维护契约）──────────────────────────────────────
 # 人不批准 roll 的内容，只修「管道红」。安全闸的位置因此全部前移/机器化：
 #   · sync-upstream 的供应链判据「异常即红」（scripts/upstream_sync.py）；
-#   · 本文件的「tag 必指 main 尖端」校验——非 promote 指针的 tag 出不了 Release；
+#   · 本文件的「tag 必在 main 历史线」校验——dev 上未经 promote 的旁路 tag 出不了 Release；
 #   · PR 轨道的三道 required checks。
 # 旧仓库链上曾声明 `environment: release` 人工放行：在 private+Free 时代是
 # 想象中的门，在单人全自动契约下是停摆点（超时含审批等待、self-review 开关
@@ -72,18 +72,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: tag 与 metadata 版本锁步校验 + tag 必指 main 尖端
+      - name: tag 与 metadata 版本锁步校验 + tag 必在 main 历史线
         run: |
           set -euo pipefail
           case "${TAG_NAME}" in
             */*) echo "::error::tag 名含 '/'（${TAG_NAME}）会破坏发布物文件路径，请使用无斜杠 tag"; exit 1 ;;
           esac
-          # 「发布只能在 main 上打 tag」原是人工纪律（BRANCHING §8）——纪律会
-          # 被忘记，这里做成机器判定：非 main 尖端的 tag 发布的不是「当前发布态」。
+          # 「发布 tag 只能来自 promote 推进线」的机器判定。判据是 **tag 的
+          # 提交 ∈ main 历史**（祖先），而非「= main 尖端」：尖端相等会误锁
+          # 「版本未变的修复提交把 main 前移后补发上一版本」的合法补救
+          # （2026-09-25 实弹抓到的停摆）。dev 上未经 promote 的旁路 tag
+          # 不在 main 祖先内，照样判红。compare API 判祖先——checkout 是
+          # 浅克隆，本地 merge-base 拿不到两侧对象。
           MAIN_SHA="$(git ls-remote origin refs/heads/main | cut -f1)"
           TAG_SHA="$(git rev-parse HEAD)"
-          if [ "${TAG_SHA}" != "${MAIN_SHA}" ]; then
-            echo "::error::tag ${TAG_NAME} 指向 ${TAG_SHA:0:12}，main 尖端是 ${MAIN_SHA:0:12}——发布 tag 必须落在 promote 后的 main 上（先 promote，tag 由 promote 自动打）"
+          ANCESTRY="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${TAG_SHA}...${MAIN_SHA}" --jq .status)"
+          if [ "${ANCESTRY}" != "ahead" ] && [ "${ANCESTRY}" != "identical" ]; then
+            echo "::error::tag ${TAG_NAME} 的提交 ${TAG_SHA:0:12} 不在 main 历史线（尖端 ${MAIN_SHA:0:12}，compare=${ANCESTRY}）——发布 tag 必须落在 promote 产出的推进线上"
             exit 1
           fi
           META_VERSION="$(python -c \

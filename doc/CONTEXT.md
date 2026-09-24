@@ -55,7 +55,7 @@ vendor 快照的升级 PR。内容域 = `roll_local.ROLL_ADD_PATHS`（vendor +
 人不审阅上游 roll 的内容，只修「管道红」：required checks 红或判据命中
 才是人工介入点；桥的 bug 归我们修，上游代码的 bug 交付上游维护
 （vendor 零修改铁律的延伸）。安全闸全部机器化：供应链判据 →
-tag 必指 main 尖端 → 确定性测试门禁；不存在人工放行环节。
+tag 必在 main 历史线 → 确定性测试门禁；不存在人工放行环节。
 
 **两层注入（two-layer injection）**
 发布物上游一致性的两层自动化，roll 序列内单命令完成（工作流与本地同轨）。

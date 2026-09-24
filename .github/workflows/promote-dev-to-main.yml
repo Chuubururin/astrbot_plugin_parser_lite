@@ -210,8 +210,11 @@ jobs:
             if [ "${remote_tag_sha}" = "${main_sha}" ]; then
               echo "::notice::${tag} 已在 main 尖端，补发 release（幂等）"
               gh workflow run release.yml --ref dev -f tag_name="${tag}"
+            elif gh release view "${tag}" >/dev/null 2>&1; then
+              echo "::notice::${tag} 已在不可变锚上发布过 Release，不重发"
             else
-              echo "::warning::${tag} 指向 ${remote_tag_sha:0:12} ≠ main 尖端 ${main_sha:0:12} —— tag 是不可变锚，不顺指、不重发；同版本的桥接修复经 dev 源码包触达用户，release 面等上游 bump（规格「非目标」）"
+              echo "::warning::${tag} 不在 main 尖端且 Release 缺失（tag 成功/dispatch 失败的中间态）——补发，release 侧按 main 历史线校验"
+              gh workflow run release.yml --ref dev -f tag_name="${tag}"
             fi
             exit 0
           fi

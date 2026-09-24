@@ -308,7 +308,7 @@ roll 再生的生成工件）与已发布 tag，不一致就在 main 尖端自�
 显式派发 `release.yml`（GITHUB_TOKEN 的 tag push 不可信赖为触发器）。
 
 「tag 只能落在 promote 后的 main 上」已从纪律升格为机器判定：
-`release.yml` 校验 **tag 的提交 = main 尖端** 且 tag 与 metadata 版本锁步，
+`release.yml` 校验 **tag 的提交 ∈ main 历史线** 且 tag 与 metadata 版本锁步，
 旁路打的 tag 会红。
 
 > `chore.*` tag 只触发 promote；`v*` tag 只触发 release——
@@ -333,7 +333,7 @@ roll 再生的生成工件）与已发布 tag，不一致就在 main 尖端自�
 ### 受保护环境：不使用
 
 `release.yml` 不引用任何 environment，Settings → Environments **无需配置**。
-发布轨的完整性由机器判定承载（sync 供应链判据 → tag 必指 main 尖端 →
+发布轨的完整性由机器判定承载（sync 供应链判据 → tag 必在 main 历史线 →
 确定性测试门禁），不存在人工放行环节（§11 与维护契约，
 见 `doc/BRANCHING.md` §1.1）。
 
@@ -565,7 +565,7 @@ label `upstream-sync`，去重：未关闭的同题 Issue 只追加评论。
 | 复用 CI 逻辑而非多处手抄（GitHub 官方推荐 composite action） | `.github/actions/setup-env/` | `test_every_delegating_workflow_uses_the_shared_setup_action` |
 | ~~**SAST**（Scorecard `SAST`）~~ **本版主动不做** | 无（见 13.4） | `test_sast_is_deliberately_absent_and_recorded_as_such` |
 | **分支保护**（Scorecard `Branch-Protection`） | 服务端配置，期望值见 `doc/BRANCHING.md` | `test_protection_script_enforces_admins_and_reads_back` |
-| **发布轨无人工放行**（契约：人不批内容只修红；闸=sync 判据+tag→main 尖端） | `release.yml` 不声明 `environment` | `test_release_is_fully_autonomous_without_approval_pause` |
+| **发布轨无人工放行**（契约：人不批内容只修红；闸=sync 判据+tag→main 历史线） | `release.yml` 不声明 `environment` | `test_release_is_fully_autonomous_without_approval_pause` |
 | ~~**强制力不漂移**每日巡检~~ **本版已移除**（缺口见 13.5） | 无 | `test_protection_drift_is_acknowledged_as_unmonitored` |
 
 ### 13.1 依赖安装只有一处定义
