@@ -91,10 +91,11 @@ def _extract(
     """上游 main 三数据面提取：共享文件读取与单次 rev-parse，公式在提取模块。"""
     sources = display_mod.read_sources(repo, ref)
     render_source = params_mod.read_source(repo, ref)
+    render_context = params_mod.read_context_source(repo, ref)
     template_files = templates_mod.read_sources(repo, ref)
     revision = rev_parse(repo, ref)
     return (
-        params_mod.build_payload(render_source, revision),
+        params_mod.build_payload(render_source, revision, render_context),
         display_mod.build_payload(sources, revision),
         templates_mod.build_payload(template_files, revision),
         sources,

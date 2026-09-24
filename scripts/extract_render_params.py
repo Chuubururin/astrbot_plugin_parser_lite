@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from pipeline_common import dump_json, git_show, rev_parse  # noqa: E402
 
 _UPSTREAM_RENDER = "src/nonebot_plugin_parser_lite/render/__init__.py"
+# 上游 Theme API v1 把 QRCode 调用迁到此文件；它是 qrcode 锚点的次级提取源，
+# 其余锚点仍以 render/__init__.py 为唯一主源。
+_UPSTREAM_CONTEXT = "src/nonebot_plugin_parser_lite/render/context.py"
 
 # 注入防火墙：str 值经分析数据进入生成代码字符串字面量（回车符破坏行结构、
 # 超长值疑似异常快照）；int 值渲染进生成代码整数字面量（负数/超 2^31 不是
@@ -178,9 +182,10 @@ def _threshold_candidates(tree: ast.Module) -> list[tuple[int, str]]:
     return found
 
 
-def _qrcode_candidates(tree: ast.Module) -> list[tuple[dict[str, int], str]]:
+def _qrcode_candidates(tree: ast.Module, label: str) -> list[tuple[dict[str, int], str]]:
     """``qrcode.QRCode(version=..., error_correction=..., box_size=..., border=...)``
-    实参（二维码点阵参数，四项齐备才视为命中）。"""
+    实参（二维码点阵参数，四项齐备才视为命中）。上游 Theme API v1 起调用点
+    在 render/context.py，主源与上下文源共用本 finder，label 区分来源。"""
     wanted = ("version", "error_correction", "box_size", "border")
     found: list[tuple[dict[str, int], str]] = []
     for node in ast.walk(tree):
@@ -193,7 +198,7 @@ def _qrcode_candidates(tree: ast.Module) -> list[tuple[dict[str, int], str]]:
                 if literal is not None:
                     entry[kw.arg] = literal
         if all(name in entry for name in wanted):
-            found.append((entry, "render/__init__.py:qrcode.QRCode"))
+            found.append((entry, f"{label}:qrcode.QRCode"))
     return found
 
 
@@ -213,9 +218,10 @@ def _validate_value(key: str, value: Any) -> None:
         raise SystemExit(f"渲染参数 {key} 类型异常（应为 str/int）：{type(value).__name__}")
 
 
-def extract(source: str) -> dict[str, Any]:
-    """从上游 render/__init__.py 源码提取渲染参数（纯函数，锚点响亮失败）。"""
+def extract(source: str, context_source: str | None = None) -> dict[str, Any]:
+    """从上游 render 主源（+ context 次源）提取渲染参数（纯函数，锚点响亮失败）。"""
     tree = ast.parse(source)
+    context_tree = ast.parse(context_source) if context_source else None
 
     def single(
         finder: Any,
@@ -233,7 +239,17 @@ def extract(source: str) -> dict[str, Any]:
     version, _ = single(_version_candidates, "RENDER_TEMPLATE_VERSION")
     viewport, viewport_src = single(_viewport_candidates, "get_new_page viewport")
     threshold, _ = single(_threshold_candidates, "st_size 分流阈值")
-    qrcode, qrcode_src = single(_qrcode_candidates, "qrcode.QRCode")
+    qrcode, qrcode_src = single(
+        lambda _t: (
+            _qrcode_candidates(_t, "render/__init__.py")  # 主源命中保留（旧形态）
+            + (
+                _qrcode_candidates(context_tree, "render/context.py")
+                if context_tree is not None
+                else []
+            )
+        ),
+        "qrcode.QRCode",
+    )
     fwd_len, _ = single(
         lambda t: _named_int_candidates(t, "MAX_FORWARD_TEXT_LEN"), "MAX_FORWARD_TEXT_LEN"
     )
@@ -281,17 +297,29 @@ def extract(source: str) -> dict[str, Any]:
     return {"_provenance": PROVENANCE, "params": params}
 
 
-def build_payload(source: str, revision: str) -> dict[str, Any]:
+def build_payload(source: str, revision: str, context_source: str | None = None) -> dict[str, Any]:
     """提取产物 + 快照注记（入库 JSON 完整形态；CLI 与编排层共用同一公式）。"""
-    payload = extract(source)
+    payload = extract(source, context_source)
     payload["source_revision"] = revision
     payload["source_digest"] = hashlib.sha256(source.encode("utf-8")).hexdigest()
     return payload
 
 
 def read_source(repo: Path, ref: str) -> str:
-    """读上游 render 模块源码（本数据面的唯一提取源，公开给编排层）。"""
+    """读上游 render 模块源码（本数据面的主提取源，公开给编排层）。"""
     return git_show(repo, ref, _UPSTREAM_RENDER)
+
+
+def read_context_source(repo: Path, ref: str) -> str | None:
+    """读 render/context.py（qrcode 锚点次源）；文件不存在 = 前 Theme API 上游。"""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{_UPSTREAM_CONTEXT}"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", "replace")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -305,8 +333,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     source = read_source(Path(args.repo), args.ref)
+    context_source = read_context_source(Path(args.repo), args.ref)
     revision = rev_parse(Path(args.repo), args.ref)
-    payload = build_payload(source, revision)
+    payload = build_payload(source, revision, context_source)
     dump_json(OUTPUT_PATH, payload)
     print(f"已提取 {len(payload['params'])} 项渲染参数 → {OUTPUT_PATH.name}")
     return 0

@@ -126,6 +126,31 @@ def test_extractor_zero_anchor_hit_fails_loudly(extractor: ModuleType) -> None:
         extractor.extract("x = 1\n")
 
 
+# 上游 Theme API v1 起 QRCode 调用点从 render/__init__.py 迁到 render/context.py，
+# 提取源随之扩为「主源 + 上下文源」两棵树。
+CONTEXT_QRCODE_SRC = (
+    "def _build_qrcode(url):\n"
+    "    qr = qrcode.QRCode(version=2, error_correction=1, box_size=6, border=1)\n"
+)
+
+
+def test_qrcode_anchor_follows_context_refactor(extractor: ModuleType) -> None:
+    """主源无 QRCode 调用时锚点在 context 源命中，来源注记指向实际文件。"""
+    main_wo_qr = UPSTREAM_RENDER_SRC.replace(
+        "            qr = qrcode.QRCode(version=1, error_correction=1, box_size=10, border=1)\n",
+        "            pass\n",
+    )
+    payload = extractor.extract(main_wo_qr, CONTEXT_QRCODE_SRC)
+    assert payload["params"]["qrcode_version"]["value"] == 2
+    assert payload["params"]["qrcode_version"]["source"].startswith("render/context.py")
+
+
+def test_qrcode_anchor_single_when_moved(extractor: ModuleType) -> None:
+    """迁移是搬家不是复制：两棵树各留一处调用会失去唯一性，响亮失败。"""
+    with pytest.raises(SystemExit, match="区分度"):
+        extractor.extract(UPSTREAM_RENDER_SRC, CONTEXT_QRCODE_SRC)
+
+
 def test_extractor_ambiguous_anchor_fails_loudly(extractor: ModuleType) -> None:
     """锚点命中多个候选（失去区分度）时响亮失败，绝不静默取首个。"""
     ambiguous = UPSTREAM_RENDER_SRC.replace(
