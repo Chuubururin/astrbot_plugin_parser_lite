@@ -118,21 +118,33 @@ jobs:
       # 就会以 cryptic traceback 收场，或干脆无声降级。
       - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
         run: python scripts/check_test_deps.py
-      # 浅克隆上游（钉 sync-state 的 standalone_sha，而非分支 HEAD）：启用
-      # verify_vendor 第 3 层 + 让 test_*_when_clone_present / generate_config
-      # --check / run_injection --offline --check 在 CI 上有活体对照。
-      # 按 HEAD 克隆会随上游自动发布漂移出「vendor ≠ 克隆」的假红——
-      # 第 3 层比对的基准是本次快照对应的那次 roll（2026-09-24 CI 首跑实证）。
+      # 浅克隆上游（钉 sync-state 的 standalone_sha + 入库提取产物的
+      # source_revision 锚点，而非分支 HEAD）：启用 verify_vendor 第 3 层
+      # （工作树 checkout standalone 快照，逐字节比对读文件）+ 让
+      # test_*_when_clone_present / generate_config --check / run_injection
+      # --check 在 CI 上现场提取活体对照（注入与结构指纹按 git show 读
+      # main 血统的提取锚点）。HEAD 克隆会随上游自动发布漂移出假红；
+      # 只 fetch standalone 则缺提取锚点对象（2026-09-24 CI 首跑两连红实证）。
       # 无克隆时那 4 条按设计 SKIP，skip 门禁已按原因放行。
       - name: 浅克隆上游（启用 vendor 第 3 层与生成工件 --check）
         run: |
           set -euo pipefail
-          SHA=$(python -c "import json; print(json.load(open('.github/sync-state.json'))['standalone_sha'])")
+          STANDALONE=$(python -c "import json; print(json.load(open('.github/sync-state.json'))['standalone_sha'])")
+          REVS=()
+          while read -r rev; do
+            [ -n "$rev" ] && REVS+=("$rev")
+          done < <(python -c "
+          import json, pathlib
+          for f in sorted(pathlib.Path('vendor/_upstream').glob('*.json')):
+              rev = json.load(f.open(encoding='utf-8')).get('source_revision')
+              if rev:
+                  print(rev)
+          ")
           git init -q .sync-work/upstream
           git -C .sync-work/upstream remote add origin \
             https://github.com/sokoko-org/nonebot-plugin-parser-lite.git
-          git -C .sync-work/upstream fetch -q --depth 1 origin "$SHA"
-          git -C .sync-work/upstream checkout -q FETCH_HEAD
+          git -C .sync-work/upstream fetch -q --depth 1 origin "$STANDALONE" "${REVS[@]}"
+          git -C .sync-work/upstream checkout -q "$STANDALONE"
       - name: vendor 三层校验（含上游逐字节比对）
         run: python scripts/verify_vendor.py
       # generate_config --check 依赖不入库的 vendor_analysis.json，CI 上改走
