@@ -100,6 +100,10 @@ README_PATH = REPO_ROOT / "README.md"
 TEXTS_PATH = REPO_ROOT / "bridge" / "texts.py"
 RENDER_PARAMS_PATH = REPO_ROOT / "bridge" / "render_params.py"
 RENDER_TEMPLATES_DIR = REPO_ROOT / "templates"
+# 模板名防火墙的汇点复检副本（与 extract_render_templates / analyze_vendor
+# 各自独立实现——不共码是有意的；三处同集合由
+# tests/test_render_templates.py 的一致性断言钉住）
+TEMPLATE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css|json)\Z"
 TEMPLATES = REPO_ROOT / "scripts" / "templates"
 
 # 桥自有渲染模板白名单：上游快照之外的 templates/ 文件（桥自加模板时在此
@@ -252,7 +256,7 @@ def _load_analysis() -> dict[str, Any]:
     for name, content in upstream_render_templates["files"].items():
         if (
             not isinstance(name, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css|json)", name)
+            or not re.fullmatch(TEMPLATE_NAME_PATTERN, name)
             or not isinstance(content, str)
             or not content
         ):

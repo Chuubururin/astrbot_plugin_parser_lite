@@ -40,6 +40,47 @@ def gen() -> ModuleType:
     return _load("generate_config_tpl", REPO_ROOT / "scripts" / "generate_config.py")
 
 
+@pytest.fixture(scope="module")
+def analyze() -> ModuleType:
+    return _load("analyze_vendor_rt", REPO_ROOT / "scripts" / "analyze_vendor.py")
+
+
+def test_name_firewalls_agree_across_three_layers(
+    templates_mod: ModuleType, gen: ModuleType, analyze: ModuleType
+) -> None:
+    """源与两个汇点的模板名防火墙各自独立实现（不共码是有意的），接受/拒绝
+    集合必须逐名一致——上游加一类后缀（如 theme.json）时漏改任何一处，
+    这里先红，而不是让 roll 在更深处炸。"""
+    import re
+
+    probes = (
+        "a.jinja",
+        "a.html.jinja",
+        "tailwind.css",
+        "theme.json",
+        "evil.sh",
+        ".hidden.jinja",
+        "sub/x.jinja",
+        "../up.jinja",
+        "",
+    )
+
+    def extractor_ok(name: str) -> bool:
+        try:
+            templates_mod.validate_name(name)
+        except SystemExit:
+            return False
+        return True
+
+    for name in probes:
+        verdicts = (
+            extractor_ok(name),
+            bool(analyze._TEMPLATE_NAME_RE.fullmatch(name)),
+            bool(re.fullmatch(gen.TEMPLATE_NAME_PATTERN, name)),
+        )
+        assert verdicts[0] == verdicts[1] == verdicts[2], f"{name!r} 三处判定不一致：{verdicts}"
+
+
 _FILES = {
     "default.html.jinja": "<html>{{ result.title }}</html>\n",
     "macros.jinja": "{% macro cover(item) %}{{ item | safe_src }}{% endmacro %}\n",

@@ -335,7 +335,7 @@ def _upstream_render_params() -> dict[str, dict[str, Any]]:
 # 入库），本层摄取进分析数据，使第二层再生模板文件与其他工件同一来源、
 # 离线可再生
 _RENDER_TEMPLATES_PATH = REPO_ROOT / "vendor" / "_upstream" / "render_templates.json"
-_TEMPLATE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css)\Z")
+_TEMPLATE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css|json)\Z")
 _TEMPLATE_FILE_MAX_BYTES = 512 * 1024
 
 
