@@ -464,10 +464,22 @@ def test_extractor_zero_anchor_hit_fails_loudly(extractor: ModuleType) -> None:
 
 
 def test_extractor_ambiguous_anchor_fails_loudly(extractor: ModuleType) -> None:
-    """锚点命中多个候选（失去区分度）时响亮失败。"""
+    """锚点命中多个**值不同**的候选（真失去区分度）时响亮失败。"""
     found = [("const", "在线播放一", 1), ("const", "在线播放二", 2)]
     with pytest.raises(SystemExit, match="区分度"):
         extractor._select(found, "online_play", ("contains", "在线播放"))
+
+
+def test_extractor_identical_duplicate_anchor_passes(extractor: ModuleType) -> None:
+    """多处命中但值全同（上游复制同文案）：镜像结果与命中数无关，放行。
+
+    上游 Theme API 重构（1.3.8rc6）把「媒体加载失败」模板复制进两条渲染
+    路径，锚点按值取用不取位置——区分度只对「值分叉」有意义。
+    """
+    found = [("tmpl", "[媒体加载失败：{0}]", 444), ("tmpl", "[媒体加载失败：{0}]", 494)]
+    assert extractor._select(found, "media_failed", ("contains", "媒体加载失败")) == (
+        "[媒体加载失败：{0}]"
+    )
 
 
 def test_extractor_rejects_hostile_value(extractor: ModuleType) -> None:

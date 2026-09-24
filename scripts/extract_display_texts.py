@@ -15,9 +15,10 @@ CI 均可离线再生。
 - AST 遍历上游模块，收集字符串常量与 f-string 模板（FormattedValue 归一为
   ``{0}``/``{1}`` 占位，含 ``!conv``/``:spec``），排除 docstring 与 logger.*
   调用子树（日志不是用户可见文案）；
-- 每个锚点（equals/contains）必须恰好命中一个候选：零命中说明上游改写了
-  该文案位置，多命中说明锚点失去区分度——都响亮失败，让 sync PR 变红交由
-  人工复核，绝不静默携带错误文案。
+- 每个锚点（equals/contains）按值取用：零命中说明上游改写了该文案位置，
+  多命中且值分叉说明锚点失去区分度——都响亮失败，让 sync PR 变红交由
+  人工复核，绝不静默携带错误文案；多命中但值全同（上游把同一文案复制进
+  新路径）镜像结果不变，放行。
 
 jinja 模板文本（卡面「评论/多选」等）单独提取为 template_texts 全集，供
 契约测试断言桥内模板文案是上游子集（上游漂移 → sync PR 变红）。
@@ -233,11 +234,12 @@ def _select(found: list[tuple[str, str, int]], key: str, rule: tuple[str, str]) 
             "若该文案在上游已不再重复（stats 路径被合并），应把规则降级为 equals",
         )
 
-    if len(matches) > 1 and kind != "equals_repeated":
+    if len(matches) > 1 and kind != "equals_repeated" and len({m[1] for m in matches}) > 1:
         raise SystemExit(
             f"锚点 {key}（{needle!r}）命中 {len(matches)} 个候选，失去区分度：{matches}，"
             "请复核 scripts/extract_display_texts.py 的锚点规则表",
         )
+    # 多命中但值全同（上游把同一文案复制进新路径）：按值取用，镜像不变，放行。
     _, value, _lineno = matches[0]
     _validate_value(key, value)
     return value
