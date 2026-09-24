@@ -24,56 +24,43 @@ AST 白名单（`VENDOR_CONSUMERS` 常量即本清单的真值源，增删模块
 （bridge/sender.py 的失败日志）。由 `test_import_contract.py::test_vendor_seam_exists`
 守护；上游改名时此测试先红。
 
-**LKG（Last Known Good）**
-最后一次确认可用的状态，具体化为 `lkg` 分支——sync 工作流在每次 roll 改写
-工作树之前 force-push 当前 HEAD（上一已验证快照，即 roll 起点 dev）留档；
-最近 `v*` release tag 为次级基线。lkg 是独立分支，不属 main/dev 任何一条线，
-每次覆写是语义正确的。回滚序列（sync PR 页脚）：revert sync PR → checkout lkg
-（或以 LKG tag 为基线重新发布）。
+**上游平面（plane）**
+渲染模板/显示文本/渲染参数三个数据面，提取源直接跟上游 main 真值，
+与 vendor 轨（standalone 发布节奏）的 skew 由 roll 时全量契约测试把关。
 
 ## 同步
 
-> ⚠️ **本节描述的上游自动同步机制当前已移除。**
->
-> 下文的 `sync-upstream` 工作流、`lkg` 分支、分层 automerge、熔断、
-> staleness 告警与 `SYNC_PAT` 均随「只留 4 个工作流」的精简一并退役
-> （决策记录见 [BRANCHING.md](./BRANCHING.md) §10「明确**不做**的项」）。
-> 现在上游滚动的**唯一入口**是本地 `scripts/roll_local.py`；`lkg` 分支
-> 与 `sync-state.json` 的熔断字段仍在仓库中，但已无消费者。
->
-> **原文保留**：下列描述是恢复该机制时最省事的规格说明——它逐条
-> 写明了 roll 序列、单 roll 在途约束与恢复命令。恢复前请先读
-> §10 的取舍记录，不要只读本节就把工作流加回来。
-
 **roll（滚动同步）**
-sync-upstream 工作流的一次执行（每日 cron 一次）：克隆上游 standalone →
-比对 sha → 整树重建 vendor → 派生 requirements → 显示文本提取（fetch 上游
-main）→ vendor 三层校验 → 契约测试 → 开 sync PR（base = **dev**）。单 roll
-在途（concurrency=1，不取消在途）。metadata.yaml 版本随 roll 直接沿用上游
-版本号。roll 只改 dev，改 main 是 promote 的事（节奏由人决定）。
+上游同步管道的一次执行：克隆上游 standalone → 比对 sync-state 的 sha →
+供应链判据 → 整树重建 vendor → 派生 requirements → 平面提取（跟上游 main
+真值）→ vendor 三层校验 → 全量契约测试 → 开 sync PR（base = **dev**，标题
+带 `[merge]` 保留前缀），required checks 全绿后由 bot squash-merge。
+roll 序列的**唯一实现**是 `scripts/roll_local.py`，`sync-upstream.yml`
+只做编排，不抄第二份。metadata.yaml 版本随 roll 直接沿用上游版本号。
+roll 只改 dev，改 main 是 promote 的事；tag 是 promote 尾部的机械推论。
 
 **sync PR / roll commit**
-vendor 快照的升级 PR。commit message 固定携带 SHA 区间、上游摘要与
-revert/停用滚子页脚（Tree-hygiene：先恢复绿，再排查坏因）。
+vendor 快照的升级 PR。内容域 = `roll_local.ROLL_ADD_PATHS`（vendor +
+生成工件 + sync-state），提交清单完整性由
+`test_codegen.py::test_roll_commit_list_covers_all_generated_artifacts`
+钉扎——漏一项 = 旧桥工件配新 vendor，上游文案/参数静默失效。
 
-**分层 automerge**
-vendor 代码与派生清单变更 + 全绿 → 自动 squash 合并到 **dev**；触碰桥/CI/模板
-的变更 → 仅 PR + 告警人工审阅。前提：`SYNC_PAT` secret（GITHUB_TOKEN
-推的分支不触发 CI）。注意 automerge 只作用于 dev，**不涉及 main**——
-main 的推进永远是显式的 promote。
+**供应链判据（异常即红）**
+`scripts/upstream_sync.py` 对新旧两棵构建树的三条机械判定：依赖清单变化、
+结构规模超阈值（增删 >50 文件或 diff >5000 行）、LICENSE 变化——命中即
+不开 PR、红并开去重 Issue。人工放行通道：手动运行 sync-upstream 并填
+`confirm=<本次新 sha>`。这是全自动链上「绿≠无恶意」的唯一机械防线。
 
-**熔断（circuit breaker）**
-连续 3 次同步运行失败 → cron 自动空转（读 run 历史判定，不回写文件）。
-恢复：修复后 `gh workflow run sync-upstream -f force=true`。
-
-**staleness（滞后告警）**
-上游已领先但上次成功同步距今超过 2 个同步周期（日滚 → 48h）→ 开 issue；
-追平后自动关闭。
+**维护契约（maintenance contract）**
+人不审阅上游 roll 的内容，只修「管道红」：required checks 红或判据命中
+才是人工介入点；桥的 bug 归我们修，上游代码的 bug 交付上游维护
+（vendor 零修改铁律的延伸）。安全闸全部机器化：供应链判据 →
+tag 必指 main 尖端 → 确定性测试门禁；不存在人工放行环节。
 
 **两层注入（two-layer injection）**
-发布物上游一致性的两层自动化，全部在 CI 中完成、本地零构建步骤。
-第一层注入=从上游通过 CI/CD 自动化生成代码注入模板：sync-upstream 把
-上游源码注入 vendor/（逐字节校验）后，自动分析其配置面产出模板数据
+发布物上游一致性的两层自动化，roll 序列内单命令完成（工作流与本地同轨）。
+第一层注入=从上游自动生成代码注入模板：sync 轨道（roll 序列，单实现
+`scripts/roll_local.py`）把上游源码注入 vendor/（逐字节校验）后，自动分析其配置面产出模板数据
 `vendor_analysis.json`（管线临时产物，不入库，上游元信息不由本仓库维护）。
 第二层注入=利用代码注入模板和 AstrBot 插件模板注入仓库代码实现迭代修改：
 `scripts/run_injection.py`（单命令编排：三数据面提取→分析→生成）产出
@@ -152,19 +139,17 @@ macros 宏、CSS）逐字节来自上游 main 分支 render/templates（2026-09-
 后不触发后续工作流——门禁结论由 promote run 自身承载（CONTRIBUTING.md 8.4）。
 
 **PR 目标守卫（main-pr-target-guard）**
-对 base=main 的 PR 直接 exit 1。存在的原因：本仓库 private 且无 GitHub Pro，
-远端分支保护与 rulesets 不可用（REST 返回 403），强制力只能做进 CI。
+对 base=main 的 PR 直接 exit 1。存在的原因：`main` 刻意**不开** PR 保护
+（否则 promote 失效，见 BRANCHING.md §2.4），服务端不会拦以 `main` 为
+base 的 PR；守卫让这类 PR 的错误**在开出来时就显式暴露**，而不是等到
+promote 在 `main` 上撞 `git cherry` 判红。
 
-**keepalive**
-上游无变化时防 GitHub 60 天自动停用调度工作流的触碰提交（50 天阈值，
-`[skip ci]`；推 **dev**，失败则降级为提醒 issue）。
-
-**本地滚动同步（local roll）**
-仓库未推远端期间对 sync-upstream 工作流的本地替代：
-`scripts/roll_local.py` 单命令镜像其完整 roll 序列——检测
-standalone_sha 变化后执行整树重建 vendor → 派生 requirements → 两层
-注入 → 三层校验 → 全量契约测试 → 更新 sync-state → 提交（含连续失败
-计数的熔断对齐；网络抖动自动重试）。双轨语义：vendor 轨跟 standalone
+**滚动同步的唯一实现（roll_local）**
+`scripts/roll_local.py` 承载完整 roll 序列——检测 standalone_sha 变化后
+执行整树重建 vendor → 派生 requirements → 两层注入 → 三层校验 → 全量
+契约测试 → 更新 sync-state → 提交（连续失败计数 consecutive_failures；
+网络抖动自动重试）。`sync-upstream.yml` 只编排它（+ 判据 + PR 轨道），
+人手动跑同一脚本。双轨语义：vendor 轨跟 standalone
 发布节奏，渲染模板/文本/参数三个平面轨直接跟 origin/main tip（提取源
 即 main），两者的 skew 由全量契约测试在 roll 时把关。
 **祖先校验门（2026-09-14 release 通道分析）**：standalone 分支除 main

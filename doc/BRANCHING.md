@@ -16,13 +16,27 @@
 | **`main`** | **发布指针**。永远与某次 promote 当时的 `dev` 尖端**是同一个提交** | **只有 CI** | required checks、`enforce_admins`、禁止删除 |
 
 ```
-  feat/xxx  ──PR──▶  dev（默认分支）  ──[merge] 前缀──▶  promote  ──▶  main  ──▶  tag v*  ──▶  release
-                       ▲                                                    │
-                       └────────────── 日常开发都在这边 ──────────────────────┘
-                                                              发布指针，不直接改
+  feat/xxx  ──PR──▶  dev（默认分支）  ──[merge] 前缀──▶  promote  ──▶  main  ──▶  tag v*（自动）──▶  release
+  sync cron ──PR──▶   ▲                  （bot 合 PR）      （尾部自动打 tag）
+  （上游 roll）        └────────────── 日常开发都在这边 ──────────────────────┘
+                                                     发布指针，不直接改
 ```
 
-**没有 `lkg`、没有 `release`、没有 `staging`。** 回滚靠 `v*` tag + `git revert`（见 §6）。
+**没有 `lkg`、没有 `release`、没有 `staging`。** 回滚靠 `v*` tag + `git revert`（见 §7）。
+
+### 1.1 上游同步轨道（sync 是一名全自动的普通开发者）
+
+`sync-upstream.yml` 每日检测上游 standalone roll：供应链判据（
+`scripts/upstream_sync.py`，异常即红）→ 完整 roll 序列（委派
+`scripts/roll_local.py`，与本地同一实现）→ 开 PR（标题带 `[merge]` 前缀）
+挂 auto-merge。人与 sync 走**同一条**PR→CI→promote→tag→release 轨道，
+没有特权通道。
+
+维护契约：**人不审阅上游内容，只修「管道红」**。管道红 = required checks
+失败或供应链判据命中——前者修桥（桥的 bug 归我们）或把 bug 提给上游
+（vendor 零修改铁律），后者经 `confirm=<新上游 sha>` 手动放行或等上游澄清。
+「上游不 bump 版本时桥接修复怎么发」不是问题：用户更新通道是 dev 分支本身
+（见 §7）。
 
 ---
 
@@ -212,7 +226,10 @@ promote job（仅当 decide 说跑）
   ├─ fetch origin dev main
   ├─ main == dev ?            → 提示「无需 promote」并成功退出
   ├─ main 有 dev 之外提交 ?    → ::error:: 并 exit 1
-  └─ git push --force-with-lease … origin/dev:refs/heads/main
+  ├─ git push --force-with-lease … origin/dev:refs/heads/main
+  └─ 自动打发布 tag：metadata.yaml 版本 ≠ 已发布 tag
+       → 在 main 尖端打 v* + 显式 dispatch release.yml
+       （同名 tag 已存在则跳过——tag 是不可变锚，不顺指不重发）
 ```
 
 ### 5.2 `main` 有独有提交时必须**响亮失败**
@@ -265,22 +282,29 @@ done
 | R6 | `main` 只能由 promote 移动 | 唯一有权推 `main` 的路径 |
 | R7 | `main` 有 `dev` 之外的提交 → promote 失败 | promote 内的 `git cherry` 检查 |
 | R8 | 禁止删除 `main` / `dev` | `allow_deletions: false` |
-| R9 | 发布只能在 `main` 上打 `v*` tag | `release.yml` 的 tag 过滤 |
+| R9 | 发布 tag 由 promote 尾部自动打在 main 尖端 | `release.yml` 校验 tag=main 尖端 + metadata 版本锁步 |
 
 ---
 
 ## 7. 回滚策略
 
+**先认清用户在哪**：AstrBot 的插件安装/更新拉的是**默认分支（`dev`）的源码包**
+（`zip_updater` → `archive/refs/heads/<default>.zip`），**不消费 GitHub
+Releases**。v* tag 与 Release 是审计账本与手动安装通道。所以「救用户」的
+动作永远是把好内容送回 `dev`；处理 Release 面只是修账。
+
 | 场景 | 做法 |
 |---|---|
 | 刚 promote，发现 `dev` 有严重问题 | 在 `dev` 上 `git revert <bad>` → 合入 → 重新 promote |
 | 已发 `v1.2.0`，线上出问题 | `git revert` 到 `dev` → promote → 打 `v1.2.1` |
+| **上游坏 roll 占用了版本号**（测试全绿但行为坏/事后投毒） | 三件套：① revert 那条 sync 提交，经 PR 轨道合入 dev → promote 收回 main（用户即刻回到好源码包）；② `gh release edit <坏tag>` 降格（不删 tag——不可变锚），latest 指回好版本；③ 修复归上游，等它 bump 同号才能再发 |
 | 用户需要旧版本 | 直接装旧 `v*` Release 的产物 |
 | `main` 被搞坏 | `v*` tag 仍不可变，从旧 tag 重新指：`git push origin <good-tag>:refs/heads/main`（注意可能需 `--force`） |
 
 **为什么不需要 `lkg` 分支**：`v*` tag 是真正的不可变锚点 —— 分支可以被 force
-push，tag 需要显式删了重建。上一版用 `lkg` 是因为当时有自动上游同步需要
-「上一已验证快照」；本版没有自动同步，tag 足够。
+push，tag 需要显式删了重建。上一版用 `lkg` 是因为当时的自动上游同步需要
+「上一已验证快照」；现版轨道里 `main` 本身就是「最后一次过全门禁的 sha」，
+tag 另兜一层，`lkg` 没有剩余职责。
 
 ---
 
@@ -296,17 +320,16 @@ git checkout -b feat/my-change
 git push origin feat/my-change
 # → GitHub 上开 PR，base 选 dev，等三项检查绿，Squash and merge
 
-# 发布（两步）
+# 发布（一步：让内容进 dev 并 promote）
 git checkout dev && git pull
-git commit --allow-empty -m "[merge] release v1.2.0"   # 或直接推带前缀的提交
-git push origin dev                                     # → 自动 promote
-
-# promote 完成后打 tag
-git fetch origin
-git push origin origin/main:refs/heads/main   # 对齐本地 main（可选）
-git tag v1.2.0 <main 的 sha>
-git push origin v1.2.0                          # → 触发 release
+git commit --allow-empty -m "[merge] release"   # 或直接推带前缀的提交
+git push origin dev                              # → promote 移动 main
+                                                 # → 尾部自动打 v* tag → release 全自动
 ```
+
+> tag 名取 `metadata.yaml` 的 `version`（随上游 roll 再生），人不构造版本号。
+> promote 尾部发现「版本 ≠ 已发布 tag」才会打 tag；同版本重复 promote 是
+> 空操作（不可变锚已存在）。
 
 ### 8.2 手动 promote（应急）
 
@@ -371,8 +394,8 @@ bash scripts/apply_branch_protection.sh             # 应用并回读校验
 | **secret scanning / Dependabot alerts** | 不做自动巡检，靠人工在 Settings 确认（**建议**开启，属平台开关、零维护） |
 | **提交签名 / vigilant mode** | 单人仓库收益低、日常摩擦高 |
 | **CODEOWNERS 强制** | 需要 `count ≥ 1`，会与 §3.3 的「避免自我死锁」冲突 |
-| **上游自动同步** | 上一版的 `sync-upstream.yml` 依赖 `lkg` 分支，本版一并移除 |
-| **`release` 环境人工放行** | **能力保留**（`release.yml` 仍声明 `environment: release`），但需你自己去 Settings 创建该环境。属于可选增强 |
+| **上游 roll 的人工内容审阅** | 维护契约（§1.1）：人不批内容、只修管道红。安全面由机械判据承接——`scripts/upstream_sync.py` 的供应链「异常即红」+ vendor 三层校验 + 全量契约测试 |
+| **`release` 环境人工放行** | 单人全自动发布下它是停摆点（超时含审批等待、`prevent_self_review` 可致永久死锁），且在 private+Free 时代曾是想象中的门。安全闸已换为机器判定：sync 判据 → tag 必指 main 尖端 → required checks |
 
 ---
 
@@ -385,5 +408,7 @@ bash scripts/apply_branch_protection.sh             # 应用并回读校验
 | promote 报「main 存在 dev 之外的提交」 | 有人绕过工作流直接写了 `main` | 按 §5.2 收回提交 |
 | 推 `dev` 之后 `main` 没动 | 提交信息没有 `[merge]` / `chore(release):` **前缀** | 前缀必须锚定行首（§2.3） |
 | 你自己 `git push origin main` 竟然成功 | `enforce_admins` 没生效 | 重跑 `apply_branch_protection.sh` |
-| `release` 卡在 `Waiting for approval` 直到超时 | 误勾了 `Prevent self-review` | 关闭它，否则单人维护者无法批准自己的发布 |
+| sync 的 PR 挂着不合并 | required checks 红——**这正是「管道红、人工介入」的落点**：修桥或把 bug 提给上游，不要绕过检查硬合 |
+| 同版本的桥接修复没有新 Release | tag 是不可变锚、版本号已被上游占用：修复经 dev 源码包触达用户（§7），Release 面等上游 bump |
+| sync 被供应链判据拦红 | 人工确认无害后，手动运行 sync-upstream 并填 `confirm=<本次新 sha>` 放行一次 |
 | 改了工作流但 cron / 手动触发仍跑旧版本 | 默认分支不是改动的那个分支 | 默认分支已设为 `dev`，改动会在 `dev` 生效 |

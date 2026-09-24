@@ -754,10 +754,12 @@ def test_roll_commit_list_covers_all_generated_artifacts() -> None:
     assert not missing, f"roll 提交清单缺生成工件：{sorted(missing)}"
 
 
-def test_state_write_keeps_trailing_newline(tmp_path: Path) -> None:
+def test_state_write_keeps_trailing_newline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """sync-state.json 必须带尾换行——否则 end-of-file-fixer 在 sync PR 上判红。"""
     roll = _load_roll_local()
     state = tmp_path / "sync-state.json"
-    roll.STATE_PATH = state
+    monkeypatch.setattr(roll, "STATE_PATH", state)
     roll._state_write({"standalone_sha": "x" * 40})
     assert state.read_bytes().endswith(b"\n")

@@ -1,14 +1,9 @@
-"""本地一键滚动同步：上游 standalone → vendor 整树重建 → 两层注入（离线本地版）。
+"""滚动同步的 roll 序列唯一实现：上游 standalone → vendor 整树重建 → 两层注入。
 
-⚠️ 本版起，**本脚本是 roll 序列的唯一实现**（不是镜像）。上一版曾有一个
-`sync-upstream.yml` 工作流在 CI 侧跑同一序列，它已随「只留 4 个工作流」的
-精简移除；`scripts/pipeline_common.py` 仍是两轨共同消费的单点语义层，
-但其双轨对账的意义已变为「历史契约」而非「当前双实现」（见
-doc/BRANCHING.md 的退役说明）。
-
-本仓库当前以本地为主工作面（未推远端，GitHub 工作流不触发），上游
-standalone 分支由其 CI 随 main 每次 push 自动发布——vendor 轨的滚动因此
-需要本地驱动。本脚本把 roll 序列收敛为单命令：
+`sync-upstream.yml`（CI 编排）与本地手动驱动**共用本脚本**，roll 序列因此
+只有一份实现——工作流侧不抄 fetch/注入/校验，避免双轨在细节上漂移。上游
+standalone 分支由其 CI 随 main 每次 push 自动发布，本脚本把 vendor 轨的
+滚动收敛为单命令：
 
 1. fetch 上游 standalone（孤儿单提交构建）+ main（平面提取源），网络抖动
    自动重试；

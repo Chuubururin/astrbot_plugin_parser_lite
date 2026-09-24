@@ -56,7 +56,7 @@ pre-commit install --hook-type pre-push
 
 | # | 门禁 | 命令 | 说明 |
 |---|---|---|---|
-| 1 | 测试 | `python -m pytest -c config/pyproject.toml --rootdir=. -q` | 基线 **545 passed / 3 skipped**（本地与 CI 一致：CI 已浅克隆上游做活体对照；3 条 skip 均为 network 隔离区，设 `RUN_NETWORK_TESTS=1` 启用）。无上游克隆的裸环境为 **541 passed / 7 skipped**——多出的 4 条需要 `.sync-work/` 上游克隆（跳过原因写作「无上游克隆」），属设计内 |
+| 1 | 测试 | `python -m pytest -c config/pyproject.toml --rootdir=. -q` | 基线 **561 passed / 3 skipped**（本地与 CI 一致：CI 已浅克隆上游做活体对照；3 条 skip 均为 network 隔离区，设 `RUN_NETWORK_TESTS=1` 启用）。无上游克隆的裸环境为 **557 passed / 7 skipped**——多出的 4 条需要 `.sync-work/` 上游克隆（跳过原因写作「无上游克隆」），属设计内 |
 | 2 | Lint | `ruff check --config config/pyproject.toml .` | 选 `E,F,W,I,UP,B,SIM,RUF,ASYNC,C4,COM,FURB,PERF,RET` |
 | 3 | 格式 | `ruff format --config config/pyproject.toml --check .` | `line-length = 100`，`target-version = "py312"` |
 | 4 | 类型 | `python scripts/typecheck.py` | 根目录无 `__init__.py`，需显式包基（见脚本 docstring）；`warn_unused_ignores` 打开，多余的 `# type: ignore` 会变红 |
@@ -303,17 +303,16 @@ gh workflow run promote-dev-to-main --ref dev
 
 ### 8.5 发布 tag 与 promote 的关系
 
-`release` 工作流由 `v*` tag 触发，tag 必须与 `metadata.yaml` 的 `version` 锁步。
-推荐顺序：**先 promote，再在 `main` 的 sha 上打 tag**，这样 tag 指向的提交必定
-就是 `dev` 上那个跑过全量 CI 的提交（逐字节相同）。
+tag 不是人打的动作：promote 尾部比对 `metadata.yaml` 的 `version`（随上游
+roll 再生的生成工件）与已发布 tag，不一致就在 main 尖端自动打 `v*` 并
+显式派发 `release.yml`（GITHUB_TOKEN 的 tag push 不可信赖为触发器）。
 
-> 顺序不能反：**先在 `dev` 上把 CI 跑绿 → promote → 打 tag**。
-> 若先打 tag，`release` 会构建出一个 `main` 尚未跟上的提交对应的产物；
-> 若 `dev` 的 CI 没绿就 promote，`main` 会指向一个未经完整验证的提交，
-> 而 promote 不会再帮你拦一次（见 §8.4）。
+「tag 只能落在 promote 后的 main 上」已从纪律升格为机器判定：
+`release.yml` 校验 **tag 的提交 = main 尖端** 且 tag 与 metadata 版本锁步，
+旁路打的 tag 会红。
 
-> `chore.*` tag 只触发 promote；`v*` tag 只触发 release。两者互不干扰——
-> 这是把「推进指针」与「发版」解耦的关键。
+> `chore.*` tag 只触发 promote；`v*` tag 只触发 release——
+> 「推进指针」与「发版」两个开关的解耦不变。
 
 ## 9. Secret 与受保护环境
 
@@ -323,22 +322,20 @@ gh workflow run promote-dev-to-main --ref dev
 `release` 用 `id-token` + `attestations`（OIDC，无需长期凭据）。
 所以本仓库在 Settings → Secrets 里**不需要配置任何东西**。
 
-> 上一版有一个 `SYNC_PAT`，用来支持已移除的 `sync-upstream` 工作流
-> （它需要 PAT 才能让推送的分支触发 CI 检查）。本版没有自动上游同步，
-> 因此该 Secret 不再需要。若将来恢复上游同步，再一并恢复它。
+> 上游同步（`sync-upstream.yml`）同样零 Secret：走 PR 轨道，`GITHUB_TOKEN`
+> 开 PR、CI 绿后 bot 自行合并 —— 旧版的 `SYNC_PAT` 是给「直推分支要触发 CI」
+> 打的补丁，PR 轨道本身就是 token 事件被认可的路径，不需要它。
 
-- **类型**：Classic PAT，scope 仅 `repo`，绑定维护者个人账号；设过期提醒。
-- 一值一 secret，不打包进 JSON（掩码对结构化数据失效）。
-- **缺省行为**：不配置也能跑，同步降级为「开 PR + 人工合并」。
+- 将来若确需长期凭据：一值一 secret，不打包进 JSON（掩码对结构化数据失效）。
 
 </details>
 
-### 受保护环境 `release`（Settings → Environments）
+### 受保护环境：不使用
 
-- 名称必须为 `release`（`release.yml` 引用）。
-- Required reviewers：勾选维护者本人 —— 发布物（zip + SLSA attestation）
-  出炉前强制人工放行。
-- 不配置任何环境 secret（当前无发布型 secret）。
+`release.yml` 不引用任何 environment，Settings → Environments **无需配置**。
+发布轨的完整性由机器判定承载（sync 供应链判据 → tag 必指 main 尖端 →
+确定性测试门禁），不存在人工放行环节（§11 与维护契约，
+见 `doc/BRANCHING.md` §1.1）。
 
 ---
 
@@ -397,22 +394,24 @@ gh workflow run promote-dev-to-main --ref dev
 
 ### 发布
 
-`release` 工作流由 `v*` tag 触发：确定性测试 → 构建 zip（**显式白名单**）→
-`actions/attest` 生成 SLSA provenance → 受保护环境人工放行 → `gh release create`。
+`release` 工作流由 `v*` tag 触发（promote 尾部自动打并派发，见 §8.5）：
+确定性测试 → 构建 zip（**显式白名单**）→ `actions/attest` 生成 SLSA
+provenance → `gh release create`。发布轨**没有人工放行**——维护契约是人不批
+roll 内容、只修管道红（`doc/BRANCHING.md` §1.1），安全闸全部机器化。
 
-推荐顺序：**先在 `dev` 上验证 → promote 到 `main` → 在 `main` 的 sha 上打 tag**。
-因为 promote 只是**移动指针**（§8.4），tag 指向的提交就是 dev 上那个已经跑过
-全量 CI 的提交 —— 逐字节相同，且 `main` 不会落后于发布物。
+tag 由 promote 打在 main 尖端，指向的提交就是 dev 上跑过全量 CI 的那个
+—— 逐字节相同，且 `main` 不会落后于发布物。
 
-> ⚠️ **不要把「promote 会再校验一遍」当成安全网。** 本版的 promote **不跑任何
-> 门禁**（它只做 `git fetch` / `git cherry` 判定 / `git push`）。这是刻意的简化：
-> 同一个提交在 dev 上已经验证过，再验一遍只增加「runner 抖动 → 假红」的失败面。
-> 结果是：**发布物是否可信，完全取决于 dev 上那次 CI**。所以绕过 dev 直接往
-> `main` 写（保护会拦，但若被改动过配置就不一定）等于绕过全部验证。
+> ⚠️ **不要把「promote 会再校验一遍」当成安全网。** promote **不跑任何
+> 门禁**（它只做 `git fetch` / `git cherry` 判定 / `git push` 与尾部打 tag）。
+> 这是刻意的简化：同一个提交在 dev 上已经验证过，再验一遍只增加
+> 「runner 抖动 → 假红」的失败面。结果是：**发布物是否可信，完全取决于
+> dev 上那次 CI**。所以绕过 dev 直接往 `main` 写（保护会拦，但若被改动过
+> 配置就不一定）等于绕过全部验证。
 
 tag 必须与 `metadata.yaml` 的 `version` 锁步（工作流会校验并拒绝不一致）。
-版本号沿用上游 `nonebot-plugin-parser-lite` 的对应版本。
-本版没有自动上游同步，所以升级 vendor 快照时需要手工确认版本号与上游一致。
+版本号沿用上游 `nonebot-plugin-parser-lite` 的对应版本，由 sync 轨道随上游
+roll 自动再生 —— 人不构造版本号，也不手改生成工件。
 
 白名单与 `main.py` 桥接导入闭包的一致性由 `tests/test_release_manifest.py`
 机械钉扎 —— 新增桥接模块忘了登白名单，该测试会先红，而不是发布 zip 装载时
@@ -457,37 +456,34 @@ bash scripts/apply_branch_protection.sh
 > 显式写出来是为了避免「默认分支被改回 `main` 时静默跑旧定义」——
 > 那个失败形态极难排查（见 12.2）。
 
-**发布（两步）**：
+**发布（一步，tag 自动）**：
 
 ```bash
-# 1) promote：推一个以保留前缀开头的提交到 dev
 git checkout dev && git pull
-git commit --allow-empty -m "[merge] release v1.2.0"
+git commit --allow-empty -m "[merge] release"
 git push origin dev
-
-# 2) 在 promote 出来的 main sha 上打 tag
-git fetch origin
-git tag v1.2.0 origin/main
-git push origin v1.2.0
+# → promote 移动 main → 尾部比对 metadata 版本与已发布 tag
+#   → 不一致则自动打 v* 并派发 release.yml（人工放行环节不存在）
 ```
 
 **回滚**：见第 11 节。要点是**不改写 `main`，不改写 tag** ——
-`git revert` 到 `dev`，重新 promote，打新的 patch 版本号。
+`git revert` 到 `dev`，重新 promote；同版本号不会再出 Release
+（tag 不可变），修复经 dev 源码包触达用户，发布面等上游 bump。
 
-### 12.1 没有自动告警 issue
+### 12.1 告警 issue：只有 sync 管道一个出口
 
-上一版的 `sync-upstream` 会开两类告警 issue（`upstream lagging` /
-`sync-upstream roll failed`）并自动对账关闭。**本版没有 `sync-upstream`，
-因此没有自动告警 issue。**
+`sync-upstream` 失败（供应链判据命中 / roll 序列红）会自动开 Issue，
+label `upstream-sync`，去重：未关闭的同题 Issue 只追加评论。
+「管道红才需人工」的契约全靠这个出口进入人的视野——**别把它静音**。
+其余轨道没有自动告警 issue，替代手段：
 
-替代手段：
-
+- sync 管道的失败会**自动开 Issue**（label `upstream-sync`，去重：未关闭的
+  同题只追加评论）——「管道红」的语义就是从这里进入人的视野
 - 工作流失败会发到 **GitHub 的通知**（你订阅了该仓库就会收到邮件/站内通知）
 - 分支持续失败可以在 **Actions 页面**按分支筛选查看
 
-> 这是「更简单」的一个代价：**没有聚合成 issue 的告警面板**。
-> 若后来觉得需要，恢复 `sync-upstream` 的工作量不小（它依赖 `lkg` 分支、
-> `SYNC_PAT`、以及一整套告警生命周期逻辑），建议先评估是否真的需要。
+> 这是「更简单」的一个代价：**没有聚合成 issue 的告警面板**，只有 sync
+> 轨道那一个失败出口；其余工作流失败靠 GitHub 通知。
 
 ### 12.2 不同事件读不同 ref 的 workflow 定义
 
@@ -569,7 +565,7 @@ git push origin v1.2.0
 | 复用 CI 逻辑而非多处手抄（GitHub 官方推荐 composite action） | `.github/actions/setup-env/` | `test_every_delegating_workflow_uses_the_shared_setup_action` |
 | ~~**SAST**（Scorecard `SAST`）~~ **本版主动不做** | 无（见 13.4） | `test_sast_is_deliberately_absent_and_recorded_as_such` |
 | **分支保护**（Scorecard `Branch-Protection`） | 服务端配置，期望值见 `doc/BRANCHING.md` | `test_protection_script_enforces_admins_and_reads_back` |
-| **环境人工放行**（GitHub environments，可选增强） | `release.yml` 的 `environment: release` | `test_release_timeout_covers_human_approval_if_environment_used` |
+| **发布轨无人工放行**（契约：人不批内容只修红；闸=sync 判据+tag→main 尖端） | `release.yml` 不声明 `environment` | `test_release_is_fully_autonomous_without_approval_pause` |
 | ~~**强制力不漂移**每日巡检~~ **本版已移除**（缺口见 13.5） | 无 | `test_protection_drift_is_acknowledged_as_unmonitored` |
 
 ### 13.1 依赖安装只有一处定义
@@ -660,8 +656,8 @@ gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
 | --- | --- | --- |
 | **CodeQL / SAST** | 会引入一个**异步**的失败来源（首次扫描 5–10 分钟）且结果需人判读。对单人维护 + 运维使用的场景，收益低于理解成本 | 低（加一个工作流文件 + 把它写进必需检查） |
 | **配置漂移每日巡检** | 为了「更简单」撤掉。缺口已如实声明（见 13.5） | 中（要重建巡检逻辑 + `issues: write`） |
-| **上游自动同步** | 依赖已移除的 `lkg` 分支与 `SYNC_PAT` | 高（要一并恢复分支、Secret、告警生命周期） |
-| **`release` 环境人工放行** | **能力保留**（`release.yml` 仍声明 `environment: release`），但需你去 Settings 创建环境才生效。属可选增强 | 低（建环境 + 填 reviewer） |
+| **上游 roll 的人工内容审阅** | 维护契约：人不批内容、只修管道红；安全面由机械判据承接（`scripts/upstream_sync.py` 异常即红 + 三层校验 + 契约测试） | 高（等于改契约：sync 停下等人批） |
+| **`release` 环境人工放行** | 主动拆除：private+Free 时代它是想象中的门，单人全自动发布下它是停摆点（超时含审批等待、self-review 死锁）。闸已换机器判定 | 低（加回 environment + 建环境，但会停住自动发布） |
 | **CODEOWNERS 强制 review** | 需要 `required_approving_review_count ≥ 1`，而单人维护者**无法批准自己的 PR** —— 会自我死锁 | 中（协作方变多后应开启，同时重评 `enforce_admins`） |
 | commit signing / vigilant mode | 需签名 key 分发，单人仓库收益有限；发布侧已由 SLSA attestation 覆盖 | 低 |
 | 历史泄漏扫描（gitleaks 等） | 建仓前手动扫过一次全历史（凭证 / 大文件 / 内网地址，均无命中） | 低 |
@@ -725,20 +721,18 @@ zizmor 的 `self-repository` 审计（v1.30.0 起）建议把仓库内 action �
 3. Settings → General：默认分支改为 dev
 4. Settings → General：只留 squash merge，开自动删除 head 分支
 5. Settings → Code security：开 secret scanning + Dependabot alerts（建议）
-6. Settings → Environments：建 release 环境 + required reviewers（可选，建议）
-     ⚠️ 不要勾 Prevent self-review —— 单人维护者将无法批准自己的发布
-7. bash scripts/apply_branch_protection.sh    ← 打分支保护（幂等 + 回读校验）
-8. 验证四件事（见下表）
+6. bash scripts/apply_branch_protection.sh    ← 打分支保护（幂等 + 回读校验）
+7. 验证四件事（见下表）
 ```
 
-**第 8 步的验证清单** —— 不要跳过，尤其是后两项：
+**第 7 步的验证清单** —— 不要跳过，尤其是后两项：
 
 | # | 验证 | 期望 |
 | --- | --- | --- |
 | 1 | 开一个 base=`dev` 的测试 PR | 三项必需检查阻塞合并 |
 | 2 | 开一个 base=`main` 的测试 PR | `main-pr-target-guard` 判红 |
 | 3 | `git push origin main` | **被服务端拒绝**（证明 `enforce_admins` 生效） |
-| 4 | 往 `dev` 推一个 `[merge] xxx` 提交 | `main` 被移动到 `dev` 尖端 |
+| 4 | 往 `dev` 推一个 `[merge] xxx` 提交 | `main` 被移动到 `dev` 尖端（版本 ≠ 已发布 tag 时自动打 tag 并派发 release） |
 
 第 7 步**必须在第 2 步之后**：要先把工作流文件推上去，必需检查的 context
 才有对应的 job 存在。第 3 步是唯一能证明「强制力真实存在」的动作。
