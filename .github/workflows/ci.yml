@@ -118,17 +118,21 @@ jobs:
       # 就会以 cryptic traceback 收场，或干脆无声降级。
       - name: 断言 astrbot 导入链完整（--no-deps 的传递依赖须齐备）
         run: python scripts/check_test_deps.py
-      # 浅克隆上游（branch 取 sync-state，钉在 standalone 快照）：启用
+      # 浅克隆上游（钉 sync-state 的 standalone_sha，而非分支 HEAD）：启用
       # verify_vendor 第 3 层 + 让 test_*_when_clone_present / generate_config
       # --check / run_injection --offline --check 在 CI 上有活体对照。
+      # 按 HEAD 克隆会随上游自动发布漂移出「vendor ≠ 克隆」的假红——
+      # 第 3 层比对的基准是本次快照对应的那次 roll（2026-09-24 CI 首跑实证）。
       # 无克隆时那 4 条按设计 SKIP，skip 门禁已按原因放行。
       - name: 浅克隆上游（启用 vendor 第 3 层与生成工件 --check）
         run: |
           set -euo pipefail
-          BRANCH=$(python -c "import json; print(json.load(open('.github/sync-state.json'))['upstream_branch'])")
-          git clone --depth 1 --branch "$BRANCH" \
-            https://github.com/sokoko-org/nonebot-plugin-parser-lite.git \
-            .sync-work/upstream
+          SHA=$(python -c "import json; print(json.load(open('.github/sync-state.json'))['standalone_sha'])")
+          git init -q .sync-work/upstream
+          git -C .sync-work/upstream remote add origin \
+            https://github.com/sokoko-org/nonebot-plugin-parser-lite.git
+          git -C .sync-work/upstream fetch -q --depth 1 origin "$SHA"
+          git -C .sync-work/upstream checkout -q FETCH_HEAD
       - name: vendor 三层校验（含上游逐字节比对）
         run: python scripts/verify_vendor.py
       # generate_config --check 依赖不入库的 vendor_analysis.json，CI 上改走
