@@ -1,0 +1,174 @@
+name: sync-upstream
+
+# 上游自动同步（维护契约：人只修「管道红了」，不审阅上游内容）。
+# 轨道：sync 以「全自动普通开发者」身份走 PR 轨道——
+#   cron → 变更检测 → 供应链判据（scripts/upstream_sync.py，异常即红）
+#        → scripts/roll_local.py 完整 roll 序列（整树重建 vendor + 两层注入
+#          + 三层校验 + 全量契约测试，与本地同一实现，杜绝双轨漂移）
+#        → 开 PR（标题带 [merge] 保留前缀）→ CI 绿后 bot 自行 squash-merge
+#        → dev push 触发 promote → main 指针移动 →（promote 尾部）自动 tag
+#        → release.yml 构建发布物。
+# 人工闸只有两处：PR 的 CI 红了不合并（管道停在 dev 之前）；供应链判据命中
+# 或 roll 失败时开 Issue。confirm=<新上游 sha> 手动触发是判据的人工放行通道。
+#
+# 为什么必须走 PR 轨道而不是直推 dev：dev 开着 required_pull_request_reviews
+# （0 批准），GITHUB_TOKEN 的 Actions bot 无直推权；且 GITHUB_TOKEN 的 push
+# 不触发工作流，而 bot 合并 PR 属于 pull_request 串行事件，目标分支的 push
+# 工作流（ci/promote）会运行。
+#
+# cron 只从默认分支读定义（默认分支 = dev，见 doc/BRANCHING.md）。
+
+on:
+  schedule:
+    - cron: "30 4 * * *" # UTC；错开整点
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 供应链判据的人工放行：填本次命中的新上游 sha 才生效
+        required: false
+        default: ""
+      dry_run:
+        description: 只检测与判定，不 roll、不开 PR、不开 Issue
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false # 半途而废的 roll 比没 roll 糟
+
+env:
+  UPSTREAM_URL: https://github.com/sokoko-org/nonebot-plugin-parser-lite.git
+  SYNC_LABEL: upstream-sync
+
+jobs:
+  sync:
+    name: roll upstream → PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # 含完整契约测试；上游网络抖动重试也吃预算
+    permissions:
+      contents: write # 推 sync/ 分支
+      pull-requests: write # 开 PR + squash-merge
+      issues: write # 失败通知（去重）
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # roll 序列末尾跑全量契约测试（astrbot 导入链必须完整）——与 ci.yml 的
+      # test job 同构的依赖面，走同一 setup-env，杜绝手抄漂移。
+      - uses: ./.github/actions/setup-env # zizmor: ignore[self-repository] actionlint 尚不支持 $/
+
+      - name: 变更检测与供应链判据
+        id: gate
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          NEW="$(git ls-remote "$UPSTREAM_URL" refs/heads/standalone | cut -f1)"
+          [ -n "$NEW" ] || { echo "::error::ls-remote standalone 为空"; exit 1; }
+          OLD="$(python -c "import json; print(json.load(open('.github/sync-state.json'))['standalone_sha'])")"
+          if [ "$NEW" = "$OLD" ]; then
+            echo "上游无变化：standalone 停在 ${NEW:0:12}"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "new_sha=$NEW" >> "$GITHUB_OUTPUT"
+
+          # 两棵树都要在本地：判据是 tree-to-tree diff。standalone 是孤儿
+          # 单提交分支，旧构建可能已不可达——fetch 不到旧 sha 即 fail-closed
+          # （判不了 = 红，不「退回只比内容哈希」的降级）。
+          git init -q .sync-work/upstream
+          git -C .sync-work/upstream remote add origin "$UPSTREAM_URL"
+          ok=false
+          for attempt in 1 2 3; do
+            if git -C .sync-work/upstream fetch -q --depth 1 origin "$OLD" "$NEW"; then
+              ok=true; break
+            fi
+            echo "fetch 失败（第 $attempt 次），重试…"; sleep $((attempt * 10))
+          done
+          $ok || { echo "::error::上游 sha 对象取不到（旧构建可能已被 GC），无法判定"; exit 1; }
+
+          if python scripts/upstream_sync.py classify \
+               --repo .sync-work/upstream --old "$OLD" --new "$NEW" \
+               --json /tmp/sync-report.json; then
+            sed 's/^/  /' /tmp/sync-report.json
+            exit 0
+          fi
+          # classify 约定：1=判据命中；其余（2 用法/目标失败）也按红处理——
+          # 无法判定本身就是失败
+          if [ "$CONFIRM" = "$NEW" ]; then
+            echo "::warning::供应链判据命中，但 confirm 与本次新 sha 一致——人工放行续跑"
+            cat /tmp/sync-report.json >&2 || true
+            exit 0
+          fi
+          echo "::error::供应链判据命中（异常即红），详见通知 Issue"
+          cat /tmp/sync-report.json >&2 || true
+          exit 1
+
+      - name: 执行 roll 序列（vendor 整树重建 + 注入 + 校验 + 契约测试）
+        if: steps.gate.outputs.changed == 'true' && github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/roll_local.py
+          # 后续步骤的门闩：roll 是否真的产生了提交（PR 预览跳过 / 竞态无变化
+          # 两条路径都零提交）
+          if git log -1 --format=%s | grep -q '^sync: roll'; then
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::roll 未产生提交（PR 预览构建跳过 / 无变化），流程停于本地"
+          fi
+        id: roll
+
+      - name: 开 PR 并挂自动合并
+        if: steps.roll.outputs.committed == 'true' && github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          VERSION="$(python -c "import tomllib; print(tomllib.load(open('vendor/_upstream/pyproject.toml','rb'))['project']['version'])")"
+          BRANCH="sync/upstream-v${VERSION}"
+          git checkout -q -b "$BRANCH"
+          # 幂等重放：同一版本已有 open PR（上次红后重试）则更新其 head，不重复开
+          EXISTING="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            git push --force-with-lease -q origin "$BRANCH"
+            echo "已更新 open PR #${EXISTING}（${BRANCH}）"
+          else
+            git push -q origin "$BRANCH"
+            {
+              echo "## 上游同步 v${VERSION}"
+              echo ""
+              echo "由 sync-upstream 工作流生成（scripts/roll_local.py 完整序列）。"
+              echo ""
+              echo '```json'
+              cat /tmp/sync-report.json 2>/dev/null || echo "（无供应链判据报告）"
+              echo '```'
+            } > /tmp/pr-body.md
+            gh pr create --base dev --head "$BRANCH" \
+              --title "[merge] sync: v${VERSION}" \
+              --body-file /tmp/pr-body.md
+          fi
+          # required checks 全绿后由 GitHub 完成 squash-merge；红了停在原地等人
+          gh pr merge --squash --auto "$BRANCH" || \
+            echo "::warning::auto-merge 挂载失败，需人工检查 PR 状态"
+
+      - name: 失败通知（去重开 Issue）
+        if: failure() && github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          if EXISTING="$(gh issue list --state open --label "$SYNC_LABEL" --json number --jq '.[0].number // empty')" && [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "再次失败：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          else
+            gh issue create --label "$SYNC_LABEL" \
+              --title "上游同步管道失败（${GITHUB_WORKFLOW}）" \
+              --body "失败运行：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}；前因详见该运行日志，管道语义见 doc/BRANCHING.md 的同步轨道一节。"
+          fi

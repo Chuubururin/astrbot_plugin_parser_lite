@@ -32,9 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ANALYZER_PATH = REPO_ROOT / "scripts" / "analyze_vendor.py"
 GENERATOR_PATH = REPO_ROOT / "scripts" / "generate_config.py"
 EXTRACTOR_PATH = REPO_ROOT / "scripts" / "extract_display_texts.py"
-# ⚠️ 这个路径**有意不存在**（2026-09-19 第二次重构移除了上游自动同步）。
-# 保留常量是为了让 ``test_retired_sync_workflow_contracts_are_recorded`` 能
-# 明确断言「它确实不在」，而不是靠字符串比较。恢复上游同步时一并恢复它。
+# 上游同步工作流（在役）：roll 序列由 scripts/roll_local.py 单实现承载，
+# 本文件只守护「工作流没有把注入面抄成第二份」这一层。
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "sync-upstream.yml"
 
 ANALYSIS_PATH = REPO_ROOT / "vendor_analysis.json"
@@ -696,63 +695,69 @@ def test_generator_rejects_bad_version_at_sink(
 
 
 # ---------------------------------------------------------------------------
-# 退役契约的墓碑（2026-09-19 第二次重构）
+# sync-upstream 在役契约：roll 序列单实现，工作流只做编排
 # ---------------------------------------------------------------------------
 #
-# 本节取代了 5 个守护 ``sync-upstream.yml`` 的测试。它们全部是花过学费的断言：
+# 前身是 2026-09-19 的「退役墓碑」，其列出的学费已按新形态归位：
 #
-#   · test_sync_workflow_carries_all_generated_artifacts
-#       提交清单漏项 ⇒ roll PR 带旧桥工件配新 vendor，上游文案/参数**静默失效**。
-#   · test_sync_workflow_state_write_keeps_trailing_newline
-#       state 缺尾换行 ⇒ end-of-file-fixer 在 sync PR 上变红 ⇒ required check
-#       失败 ⇒ automerge **永不满足**（2026-09-18 修）。
-#   · test_sync_workflow_automerge_exclusions_cover_injection_artifacts
-#       排除清单漏项 ⇒ 注入工件被误判为「触碰 vendor 之外」⇒ automerge 被永久
-#       禁用；反向地 ``:!templates`` 必须不存在（模板是卡面渲染的字节权威，
-#       CONTEXT.md「分层 automerge」要求转人工）—— 2026-09-17 评审 M2 抓到过
-#       代码与文档相反。
-#   · test_sync_workflow_layering_judgement_is_not_vacuous
-#       原实现用 ``git status --porcelain`` 配一份恰等于 roll 全部写入路径的
-#       排除清单 ⇒ ``infra_changed`` **构造性恒 0**，分层门形同虚设。
-#   · test_sync_workflow_surfaces_maintenance_checklist_as_advisory
-#       维护清单是刻意 tripwire，必须 advisory（捕获 rc）而非硬门禁 ——
-#       硬门禁会让 PR 根本开不出来，人工反而看不到该看的东西。
-#
-# 本版移除上游同步（用户选择「最简单档」），上述守护的对象不存在了。
-# 墓碑的作用不是纪念，是**恢复时的检查清单**。
+#   · 提交清单漏项 ⇒ roll 带旧桥工件配新 vendor（上游文案/参数静默失效）：
+#     清单现在住在 roll_local.ROLL_ADD_PATHS，本文件钉它对生成工件的覆盖；
+#   · state 缺尾换行 ⇒ end-of-file-fixer 在 sync PR 上判红 ⇒ automerge
+#     永不满足：_state_write 的字节公式由功能测试钉住；
+#   · 分层 automerge 排除清单（旧「触碰 vendor 之外转人工」设计）随
+#     「sync 只合并自己产出的 PR」的新轨道消亡——bot PR 的内容域就是
+#     ROLL_ADD_PATHS，无需排除清单这道二级防线。
 
 
-def test_retired_sync_workflow_contracts_are_recorded() -> None:
-    """sync-upstream.yml 已退役，且退役这件事被记录下来。
+def _load_roll_local() -> ModuleType:
+    return _load_module("roll_local", REPO_ROOT / "scripts" / "roll_local.py")
 
-    为什么需要这条断言（而不是简单地删掉那 5 个测试）：
-    被测对象被**有意删除**与**被误删**，在本仓库里必须可区分。
-    前者要写墓碑（本测试），后者会被 ``test_branch_model.py`` 的
-    ``test_removed_workflows_stay_removed`` 抓住。两条断言分工不同。
 
-    恢复上游同步时，请把上面注释里列的 5 条契约一并恢复 —— 它们各自对应
-    一次真实事故或评审发现，不是理论推演。
-    """
-    assert not WORKFLOW_PATH.exists(), (
-        "sync-upstream.yml 又出现了。本版刻意移除了上游自动同步"
-        "（用户要求「更简单」）。若确实要恢复，请把本文件注释里列的 5 条契约"
-        "一并恢复，并更新 doc/BRANCHING.md §10 与 CONTRIBUTING.md 的工作流清单。"
-    )
+def test_sync_workflow_delegates_roll_sequence_to_shared_scripts() -> None:
+    """工作流必须委派 roll_local + upstream_sync，不得抄第二份注入/判据实现。"""
+    assert WORKFLOW_PATH.exists(), "sync-upstream.yml 缺失（工作流集合契约见 test_branch_model.py）"
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "scripts/roll_local.py" in text, "roll 序列必须走 roll_local 单实现"
+    assert "scripts/upstream_sync.py" in text, "供应链判据必须走 upstream_sync 单实现"
+    # 注入/校验是 roll_local 的内部步骤；工作流直呼其名 = 出现第二份编排事实
+    for forbidden in ("run_injection.py", "verify_vendor.py"):
+        assert forbidden not in text, f"工作流抄了 roll_local 内部步骤：{forbidden}"
 
-    # 墓碑必须能指认「退役了什么」，否则将来没人知道少了什么
-    doc = Path(__file__).read_text(encoding="utf-8")
-    for contract in (
-        "test_sync_workflow_carries_all_generated_artifacts",
-        "test_sync_workflow_state_write_keeps_trailing_newline",
-        "test_sync_workflow_automerge_exclusions_cover_injection_artifacts",
-        "test_sync_workflow_layering_judgement_is_not_vacuous",
-        "test_sync_workflow_surfaces_maintenance_checklist_as_advisory",
-    ):
-        assert contract in doc, (
-            f"墓碑里丢了已退役契约的名字：{contract}。"
-            "墓碑的价值就在于恢复时能查到原文，删掉名字等于没记。"
-        )
 
-    # 生成管线本身仍在役 —— 移除的是「自动同步」，不是「代码生成」
-    assert GENERATOR_PATH.exists(), "generate_config.py 不应随 sync-upstream 一起消失"
-    assert ANALYZER_PATH.exists(), "analyze_vendor.py 不应随 sync-upstream 一起消失"
+def test_sync_workflow_pr_title_uses_reserved_merge_prefix() -> None:
+    """sync PR 标题带 [merge] 保留前缀——squash 合并后 promote 的触发开关。"""
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "[merge] sync:" in text
+
+
+def test_roll_commit_list_covers_all_generated_artifacts() -> None:
+    """ROLL_ADD_PATHS 必须覆盖全部生成工件——漏一项 = sync PR 带旧工件配新 vendor。"""
+    roll = _load_roll_local()
+    committed = {str(p).rstrip("/") for p in roll.ROLL_ADD_PATHS}
+    required = {
+        "vendor",
+        "metadata.yaml",
+        "_conf_schema.json",
+        "bridge/gen_config.py",
+        "bridge/texts.py",
+        "bridge/render_params.py",
+        "templates",
+        "README.md",
+        ".github/sync-state.json",
+        "requirements.txt",
+    }
+    missing = {
+        path
+        for path in required
+        if not any(path == c or path.startswith(c + "/") for c in committed)
+    }
+    assert not missing, f"roll 提交清单缺生成工件：{sorted(missing)}"
+
+
+def test_state_write_keeps_trailing_newline(tmp_path: Path) -> None:
+    """sync-state.json 必须带尾换行——否则 end-of-file-fixer 在 sync PR 上判红。"""
+    roll = _load_roll_local()
+    state = tmp_path / "sync-state.json"
+    roll.STATE_PATH = state
+    roll._state_write({"standalone_sha": "x" * 40})
+    assert state.read_bytes().endswith(b"\n")

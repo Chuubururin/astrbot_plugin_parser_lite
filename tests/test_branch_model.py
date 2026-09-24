@@ -8,7 +8,8 @@
   required checks（4 项，含 CodeQL）。dev → main 走 promote 工作流做**快进推送**。
 - **新（本文件守护）**：只留两个分支。`main` 是**发布指针**，由
   `promote-dev-to-main.yml` 用 `git push --force-with-lease` **移动**过去，
-  不产生 merge commit。CodeQL、每日巡检、sync-upstream 全部移除。
+  不产生 merge commit。CodeQL 与每日巡检移除；上游自动同步以「sync 走
+  PR 轨道」的形态在役（roll 序列单实现 = scripts/roll_local.py）。
 
 **本模型最关键、也最容易被人「好心改坏」的一条**：
 `main` **不能**开启分支保护的 "Require a pull request before merging"
@@ -22,7 +23,7 @@
 - `dev` 的保护里有 required checks；
 - 必需检查名在三处（workflow / 脚本 / 文档）逐字一致；
 - promote 用 lease 推送、在 main 有独有提交时响亮失败；
-- 被移除的工作流（codeql / protection-audit / sync-upstream）**不得复活**；
+- 被移除的工作流（codeql / protection-audit）**不得复活**；
 - 保留前缀 `[merge]` / `chore(release):` 的使用纪律被写进文档。
 """
 
@@ -45,12 +46,13 @@ RELEASE_PATH = WORKFLOWS / "release.yml"
 BRANCHING_DOC = REPO_ROOT / "doc" / "BRANCHING.md"
 PROTECTION_SCRIPT = REPO_ROOT / "scripts" / "apply_branch_protection.sh"
 
-# 本版**只应存在**这四个工作流。多一个少一个都要在这里显式决策。
+# 在役工作流的**完整集合**。多一个少一个都要在这里显式决策。
 EXPECTED_WORKFLOWS = {
     "ci.yml",
     "main-pr-target-guard.yml",
     "promote-dev-to-main.yml",
     "release.yml",
+    "sync-upstream.yml",
 }
 
 # 分支保护上的必需检查 context —— 必须与各工作流的 jobs.<id>.name 逐字一致。
@@ -85,23 +87,22 @@ def _workflow_triggers(doc: dict) -> dict:
 # 任何新增/删除都必须改动这个集合，从而在 code review 里被看见。
 
 
-def test_only_the_four_core_workflows_exist() -> None:
-    """只应有四个工作流：ci / guard / promote / release。"""
+def test_workflow_inventory_is_exactly_the_expected_set() -> None:
+    """工作流集合就是 EXPECTED_WORKFLOWS，不多不少。"""
     actual = {p.name for p in WORKFLOWS.glob("*.yml")}
     assert actual == EXPECTED_WORKFLOWS, (
         f"工作流集合变了。期望 {sorted(EXPECTED_WORKFLOWS)}，实得 {sorted(actual)}。\n"
-        "本版刻意只保留四个（用户要求「更简单」）。新增工作流会引入新的失败来源与"
-        "需要运维理解的环节，若确实需要，请同时更新 doc/BRANCHING.md、"
-        "CONTRIBUTING.md 的矩阵与本测试。"
+        "工作流数量本身就是复杂度：新增/删除都必须同时改动这个集合、"
+        "doc/BRANCHING.md 与 CONTRIBUTING.md 的矩阵，从而在 code review 里被看见。"
     )
 
 
 @pytest.mark.parametrize(
     "name",
-    ["codeql.yml", "protection-audit.yml", "sync-upstream.yml"],
+    ["codeql.yml", "protection-audit.yml"],
 )
 def test_removed_workflows_stay_removed(name: str) -> None:
-    """被移除的三个工作流不得复活。
+    """被移除的两个工作流不得复活。
 
     逐个给理由，因为「加回来」的动机各不相同：
 
@@ -110,9 +111,6 @@ def test_removed_workflows_stay_removed(name: str) -> None:
       注意：它**不属于** required checks 了，所以加回来不会被保护挡住，
       反而会静默地多跑一个没人看的分析 —— 更需要显式断言。
     - ``protection-audit.yml``：每日巡检。用户明确要求去掉。
-    - ``sync-upstream.yml``：与 lkg 分支绑定的上游自动同步。本版没有 lkg
-      分支，它跑起来会因为 lkg 不存在而失败。若要恢复上游同步，需一并
-      恢复 lkg 及其文档说明。
     """
     assert not (WORKFLOWS / name).exists(), (
         f"{name} 又出现了。本版刻意移除了它（用户要求只保留核心流程）。"
@@ -612,7 +610,7 @@ def test_docs_contain_per_branch_workflow_matrix() -> None:
     assert rows, (
         "CONTRIBUTING.md 的工作流清单小节里没有表格行；清单必须用表格给出（散文清单无法被机械校验）"
     )
-    for gone in ("codeql.yml", "protection-audit.yml", "sync-upstream.yml"):
+    for gone in ("codeql.yml", "protection-audit.yml"):
         assert not any(f"`{gone}`" in row for row in rows), (
             f"CONTRIBUTING.md 的在役工作流表格里仍列着已删除的 {gone} —— "
             "表格行是「在役」声明，必须删掉该行；"
@@ -647,7 +645,7 @@ def test_branching_doc_does_not_reference_removed_workflows() -> None:
     **现在时**的架构描述句里，才判违规 —— 那才是「让运维以为它还在跑」。
     """
     doc = BRANCHING_DOC.read_text(encoding="utf-8")
-    gone_names = ("codeql.yml", "protection-audit.yml", "sync-upstream.yml")
+    gone_names = ("codeql.yml", "protection-audit.yml")
     # 「已不在役」的限定词：出现这些词就说明这句话在讲历史或不做，而非在役
     retired_markers = (
         "上一版",

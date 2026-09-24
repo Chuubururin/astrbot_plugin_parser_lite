@@ -367,14 +367,15 @@ gh workflow run promote-dev-to-main --ref dev
 
   | 文件 | 触发 | 作用 |
   | --- | --- | --- |
+  | `sync-upstream.yml` | 每日 cron + 手动 | 上游检测 → 供应链判据 → roll 序列（委派 `roll_local.py`）→ 开 PR 并挂 auto-merge |
   | `ci.yml` | PR（任意 base）+ push 到 `dev` | 三道 required checks：`lint` / `typecheck` / `test` |
   | `main-pr-target-guard.yml` | PR base=`main` | 判红并提示「请把 PR 开向 dev」 |
   | `promote-dev-to-main.yml` | push 到 `dev`（保留前缀）+ `chore.*` tag + 手动 | 把 `main` **指针移动**到 `dev` 尖端 |
   | `release.yml` | push tag `v*` | 构建 zip + Syft SBOM + SLSA attestation → 证明落成 release 附件 → 发布 |
 
-  **本版只有四个工作流**（用户要求「更简单」）。上一版的 `codeql.yml`、
-  `protection-audit.yml`、`sync-upstream.yml` 已移除，理由记在
-  `doc/BRANCHING.md` §10「明确不做的项」。
+  **本版在役五个工作流**。上一版的 `codeql.yml`、`protection-audit.yml`
+  已移除，理由记在 `doc/BRANCHING.md` §10；`sync-upstream.yml` 于
+  2026-09-25 以「PR 轨道」形态恢复在役（维护契约：人只修管道红，不审上游内容）。
 
   依赖关系（谁等谁）：
 
@@ -573,7 +574,7 @@ git push origin v1.2.0
 
 ### 13.1 依赖安装只有一处定义
 
-`.github/actions/setup-env/action.yml` 是**唯一**的依赖安装实现，四个工作流的
+`.github/actions/setup-env/action.yml` 是**唯一**的依赖安装实现，各工作流的
 五个 job 全部委派给它。三个输入：
 
 | 输入 | 取值 | 用途 |
@@ -720,7 +721,7 @@ zizmor 的 `self-repository` 审计（v1.30.0 起）建议把仓库内 action �
 
 ```
 1. 建 public 空仓库（不勾 README / .gitignore / license）
-2. push dev 与 main 两个分支              ← 四个 workflow 文件随之就位
+2. push dev 与 main 两个分支              ← 五个 workflow 文件随之就位
 3. Settings → General：默认分支改为 dev
 4. Settings → General：只留 squash merge，开自动删除 head 分支
 5. Settings → Code security：开 secret scanning + Dependabot alerts（建议）

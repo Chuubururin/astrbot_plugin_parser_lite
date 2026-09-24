@@ -57,10 +57,10 @@ PRECOMMIT_CONFIG = REPO_ROOT / "config" / ".pre-commit-config.yaml"
 # ``test_delegating_workflow_list_is_not_stale``）：名单只应包含**确实装依赖**
 # 的工作流，两边必须互相印证，不许沦为摆设。
 #
-# 2026-09-19 第二次重构：``promote-dev-to-main.yml`` 移出名单 —— 它变成了纯
-# ref 手术（decide → fetch → cherry → push），不装依赖也不跑门禁。
-# ``sync-upstream.yml`` 随本版移除（它依赖 lkg 分支）。若将来恢复，记得加回这里。
-DELEGATING_WORKFLOWS = ("ci.yml", "release.yml")
+# 名单 = 经 setup-env 装依赖的工作流。`promote-dev-to-main.yml` 是纯 ref 手术
+# （decide → fetch → cherry → push），不装依赖故不入列；
+# `sync-upstream.yml` 跑完整 roll 序列（含契约测试），必须在列。
+DELEGATING_WORKFLOWS = ("ci.yml", "release.yml", "sync-upstream.yml")
 
 # 门禁期需要「裸 python -m <mod>」的工具：模块名 → pip 包名。
 GATE_MODULE_TO_PACKAGE = {"ruff": "ruff", "pytest": "pytest", "mypy": "mypy"}
@@ -113,15 +113,18 @@ def _install_commands(text: str) -> str:
 def _needs_dependencies(doc: dict) -> bool:
     """这个工作流是否**真的**需要装 Python 依赖？
 
-    判据是行为而非声明：出现 ``pip install``、``python -m <mod>``、
-    ``python3 -m <mod>`` 之一就算。用它取代「按名单点名」——
-    **名单会漂移，行为不会**。
+    判据是行为而非声明：步骤里出现 ``pip install``、``python -m <mod>``、
+    ``python3 -m <mod>``，或**委派了 setup-env**（经 action 装也算装——
+    早先版本看不到这条，「装了依赖却没进名单」的反向对账对它失效），
+    任一即算。用它取代「按名单点名」—— **名单会漂移，行为不会**。
     """
     for step in _all_steps(doc):
         body = str(step.get("run", ""))
         if "pip install" in body:
             return True
         if re.search(r"python3?\s+-m\s+[a-z_]", body):
+            return True
+        if "actions/setup-env" in str(step.get("uses", "")):
             return True
     return False
 
