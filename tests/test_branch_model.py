@@ -500,12 +500,12 @@ def test_promote_autotags_release_at_main_tip() -> None:
 
 
 def test_release_accepts_dispatch_and_verifies_main_lineage() -> None:
-    """release 双入口（v* push + dispatch tag_name），且机器校验 tag 在 main 历史线。
+    """release 双入口（v* push + dispatch tag_name），且机器校验 tag 指 main 尖端。
 
-    「tag ∈ main 历史（祖先）」校验把 BRANCHING「发布只在 main 上打 tag」从人工纪律升格为
-    门禁：dev 上未经 promote 的旁路 tag 不再可能产出 Release。
-    （判据取「祖先」而非「= 尖端」：版本未变的修复把 main 前移后补发上一
-    版本是合法补救，2026-09-25 实弹证明尖端相等判据会把它锁死。）
+    main 尖端校验把 BRANCHING「发布只在 main 上打 tag」从人工纪律升格为
+    门禁：dev 上未经 promote 的旁路 tag 不再可能产出 Release
+    （判据取「祖先」而非「= 尖端」：版本未变的修复把 main 前移后，补发
+    上一版本是合法补救——尖端相等判据会把它锁死，2026-09-25 实弹抓到）。
     """
     doc = _load(RELEASE_PATH)
     triggers = _workflow_triggers(doc)
