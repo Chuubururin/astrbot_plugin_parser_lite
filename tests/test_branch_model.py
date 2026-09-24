@@ -534,22 +534,24 @@ def test_release_whitelist_still_present() -> None:
     )
 
 
-def test_release_timeout_covers_human_approval_if_environment_used() -> None:
-    """若 release job 声明了 environment，其超时必须覆盖人工审批等待。
+def test_release_is_fully_autonomous_without_approval_pause() -> None:
+    """release job 不得有等待人的闸门：契约里没有人工放行环节。
 
-    ``timeout-minutes`` **包含**停在 environment 等批准的时长。
-    本版把 environment 的人工放行作为**可选**（用户选择「最简单」档），
-    所以这里只在声明了 environment 时做校验。
+    环境门在仓库历史上要么是想象（private+Free 不供给），要么是单人
+    自动发布下的停摆点（超时含审批等待、self-review 死锁）。安全闸已
+    前移为机器判定：sync 供应链判据 + 「tag 必指 main 尖端」+ PR 轨道
+    required checks。想恢复人拦环节，先改 BRANCHING 的维护契约，
+    不要顺手加 environment。
     """
     doc = _load(RELEASE_PATH)
     job = doc["jobs"]["release"]
-    if job.get("environment") is None:
-        pytest.skip("本版未启用 environment 人工放行（用户选择了最简档）")
-    timeout = job.get("timeout-minutes", 0)
-    assert timeout >= 30, (
-        f"release job 的 timeout-minutes={timeout} 太短——它包含人工审批等待时间。"
-        "并且若开了 environment，文档必须提醒「不要勾 Prevent self-review」"
-        "（勾了单人维护者无法批准自己触发的发布，发布永久死锁）。"
+    assert "environment" not in job, (
+        "release job 出现了 environment 门——自动发布链会停在那里等人批准，"
+        "与「人不批 roll 内容」的契约冲突"
+    )
+    assert 0 < job.get("timeout-minutes", 0) <= 30, (
+        f"timeout={job.get('timeout-minutes')} 过大——大值是「超时含人工审批等待」"
+        "时代的遗留，现在只该覆盖构建与证明耗时"
     )
 
 

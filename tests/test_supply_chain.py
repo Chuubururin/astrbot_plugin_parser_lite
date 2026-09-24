@@ -538,47 +538,42 @@ def test_release_attaches_provenance_bundle_to_the_release() -> None:
         assert asset in upload, f"release.yml 归档了 {asset} 但没传给 gh release create"
 
 
-def test_release_keeps_least_privilege_and_protected_environment() -> None:
-    """发布 job 的权限必须是「顶层只读 + job 级按需」，且经人工放行环境。
+def test_release_keeps_least_privilege_without_approval_gate() -> None:
+    """发布 job 的权限必须是「顶层只读 + job 级按需」，且不带人工放行环境。
 
     依据：Scorecard 的 Token-Permissions（顶层只读、写权限下放到 job 级得满分）；
-    以及 GitHub 的 Secure use 指南（用 environment + required reviewer 保护
-    能签发 id-token 的发布作业）。
+    发布轨的完整性由机器判定承载（sync 供应链判据、tag→main 尖端校验、
+    确定性测试门禁），不存在「等人点批准」的环节（维护契约，见
+    doc/BRANCHING.md 与 release.yml 头注）。
     """
     doc = _load_yaml(WORKFLOWS / "release.yml")
     top = doc.get("permissions")
     assert top == {"contents": "read"}, f"release.yml 顶层权限必须只有 contents: read，实为 {top}"
     job = doc["jobs"]["release"]
-    assert job.get("environment") == "release", "发布 job 必须走受保护环境 release"
+    assert "environment" not in job, (
+        "发布 job 不应挂 environment——自动发布链会停在人工批准上；"
+        "安全闸已前移，恢复 environment 等于恢复已拆除的旧契约"
+    )
     assert set(job["permissions"]) == {"contents", "id-token", "attestations"}, (
         "发布 job 的写权限集合变了——请同步复核是否需要"
     )
     assert job["permissions"]["contents"] == "write"
 
 
-def test_release_environment_is_a_real_gate_for_public_repos() -> None:
-    """`environment: release` 在 public 下是**真的**门；注释不得再声称它不可用。
+def test_release_approval_narrative_is_fully_removed() -> None:
+    """人工放行的**叙事残留**清零：等待步骤、reviewers 指引都不许留下。
 
-    背景：旧仓库是 private + Free，官方文档明确写「如需在私有或内部仓库中访问
-    环境、环境机密和部署分支，必须使用 GitHub Pro、GitHub Team 或 GitHub
-    Enterprise」。也就是说那个 `environment:` 声明当时是**一道不存在的门**，
-    而注释承诺了「人工放行」——典型的「文档写了但平台没给」。
-
-    转 public 后它真实生效。两条要守：
-      ① 注释必须反映现状（否则误导后人以为门是假的，从而不配 reviewer）；
-      ② timeout 必须覆盖人工审批（见 test_branch_model.py 的同类断言）。
+    两个仓库的历史各证明过一次这道门的坏形态：private+Free 时代它是
+    「文档写了但平台没给」的想象门；public 时代它在单人自动发布契约下
+    是停摆点（超时含审批等待、prevent_self_review 可致永久死锁）。
+    现契约下发布物从 tag 到 Release 全程无人值守——留着旧指引会误导
+    后人去 Settings 配一道会把管道停死的闸。
     """
     text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
-    # 旧方案的过时陈述必须消失
-    for stale in ("部署保护规则", "私有仓库", "GitHub Pro"):
-        # 允许出现在「解释历史」的语境里，但不得出现在断言现状的句子中；
-        # 这里用较宽松的口径：只要「必须使用 GitHub Pro」这类硬陈述不在即可
-        assert f"必须使用 {stale}" not in text, f"release.yml 仍含过时的可用性陈述：{stale}"
-    # 现状必须写清
-    assert "required reviewers" in text or "required reviewer" in text, (
-        "release.yml 必须说明 environment 的 required reviewers 会真的阻塞 job"
-    )
-    assert "超时" in text or "timeout" in text, "必须说明超时包含人工审批等待时间"
+    for stale in ("等待人工放行", "required reviewer", "Prevent self-review", "停下等批准"):
+        assert stale not in text, f"release.yml 残留人工放行叙事：{stale}"
+    # 现状的安全闸必须写明位置（否则读者以为「没人看门」）
+    assert "main 尖端" in text, "release.yml 必须写明 tag→main 尖端的机器校验是发布闸之一"
 
 
 def test_sast_is_deliberately_absent_and_recorded_as_such() -> None:

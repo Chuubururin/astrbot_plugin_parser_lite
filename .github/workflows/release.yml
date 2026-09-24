@@ -1,43 +1,29 @@
 name: release
 
 # 发布信任链（SLSA 对标）：
-# tag v* → 确定性测试 → 构建 zip（显式白名单）→ Syft 生成 SPDX SBOM →
-# actions/attest 生成 SLSA provenance 与 SBOM 证明（id-token 短期 Sigstore
-# 证书）→ 证明 bundle 落成 release 附件（离线可验）→ 受保护环境 + 人工放行
-# → gh release。
+# v* tag（promote 尾部自动派发）→ tag 必指 main 尖端校验 → 确定性测试 →
+# 构建 zip（显式白名单）→ Syft 生成 SPDX SBOM → actions/attest 生成
+# SLSA provenance 与 SBOM 证明（id-token 短期 Sigstore 证书）→
+# 证明 bundle 落成 release 附件（离线可验）→ gh release。
 # 发布流程不恢复任何缓存（cache-poisoning 审计项）。
 # tag 规范：v{metadata.yaml 的 version}，直接沿用上游 nonebot-plugin-parser-lite
-# 版本号（如 v1.3.6）；版本由 sync PR 自动跟随，本 workflow 校验 tag 与之锁步。
+# 版本号；版本由 sync 随上游 roll 自动跟随，本 workflow 校验 tag 与之锁步。
 #
-# ── `environment: release` 现在是一道**真的门** ────────────────────────
-# 旧仓库是 private + Free，而官方文档写着：
-#   「如需在私有或内部仓库中访问环境、环境机密和部署分支，必须使用
-#     GitHub Pro、GitHub Team 或 GitHub Enterprise。」
-#   「使用 GitHub Free 计划的用户只能为公共仓库配置环境。」
-#   —— https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments
-# 也就是说：旧仓库里那个 `environment: release` 声明是**不存在的门**，
-# 注释里承诺的「人工放行」从未生效过 —— 典型的「文档写了但平台没给」。
+# ── 发布轨没有人工放行（维护契约）──────────────────────────────────────
+# 人不批准 roll 的内容，只修「管道红」。安全闸的位置因此全部前移/机器化：
+#   · sync-upstream 的供应链判据「异常即红」（scripts/upstream_sync.py）；
+#   · 本文件的「tag 必指 main 尖端」校验——非 promote 指针的 tag 出不了 Release；
+#   · PR 轨道的三道 required checks。
+# 旧仓库链上曾声明 `environment: release` 人工放行：在 private+Free 时代是
+# 想象中的门，在单人全自动契约下是停摆点（超时含审批等待、self-review 开关
+# 可致永久死锁），已随契约一并拆除。钉扎见 tests/test_supply_chain.py。
 #
-# 仓库转为 **public** 后环境保护规则可用，required reviewers 会**真的阻塞 job**。
-# 两个必须随之处理的后果：
-#   ① `timeout-minutes` **包含等待人工审批的时间**。旧值 15 分钟意味着
-#      reviewer 超时即失败。已提到 60 分钟。
-#   ② 环境的 `prevent_self_review` 必须**关**：单人维护下开着它，
-#      你无法批准自己 workflow run 触发的部署 → 发布永久卡死。
-#      该开关无法在 YAML 里声明，只能在 Settings → Environments 配。
-#
-#      ⚠️ 本版**没有自动巡检**保护这个开关。上一版曾用
-#      `protection-audit.yml` 每日巡检 GitHub 侧保护设置，该工作流已随
-#      「只留 4 个工作流」的精简一并移除。**这是一个已知缺口，doc/BRANCHING.md
-#      §9「服务端配置没有自动巡检」有完整声明与缓解措施，改动前请先读它。**
-#      以下三处只能靠人工纪律维护：
-#        · 本环境的 prevent_self_review（必须为 OFF）
-#        · `dev` 分支的 required_status_checks（须与 ci.yml 的 job name 逐字一致）
-#        · `main` 分支**不得**启用 required_pull_request_reviews 与
-#          required_status_checks（否则指针式快进合并会被永久锁死）
-#      自动对账能力仍在本仓库内、只是不在 CI 上：`scripts/apply_branch_protection.sh`
-#      可回读并校核当前设置（`--dry-run` 只比对不改），这也是
-#      `tests/test_branch_model.py` 守护的对象。改动 Settings 后请重放一次。
+# ⚠️ 服务端配置无自动巡检（如实声明的已知缺口，缓解见 doc/BRANCHING.md §9）。
+# 以下靠人工纪律维护，改动 Settings 后重放 scripts/apply_branch_protection.sh
+# （可回读校核）：
+#   · `dev` 的 required_status_checks（须与 ci.yml 的 job name 逐字一致）
+#   · `main` **不得**启用 required_pull_request_reviews 与
+#     required_status_checks（否则指针式快进合并被永久锁死）
 
 on:
   push:
@@ -65,14 +51,8 @@ jobs:
   release:
     name: build + attest + publish release
     runs-on: ubuntu-latest
-    # 60 而非 15：这个超时**包含人工审批的等待时间**（见文件头 ①）。
-    # 15 分钟意味着 reviewer 必须在一刻钟内点批准，否则 job 直接失败。
-    timeout-minutes: 60
-    # 受保护环境：required reviewer 硬门禁（public + Free 下真实可用）。
-    # 配好之后，本 job 会在 attestation 完成后**停下等批准**，
-    # 批准前不执行 gh release create —— 即「发布物已构建并已签名，
-    # 但对外发布需要人点一下」。
-    environment: release
+    # 纯构建时长 + 余量：发布轨无人工环节，超时不再需要覆盖审批等待。
+    timeout-minutes: 20
     permissions:
       contents: write # 创建 Release
       id-token: write # SLSA provenance（Sigstore 短期证书签名）
@@ -230,18 +210,6 @@ jobs:
           cp "$PROV_BUNDLE" "astrbot_plugin_parser_lite-${TAG_NAME}.zip.intoto.jsonl"
           cp "$SBOM_BUNDLE" "sbom.spdx.json.intoto.jsonl"
           ls -l ./*.intoto.jsonl sbom.spdx.json
-
-      # ---- 人工放行点 --------------------------------------------------------
-      # 到这里发布物已构建、已签名、证明已归档，但**尚未对外发布**。
-      # `environment: release` 的 required reviewers 会阻塞在此，
-      # 批准后才执行下一步的 gh release create。
-      # 显式写这条 notice，让日志里能看出「停在这里是在等人」。
-      #
-      # 注意 name 里的冒号必须引号包起来：裸 `environment: release` 会让 YAML
-      # 把它解析成映射键值对，报 "mapping values are not allowed in this context"。
-      - name: "等待人工放行（environment: release 的 required reviewers）"
-        run: |
-          echo "::notice::发布物已构建并签名，等待 environment: release 的审阅者批准后创建 Release"
 
       - name: 创建 Release（附 zip、校验和、证明与 SBOM）
         run: |
