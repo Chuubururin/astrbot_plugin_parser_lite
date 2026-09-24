@@ -252,7 +252,7 @@ def _load_analysis() -> dict[str, Any]:
     for name, content in upstream_render_templates["files"].items():
         if (
             not isinstance(name, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css)", name)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css|json)", name)
             or not isinstance(content, str)
             or not content
         ):

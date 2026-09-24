@@ -65,6 +65,8 @@ def test_name_firewall(templates_mod: ModuleType) -> None:
             templates_mod.validate_name(bad)
     templates_mod.validate_name("default.html.jinja")
     templates_mod.validate_name("tailwind.css")
+    # Theme API v1：主题清单与模板同目录，属模板平面的字节快照面
+    templates_mod.validate_name("theme.json")
 
 
 def test_content_firewall(templates_mod: ModuleType) -> None:

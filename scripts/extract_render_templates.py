@@ -11,7 +11,8 @@ render_params 同类的上游元数据快照），使两层注入在本地与 CI
 提取规则（唯一的模板清单规则，属桥规则层）：
 
 - git ls-tree 动态发现模板文件全集——上游新增/删除/改名模板文件自动跟随，
-  无需改本脚本；出现子目录结构或非 jinja/css 文件时响亮失败交人工复核；
+  无需改本脚本；出现子目录结构或非 jinja/css/json 文件时响亮失败交人工复核
+  （json = Theme API v1 的主题清单，与模板同属卡面字节平面）；
 - 内容逐字快照（不做任何归一化——模板字节的唯一权威是上游本体），仅做
   非空与尺寸上限防火墙；
 - 产物含 source_revision 与 source_digest（按文件名排序拼接的 sha256），
@@ -43,12 +44,12 @@ _UPSTREAM_TEMPLATES_DIR = "src/nonebot_plugin_parser_lite/render/templates"
 # 注入防火墙：模板文件名渲染进生成路径，内容逐字节写盘——名字限模板族后缀
 # 且禁路径分隔（目录穿越/子目录结构都不在上游模板的已知形态内），内容限
 # 非空与尺寸上限（疑似异常快照）。与 analyze_vendor 的汇点复检同规则。
-_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css)\Z")
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(jinja|css|json)\Z")
 _FILE_MAX_BYTES = 512 * 1024
 
 
 def validate_name(name: str) -> None:
-    """模板文件名防火墙：仅平铺的 jinja/css 名，拒绝路径分隔与目录穿越。"""
+    """模板文件名防火墙：仅平铺的 jinja/css/json 名，拒绝路径分隔与目录穿越。"""
     if "/" in name or ".." in name or not _NAME_RE.fullmatch(name):
         raise SystemExit(
             f"上游模板文件名越界（仅限平铺 jinja/css 名，拒绝路径分隔与目录穿越）：{name!r}",
