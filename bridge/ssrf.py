@@ -75,11 +75,24 @@ _INHERIT_VENDOR_VERIFY: bool = False
 
 
 class UrlBlockedError(BaseException):
-    """URL 未通过 SSRF 校验。
+    """URL 被 SSRF 策略拒绝。
 
     继承 BaseException（而非 Exception）：vendor 的 @retry 与各
     ``except Exception`` 包装点不会吞掉或重试被拦截的请求——SSRF 拒绝是
     安全终态，不是可恢复的传输错误。插件入口须显式 except 本类。
+
+    域名解析失败（DNS 瞬断、无记录）不属于本类：那是可恢复的传输层
+    故障（见 UrlResolveError），策略拒绝与网络故障共享安全终态会把
+    装饰资源的抖动升级为整卡硬失败。
+    """
+
+
+class UrlResolveError(Exception):
+    """域名解析失败（gaierror / 空结果），按普通可恢复异常处理。
+
+    解析不到地址即无出站可谈，不构成 SSRF 面；本类走 vendor 与 safe_src
+    的 ``except Exception`` 降级通道（重试 / 占位图 / DownloadException），
+    与策略拒绝（UrlBlockedError，BaseException 直达插件入口）分道。
     """
 
 
@@ -139,9 +152,9 @@ def _resolve_and_validate(hostname: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror as exc:
-        raise UrlBlockedError(f"域名解析失败：{hostname}") from exc
+        raise UrlResolveError(f"域名解析失败：{hostname}") from exc
     if not infos:
-        raise UrlBlockedError(f"域名解析为空：{hostname}")
+        raise UrlResolveError(f"域名解析为空：{hostname}")
 
     validated: list[str] = []
     for info in infos:
@@ -155,15 +168,17 @@ def _resolve_and_validate(hostname: str) -> list[str]:
 
 
 def validate_url(url: str) -> ValidatedUrl:
-    """校验 URL 的 scheme/端口/解析结果；失败抛 UrlBlockedError。
+    """校验 URL 的 scheme/端口/解析结果。
 
-    拒绝在此统一落审计日志（httpx transport / curl guard / HLS guard 三条
-    通道都经本函数收口）：异常传播链只体现安全终态，日志留下被拒目标与
-    原因，是运维侧审计「SSRF 拦了什么」的唯一入口。
+    策略拒绝抛 UrlBlockedError（BaseException，安全终态直达插件入口）；
+    域名解析失败抛 UrlResolveError（普通 Exception，随传输故障降级）。
+
+    两类拒绝在此统一落审计日志（httpx transport / curl guard / HLS guard
+    三条通道都经本函数收口）：日志是被拒目标与原因的唯一运维入口。
     """
     try:
         return _validate_url(url)
-    except UrlBlockedError as exc:
+    except (UrlBlockedError, UrlResolveError) as exc:
         logger.warning("SSRF 拒绝出站请求: url=%s 原因=%s", url, exc)
         raise
 
@@ -205,7 +220,7 @@ def _resolve_pinned_fallback(host: str) -> list[str]:
             return [_validate_ip_literal(trimmed)]
         except ValueError:
             return _resolve_and_validate(trimmed)
-    except UrlBlockedError as exc:
+    except (UrlBlockedError, UrlResolveError) as exc:
         logger.warning("SSRF 拒绝拨号目标（无预验证上下文）: host=%s 原因=%s", host, exc)
         raise
 

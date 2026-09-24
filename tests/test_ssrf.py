@@ -25,7 +25,11 @@ import httpcore
 import httpx
 import pytest
 from astrbot_plugin_parser_lite.bridge import ssrf
-from astrbot_plugin_parser_lite.bridge.ssrf import UrlBlockedError, validate_url
+from astrbot_plugin_parser_lite.bridge.ssrf import (
+    UrlBlockedError,
+    UrlResolveError,
+    validate_url,
+)
 from curl_cffi import AsyncSession
 from curl_cffi.const import CurlOpt
 
@@ -162,6 +166,31 @@ def test_dns_resolving_to_private_is_blocked(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     with pytest.raises(UrlBlockedError):
         validate_url("http://attacker.example.com/")
+
+
+def test_dns_transient_failure_is_degradable(monkeypatch):
+    """DNS 瞬断是可恢复传输故障：Exception 层级，走降级通道而非安全终态。
+
+    UrlBlockedError 是 BaseException（except Exception 接不住）。解析
+    失败若共享该终态类别，装饰资源（平台 logo/头像）的 DNS 抖动会把
+    整卡渲染硬失败——解析不到地址即无出站，不构成 SSRF 面。
+    """
+    import socket
+
+    def fake_gaierror(host, port, *args, **kwargs):
+        raise socket.gaierror("Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_gaierror)
+    with pytest.raises(UrlResolveError) as exc:
+        validate_url("http://flaky-cdn.example.com/logo.webp")
+    assert isinstance(exc.value, Exception), "解析失败必须可被 except Exception 捕获"
+
+    caught = None
+    try:  # 模拟 safe_src / vendor 降级网的实际形态
+        validate_url("http://flaky-cdn.example.com/logo.webp")
+    except Exception as e:
+        caught = e
+    assert isinstance(caught, UrlResolveError)
 
 
 # ---------------------------------------------------------------------------
