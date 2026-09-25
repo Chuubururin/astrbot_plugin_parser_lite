@@ -80,8 +80,8 @@ jobs:
           esac
           # 「发布 tag 只能来自 promote 推进线」的机器判定。判据是 **tag 的
           # 提交 ∈ main 历史**（祖先），而非「= main 尖端」：尖端相等会误锁
-          # 「版本未变的修复提交把 main 前移后补发上一版本」的合法补救
-          # （2026-09-25 实弹抓到的停摆）。dev 上未经 promote 的旁路 tag
+          # 「版本未变的修复提交把 main 前移后补发旧版本」的合法补救。
+          # dev 上未经 promote 的旁路 tag
           # 不在 main 祖先内，照样判红。compare API 判祖先——checkout 是
           # 浅克隆，本地 merge-base 拿不到两侧对象。
           MAIN_SHA="$(git ls-remote origin refs/heads/main | cut -f1)"
@@ -102,9 +102,8 @@ jobs:
       # 依赖安装统一走复合 action（.github/actions/setup-env），默认档。
       # 与 ci.yml 的 test job 同构：不装 astrbot 时 test_event_stop /
       # test_sender_chain / test_json_card_urls 会 pytest.importorskip 整模块静默
-      # 跳过，而它们恰是桥接层的行为契约（H6 同类缺陷在发布轨的残留，2026-09-18
-      # 复核）。发布物一旦带着静默降级的测试结果出去，就是「绿着发布了一个没人
-      # 验过的桥」。
+      # 跳过，而它们恰是桥接层的行为契约。发布物一旦带着静默降级的测试结果
+      # 出去，就是「绿着发布了一个没人验过的桥」。
       - name: 安装依赖（与 ci.yml 的 test job 同构）
         uses: ./.github/actions/setup-env  # zizmor: ignore[self-repository] actionlint 尚不支持 $/
 
@@ -245,11 +244,17 @@ jobs:
             echo "AstrBot 桥接插件发布：版本承自上游 nonebot-plugin-parser-lite 的 standalone 轨构建快照（当前构建 ${TAG_NAME#v}，与 metadata.yaml 随 roll 再生锁步）。上游正式 release 轨（stable tag 及其版本号）见 https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases ；其 stable 发布节奏慢于本轨，前奏版本以 prerelease 如实标注。"
             echo
           } > "${notes_file}"
-          prev_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" -q '[.[]|select(.draft==false)|.tag_name]|map(select(. != env.TAG_NAME))|.[0] // ""' 2>/dev/null || true)"
+          prev_tag=""
+          if ! prev_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" -q '[.[]|select(.draft==false)|.tag_name]|map(select(. != env.TAG_NAME))|.[0] // ""')"; then
+            echo "::warning::已发布 release 列表抓取失败，正文略去上游 release 信息节（不影响发布）"
+            prev_tag=""
+          fi
           if [ -n "${prev_tag}" ]; then
-            if advisory="$(python3 scripts/release_advisory.py --old "${prev_tag#v}" --new "${TAG_NAME#v}" 2>/dev/null)"; then
+            if advisory="$(python3 scripts/release_advisory.py --old "${prev_tag#v}" --new "${TAG_NAME#v}")"; then
               if [ -n "${advisory}" ]; then
                 printf '%s\n\n' "${advisory}" >> "${notes_file}"
+              else
+                echo "::notice::版本区间（${prev_tag} → ${TAG_NAME}）未跨越上游 stable release（或补发旧版致区间倒挂），正文略去上游节"
               fi
             else
               echo "::warning::上游 release 信息抓取失败，正文略去上游节（不影响发布）"
@@ -277,7 +282,9 @@ jobs:
             echo "注：public 仓库的 attestation 由 Sigstore public good instance 签发；"
             echo "private 仓库用的是 GitHub 自己的 Sigstore 实例。"
             echo "\`gh attestation trusted-root\` 一条命令同时取得两者。"
-          } >> "${notes_file}"
+          } | tee -a "${notes_file}" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          # 双写：release 正文面向使用者，step summary 面向运维在 run 页速览，
+          # 两者同源同内容，不存在第二份手抄。
           gh release create "${TAG_NAME}" --verify-tag --notes-file "${notes_file}" \
             "${release_flags[@]}" \
             "$ZIP" \

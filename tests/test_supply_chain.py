@@ -540,18 +540,21 @@ def test_release_body_carries_upstream_release_notes() -> None:
 
     依据：同步型仓库里 --generate-notes 只罗列本仓库 commit diff（无信息量）；
     真正的变更叙事在上游 release notes，且 scripts/release_advisory.py 已有
-    同一判据的单实现（(old, new] 区间跨越的 stable、💥 节警示）。发布面钉三
+    同一判据的单实现（(old, new] 区间跨越的 stable、💥 节警示）。发布面钉五
     点：正文经 --notes-file 注入、advisory 复用单实现、抓取失败降级不阻断
-    发布（略一节优于不发版）。
+    发布且必须显式告警（静默降级 = 没人知道正文缺了一节）、发布物表双写
+    step summary（run 页运维速览与 release 正文同源）。
     """
     release = _code_lines((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
     assert "--notes-file" in release, "Release 正文不是装配内容"
     assert "--generate-notes" not in release, "--generate-notes 噪声通道必须封死"
     assert "release_advisory.py" in release, "上游 release 信息未复用单实现"
     assert "上游 release 信息抓取失败" in release, "advisory 失败须降级告警而非阻断发布"
+    assert "已发布 release 列表抓取失败" in release, "prev_tag 抓取失败须显式告警而非静默吞掉"
     assert "sokoko-org/nonebot-plugin-parser-lite/releases" in release, (
         "正文缺上游正式 releases 入口（stable tag 与版本号的核对锚点）"
     )
+    assert "GITHUB_STEP_SUMMARY" in release, "发布物表须双写 step summary（运维速览面）"
 
 
 def test_release_keeps_least_privilege_without_approval_gate() -> None:
