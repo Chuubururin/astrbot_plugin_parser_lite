@@ -212,18 +212,23 @@ def _vendor_meta() -> dict[str, str]:
     }
 
 
-# 上游 README 直通进生成文档：只做来源与非空校验，尺寸上限防御病态输入
+# 上游 README 直通进生成文档：摄取 main 平面提取件（extract_upstream_readme
+# 产物），只做来源与非空校验，尺寸上限防御病态输入——入库快照可能被手改，
+# 校验面与提取侧防火墙同规则。
+_UPSTREAM_README_PATH = REPO_ROOT / "vendor" / "_upstream" / "upstream_readme.json"
 _README_MAX_BYTES = 262_144
 
 
 def _vendor_readme() -> str:
-    """读取上游 README 原文（vendor/_upstream 随快照入库）。"""
-    readme = REPO_ROOT / "vendor" / "_upstream" / "README.md"
-    if not readme.is_file():
-        raise SystemExit(f"上游 README 缺失：{readme}，请检查 vendor/_upstream 快照")
-    content = readme.read_text(encoding="utf-8")
-    if not content.strip():
-        raise SystemExit("上游 README 为空，拒绝写入分析产物")
+    """读取上游 main 分支 README 原文（平面快照，与渲染模板等同源同轨）。"""
+    if not _UPSTREAM_README_PATH.is_file():
+        raise SystemExit(
+            f"上游 README 提取产物缺失：{_UPSTREAM_README_PATH.name}，"
+            "请运行全量模式或 scripts/extract_upstream_readme.py 现场提取",
+        )
+    content = json.loads(_UPSTREAM_README_PATH.read_text(encoding="utf-8")).get("readme")
+    if not isinstance(content, str) or not content.strip():
+        raise SystemExit("上游 README 为空或提取产物形态异常，拒绝写入分析产物")
     if len(content.encode("utf-8")) > _README_MAX_BYTES:
         raise SystemExit(
             f"上游 README 超过 {_README_MAX_BYTES} 字节上限，疑似异常快照，拒绝写入分析产物",

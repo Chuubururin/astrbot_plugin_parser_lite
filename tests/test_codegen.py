@@ -236,9 +236,14 @@ def test_analysis_includes_upstream_meta(analyzer: ModuleType) -> None:
     )["project"]
     assert analysis["upstream_meta"]["description"] == project["description"]
     assert analysis["upstream_meta"]["license"] == project["license"]
-    assert analysis["upstream_meta"]["readme"] == (
-        analyzer.REPO_ROOT / "vendor" / "_upstream" / "README.md"
-    ).read_text(encoding="utf-8")
+    assert (
+        analysis["upstream_meta"]["readme"]
+        == json.loads(
+            (analyzer.REPO_ROOT / "vendor" / "_upstream" / "upstream_readme.json").read_text(
+                encoding="utf-8"
+            )
+        )["readme"]
+    ), "README 直通源必须是 main 平面快照的逐字内容"
 
 
 def test_metadata_upstream_provenance_is_verbatim(

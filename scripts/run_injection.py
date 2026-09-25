@@ -1,8 +1,8 @@
-"""两层注入单命令入口：提取（三数据面）→ 分析 → 生成 → 校验。
+"""两层注入单命令入口：提取（四数据面）→ 分析 → 生成 → 校验。
 
 sync-upstream 工作流与本地开发的编排层：一次进程完成上游 main 数据面提取
-（显示文本 + 渲染参数 + 渲染模板，共享上游文件读取与单次 rev-parse）、
-第一层分析、第二层生成。锚点规则、防火墙与产物公式归属各自脚本模块
+（显示文本 + 渲染参数 + 渲染模板 + 上游文档 README，共享上游文件读取与单次
+rev-parse）、第一层分析、第二层生成。锚点规则、防火墙与产物公式归属各自脚本模块
 （单一事实源），本层只编排与传递，不复制任何提取/生成规则。
 
 模式（可组合）：
@@ -45,6 +45,7 @@ from pipeline_common import dump_json, rev_parse  # noqa: E402
 RENDER_PARAMS_OUT = REPO_ROOT / "vendor" / "_upstream" / "render_params.json"
 DISPLAY_TEXTS_OUT = REPO_ROOT / "vendor" / "_upstream" / "display_texts.json"
 RENDER_TEMPLATES_OUT = REPO_ROOT / "vendor" / "_upstream" / "render_templates.json"
+UPSTREAM_README_OUT = REPO_ROOT / "vendor" / "_upstream" / "upstream_readme.json"
 RENDER_TEMPLATES_DIR = REPO_ROOT / "templates"
 
 
@@ -61,6 +62,7 @@ def _load(name: str) -> ModuleType:
 display_mod = _load("extract_display_texts")
 params_mod = _load("extract_render_params")
 templates_mod = _load("extract_render_templates")
+readme_mod = _load("extract_upstream_readme")
 gen = _load("generate_config")
 
 # 第一层按需加载（模块级不 import vendor）：--offline 消费入库分析产物时无需
@@ -87,17 +89,19 @@ def __getattr__(name: str) -> Any:
 def _extract(
     repo: Path,
     ref: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
-    """上游 main 三数据面提取：共享文件读取与单次 rev-parse，公式在提取模块。"""
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
+    """上游 main 四数据面提取：共享文件读取与单次 rev-parse，公式在提取模块。"""
     sources = display_mod.read_sources(repo, ref)
     render_source = params_mod.read_source(repo, ref)
     render_context = params_mod.read_context_source(repo, ref)
     template_files = templates_mod.read_sources(repo, ref)
+    readme_content = readme_mod.read_source(repo, ref)
     revision = rev_parse(repo, ref)
     return (
         params_mod.build_payload(render_source, revision, render_context),
         display_mod.build_payload(sources, revision),
         templates_mod.build_payload(template_files, revision),
+        readme_mod.build_payload(readme_content, revision),
         sources,
     )
 
@@ -157,11 +161,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.offline:
         params_payload = _read_json(RENDER_PARAMS_OUT)
         display_payload = _read_json(DISPLAY_TEXTS_OUT)
-        # 模板快照只经分析层进入生成（generate_config ← analyze_vendor），
+        # 模板/README 快照只经分析层进入生成（generate_config ← analyze_vendor），
         # 此处读取仅验证入库件在位（缺失即响亮退出）
         _read_json(RENDER_TEMPLATES_OUT)
+        _read_json(UPSTREAM_README_OUT)
     else:
-        params_payload, display_payload, templates_payload, sources = _extract(
+        (
+            params_payload,
+            display_payload,
+            templates_payload,
+            readme_payload,
+            sources,
+        ) = _extract(
             Path(args.repo),
             args.ref,
         )
@@ -172,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
                     (RENDER_PARAMS_OUT, params_payload),
                     (DISPLAY_TEXTS_OUT, display_payload),
                     (RENDER_TEMPLATES_OUT, templates_payload),
+                    (UPSTREAM_README_OUT, readme_payload),
                 )
                 if _committed_drift(path, payload)
             ]
@@ -185,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             dump_json(RENDER_PARAMS_OUT, params_payload)
             dump_json(DISPLAY_TEXTS_OUT, display_payload)
             dump_json(RENDER_TEMPLATES_OUT, templates_payload)
+            dump_json(UPSTREAM_README_OUT, readme_payload)
 
     analysis_text = _analysis_text(offline=args.offline, check=args.check)
     analysis = json.loads(analysis_text)
@@ -238,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"两层注入完成（{'离线' if args.offline else '全量'}模式）："
         f"{_analyze_mod().ANALYSIS_PATH.name} + 生成 {len(artifacts)} 工件"
-        + ("" if args.offline else " + 3 件入库提取产物"),
+        + ("" if args.offline else " + 4 件入库提取产物"),
     )
     return 0
 

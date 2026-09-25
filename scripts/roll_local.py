@@ -11,7 +11,7 @@ standalone 分支由其 CI 随 main 每次 push 自动发布，本脚本把 vend
    幂等退出（--check 只检测不执行，检测到更新时退出码 1）；
 3. 整树重建 vendor（唯一升级方式，禁止 merge/patch；standalone 归档逐
    成员安全解包——realpath 校验拒绝路径穿越）→ 派生 requirements →
-   两层注入单命令（提取三数据面 → 分析 → 生成）→ vendor 三层校验 →
+   两层注入单命令（提取四数据面 → 分析 → 生成）→ vendor 三层校验 →
    全量契约测试；
 4. 更新 sync-state（version/main_sha/standalone_sha/synced_at/failures）
    并提交。

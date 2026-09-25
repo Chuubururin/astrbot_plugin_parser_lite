@@ -1,11 +1,11 @@
 
 <!-- 生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
-     手写面仅「桥接说明」一节；正文全部为上游 README（随 roll 再生）。 -->
+     手写面仅「桥接说明」一节；正文全部为上游 main 分支 README（随 roll 再生）。 -->
 
 # astrbot_plugin_parser_lite
 
-nonebot-plugin-parser-lite 的 AstrBot 桥接插件：在 QQ 群聊中自动解析
-B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
+[nonebot-plugin-parser-lite](https://github.com/sokoko-org/nonebot-plugin-parser-lite) 的
+AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
 
 ## 桥接说明（AstrBot 用户只需看本节）
 
@@ -32,16 +32,22 @@ B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
 - **渲染数据外发**：渲染经宿主 `html_render` 远程 t2i 服务截图——卡面 HTML
   与内联媒体会发送到宿主配置的渲染端点。
 
-上游 README 原文附后——其中安装/配置说明面向 NoneBot 与「复制目录使用」场景，
-AstrBot 用户无需操作：
+上游 README（main 分支）原文附后——其中安装/配置说明面向 NoneBot 宿主与
+standalone「复制目录」场景，AstrBot 用户无需操作：
 
 ---
 
-# Parser Lite Standalone
+<div align="center">
+<a href="https://v2.nonebot.dev/store">
+    <img src="https://raw.githubusercontent.com/fllesser/nonebot-plugin-template/refs/heads/resource/.docs/NoneBotPlugin.svg" width="310" alt="logo">
 
-这是从 `main` 自动生成的独立模块版本，发布在 `standalone` 分支。它保留
-`nonebot_plugin_parser_lite` 包路径与各平台 Parser 路径，但不依赖 NoneBot、适配器或
-任何 NoneBot 插件。
+</a>
+
+## ✨ [Nonebot2](https://github.com/nonebot/nonebot2) 链接分享自动解析插件 ✨
+
+[![Code style: djlint](https://img.shields.io/badge/html%20style-djlint-blue.svg)](https://www.djlint.com)
+
+</div>
 
 > [!IMPORTANT]
 >
@@ -49,87 +55,288 @@ AstrBot 用户无需操作：
 >
 > 由于使用不当造成的一切责任由使用者承担，本项目维护者无任何责任
 
-## 复制到项目中使用
+如果你需要不依赖 `nonebot2` 的插件，请切换到 [`standalone`](https://github.com/sokoko-org/nonebot-plugin-parser-lite/tree/standalone) 分支
 
-将 `src/nonebot_plugin_parser_lite` 整个目录复制到目标项目中。目标
-项目需要安装 `requirements.txt` 中列出的普通 Python 运行依赖，但不需要安装 NoneBot、
-适配器或任何 NoneBot 插件，也不依赖本仓库中的其他目录。
+## 📖 支持的平台
 
-复制后目录结构示例：
+| 平台                 | 图文 | 评论区渲染 | 视频 | Live Photo |
+| :------------------- | :--- | :--------- | :--- | :--------- |
+| **B 站**             | ✅   | ✅         | ✅   | ✅         |
+| **抖音**             | ✅   | ✅         | ✅   | ✅         |
+| **微博**             | ✅   | ✅         | ✅   | ✅         |
+| **小红书**           | ✅   | ✅         | ✅   | ✅         |
+| **快手**             | ✅   | ✅         | ✅   | 🚫         |
+| **AcFun**            | ✅   | ❌         | ✅   | 🚫         |
+| **X (Twitter)**      | ✅   | ❌         | ✅   | 🚫         |
+| **百度贴吧**         | ✅   | ✅         | ✅   | 🚫         |
+| **知乎**             | ✅   | ✅         | ✅   | 🚫         |
+| **堆糖**             | ✅   | ✅         | 🚫   | 🚫         |
+| **小黑盒**           | ✅   | ✅         | ✅   | ✅         |
+| **ILLU**             | ✅   | ✅         | 🚫   | 🚫         |
+| **LOFTER**           | ✅   | ✅         | 🚫   | 🚫         |
+| **网易 BUFF**        | ✅   | ✅         | 🚫   | 🚫         |
+| **酷安**             | ✅   | ✅         | 🚫   | 🚫         |
+| **虎扑**             | ✅   | ✅         | ✅   | 🚫         |
+| **米游社**           | ✅   | ✅         | ✅   | 🚫         |
+| **豆瓣**             | ✅   | ✅         | 🚫   | 🚫         |
+| **5EPlay**           | ✅   | ✅         | ✅   | 🚫         |
+| **豆包**             | 🚫   | 🚫         | ✅   | 🚫         |
+| **Linux Do**         | ✅   | ✅         | 🚫   | 🚫         |
+| **完美世界竞技平台** | ✅   | ✅         | ✅   | 🚫         |
+| **壁吧专楼吧**       | ✅   | ✅         | 🚫   | 🚫         |
+| **TapTap**           | ✅   | ✅         | ✅   | 🚫         |
+| **网易大神**         | ✅   | ✅         | ✅   | 🚫         |
 
-```text
-your_project/
-├── nonebot_plugin_parser_lite/
-│   ├── parsers/
-│   ├── utils/
-│   ├── __init__.py
-│   └── ...
-└── your_code.py
-```
-或
-```text
-your_project/
-├── utils/
-│   └── nonebot_plugin_parser_lite/
-│       ├── parsers/
-│       ├── utils/
-│       ├── __init__.py
-│       └── ...
-└── your_code.py
-```
+| 平台           | 音频支持 | 评论区渲染 |
+| :------------- | :------- | :--------- |
+| **网易云音乐** | ✅       | ❌         |
+| **酷狗音乐**   | ✅       | ❌         |
+| **汽水音乐**   | ✅       | ❌         |
+| **酷我音乐**   | ✅       | ❌         |
 
-## 文本解析流水线
+> 💡 **标识说明**
+>
+> - ✅ 表示完整支持解析与富文本渲染
+> - ❌ 表示插件尚未适配该模块
+> - 🚫 表示该平台暂无此类内容形态 (如有遗漏或平台更新，欢迎提交 Issue 告知)
+> - **图文**：指代一切以文本为主体、图片混排、多图相册、社区长文、问答、多媒体笔记等内容形态。
 
-解析入口只接受文本。`until` 可停在匹配或结构化解析阶段，默认停留在解析阶段。
+支持的链接，可参考 [测试链接](https://github.com/fllesser/nonebot-plugin-parser/blob/master/tests/others/test_urls.md)
 
-```python
-from nonebot_plugin_parser_lite import ParseStep, Parser
+## 💿 安装
 
-async with Parser() as parser:
-    matched = await parser.parse(text, until=ParseStep.MATCH)
-    result = await parser.parse(text, until=ParseStep.PARSE)
+需要 Python **3.11 或更高版本**
 
-# 长期运行的应用可以复用 Parser 实例，并在退出前调用 await parser.aclose()
-```
+### 从 Git 安装(main 或指定 tag)
 
-只使用一个平台时应直接导入对应 Parser，避免加载其他平台模块：
+<details>
+<summary>pip</summary>
 
-```python
-from nonebot_plugin_parser_lite import Parser
-from nonebot_plugin_parser_lite.parsers.bilibili import BilibiliParser
-
-async with Parser([BilibiliParser]) as parser:
-    result = await parser.parse("看看这个 https://www.bilibili.com/video/BV1xx411c7mD")
-```
-
-也可以保留原有的底层调用方式：
-
-```python
-from nonebot_plugin_parser_lite.parsers.bilibili import BilibiliParser
-
-parser = BilibiliParser()
-keyword, searched = parser.search_url("https://www.bilibili.com/video/BV1xx411c7mD")
-result = await parser.parse(keyword, searched)
-await parser.aclose()
+```shell
+python -m pip install "nonebot-plugin-parser-lite @ git+https://github.com/sokoko-org/nonebot-plugin-parser-lite.git@main"
 ```
 
-## 配置
+指定版本安装时，将 `main` 替换为实际 tag 名称：
 
-配置默认从同名环境变量读取，例如 `PLITE_BILI_CK`、`PLITE_MAX_COMMENTS`。
-列表和布尔值使用 JSON 格式。也可在导入后更新共享配置：
-
-```python
-from nonebot_plugin_parser_lite import configure
-
-configure(plite_max_comments=10, plite_disabled_platforms=["x"])
+```shell
+python -m pip install "nonebot-plugin-parser-lite @ git+https://github.com/sokoko-org/nonebot-plugin-parser-lite.git@<tag>"
 ```
 
-缓存根目录默认是当前目录的 `.parser-lite`，可通过 `PARSER_LITE_BASE_DIR` 修改。
-解析结果会保留最近 50 项；首次进入异步解析时会在当前事件循环注册每两小时执行一次
-的缓存清理任务。应用退出前可调用 `await shutdown_runtime()` 关闭定时任务。
+</details>
 
-## 独立版边界
+<details>
+<summary>uv</summary>
 
-消息发送、权限、事件、回复和表情回应属于机器人框架职责，不包含在独立版中。独立版
-仅保留解析运行所需的 asyncio 周期任务。解析结果中的媒体任务仍是惰性的：只有显式
-等待媒体路径时才会下载。
+```shell
+uv add git+https://github.com/sokoko-org/nonebot-plugin-parser-lite.git --branch main
+```
+
+指定版本安装时，使用 `--tag`：
+
+```shell
+uv add git+https://github.com/sokoko-org/nonebot-plugin-parser-lite.git --tag <tag>
+```
+
+</details>
+
+指定版本安装仅支持 `1.3.7+`, 更早的版本请使用手动安装。
+
+### 手动安装
+
+将 `src/nonebot_plugin_parser_lite` 文件夹复制到机器人的插件加载目录(比如 `plugins`)后手动安装依赖
+
+<details>
+<summary>pip</summary>
+
+```shell
+python -m pip install -r requirements.txt
+```
+
+</details>
+
+<details>
+<summary>uv</summary>
+
+```shell
+uv add --requirements ./xxx/requirements.txt
+```
+
+</details>
+
+## 🎈 特性
+
+- 评论区渲染支持
+- 通用的基础模板，便于拓展自定义
+- 富文本内容渲染支持
+
+<details>
+<summary>渲染效果</summary>
+
+|                                                                              哔哩哔哩                                                                               |                                                                               小红书                                                                                |
+| :-----------------------------------------------------------------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| <img width="1240" height="2772" alt="029e59fa-8808-58e6-b403-031bb7696295" src="https://github.com/user-attachments/assets/6bd2817a-69bd-4952-9093-f71de637c8aa" /> | <img width="1240" height="4856" alt="02db1e9c-691b-5485-b312-3280a1d02898" src="https://github.com/user-attachments/assets/0e615688-063e-453c-83d3-c328c17eae12" /> |
+
+</details>
+
+## ⚙️ 配置
+
+> [!NOTE]
+>
+> 插件会自动使用系统环境中的http系统代理进行网络请求
+
+下面的内容可以粘贴到 `.env` 或 `.env.dev` / `.env.prod` 等文件
+
+<details>
+<summary>配置项</summary>
+
+```bash
+# [可选] nonebot2 内置配置，若服务器上传带宽太低或报错发送消息超时，建议调高，防止超时
+API_TIMEOUT=100
+
+# [可选] 允许的 B 站视频编码，越靠前的编码优先级越高
+# 可选 "avc"(H.264，体积较大), "hev"(HEVC), "av01"(AV1), "unknown"(未知)
+# 后两项在不同设备可能有兼容性问题，如需完全避免，可只填一项，如 '["avc"]'
+plite_bili_video_codes=["avc", "av01", "hev", "unknown"]
+
+# [可选] B 站视频清晰度
+# 144P(5), 240P(6), 360P(16), 480P(32), 720P(64), 720P+(74), 1080p(80),
+# 人工智能修复画质(100), 1080P+(112), 1080P_60(116), 4k(120), HDR(125),
+# DOLBY(126), 8K(127)
+plite_bili_video_quality=80
+
+# [可选] B 站下载 CDN 地区；仅支持内置线路 zh、en、ja、proxy(网宿全网多线)
+plite_bili_cdn_region="zh"
+
+# [可选] 自定义 B 站下载 CDN 域名，设置后优先于地区配置
+# 留空则使用地区配置；只接受 bilivideo.com 域名，不要包含协议、端口或路径
+plite_bili_cdn_domain=""
+
+# [可选] 音频解析，是否需要上传群文件
+plite_need_upload_audio=False
+
+# [可选] 视频解析，是否需要上传群文件
+plite_need_upload_video=False
+
+# [可选] 视频，图片，音频是否使用 base64 发送
+# 注意：编解码和传输 base64 会占用更多的内存,性能和带宽, 甚至可能会使 websocket 连接崩溃
+# 因此该配置项仅推荐 nonebot 和 协议端不在同一机器的用户配置
+plite_use_base64=False
+
+# [可选] 音视频下载最大文件大小，单位 MB，超过该配置将阻断下载
+plite_max_size=90
+
+# [可选] 全局禁止的解析
+# 示例 plite_disabled_platforms=["bilibili", "douyin"] 表示禁止了哔哩哔哩和抖音
+# 可选值: ["acfun", "bilibili", "buff", "coolapk", "douban", "doubao",
+# "douyin", "ds", "duitang", "5eplay", "heybox", "hupu", "illu", "kuaishou",
+# "kugou", "kuwo", "linuxdo", "lofter", "miyoushe", "netease", "qsmusic",
+# "rednote", "taptap", "tieba", "weibo", "wmpvp", "x", "zhihu", "zlb"]
+plite_disabled_platforms=["x"]
+
+# [可选] 黑名单用户列表
+# 示例 plite_blacklist=["QQClient_123456"]
+plite_blacklist_users=[]
+
+# [可选] 是否在解析结果中附加原始URL
+plite_append_url=False
+
+# [可选] 是否在解析结果中添加`在线播放`链接(如果有)
+plite_embed_url=False
+
+# [可选] 是否在解析结果中添加原始URL二维码
+plite_append_qrcode=False
+
+# [可选] 是否需要转发媒体内容(超过 4 项时始终使用合并转发)
+plite_need_forward_contents=True
+
+# [可选] 是否将首张总结卡片作为第一个节点放入内容合并转发
+# 开启后会强制使用合并转发；懒下载模式下仍立即单独发送总结卡片
+plite_summary_in_forward=False
+
+# [可选] 是否将视频作为节点放入内容合并转发
+# 需要协议端支持在合并转发节点中发送 Video / File
+# 开启后仍保留视频封面，并在包含视频时强制使用合并转发
+plite_video_in_forward=False
+
+# [可选] 是否开启懒下载模式，仅在用户请求时才下载视频
+plite_lazy_download=False
+
+# [可选] 懒下载是否发送命令提示
+plite_lazy_download_tip=False
+
+# [可选] 懒下载模式等待命令超时时间
+plite_lazy_download_timeout=30
+
+# [可选] 在懒下载模式中用户请求下载视频时的命令列表
+plite_download_command=["xz", "下载"]
+
+# [可选] 是否使用 ffmpeg 转码 Live Photo，若设备配置不佳，请禁用此功能
+# 禁用后将分别发送 Live Photo 底图和动图部分
+plite_live_photo=True
+
+# [可选] 最大评论数量,设为零则不请求评论
+plite_max_comments=5
+
+# [可选] 纯文本文本长度阈值，超过此长度的文本将会强制转发
+plite_forward_text_threshold=1000
+
+# [可选] 最大下载重试次数
+plite_max_retries=3
+
+# [可选] 白天时间范围 [开始, 结束]，格式 h:m；范围内为浅色主题，范围外为夜间模式
+# 支持跨午夜范围，例如 ["22:30", "6:00"]
+plite_day_range=["6:00", "19:00"]
+
+# [可选] 渲染主题 ID，默认使用 default
+plite_render_theme="default"
+
+# [可选] 额外主题目录；可填写主题目录，或包含多个主题子目录的目录
+plite_theme_dirs=[]
+
+# [可选] 知乎 cookie, 需要具有登录态的cookie才能完整获取回答内容
+# 必须包含 z_c0 项，建议包含 d_c0, _xsrf 项
+plite_zhihu_ck="z_c0=xxxx"
+
+# [可选] linuxdo cookie, 部分帖子需要登录或有一定的阅读等级才可以查看
+plite_linuxdo_ck="xxxx"
+
+# [可选] X cookie, R18帖子和帖子翻译需要登录才可以查看
+plite_x_ck="auth_token=xxx"
+```
+
+</details>
+
+## 🎉 使用
+
+|   指令   |          参数           |         权限          | 需要@ | 范围 |       说明        |
+| :------: | :---------------------: | :-------------------: | :---: | :--: | :---------------: |
+| 开启解析 |            -            | SUPERUSER/OWNER/ADMIN |  是   | 全部 |     开启解析      |
+| 关闭解析 |            -            | SUPERUSER/OWNER/ADMIN |  是   | 全部 |     关闭解析      |
+|    bm    | bv号或引用一个链接/卡片 |           -           |  否   | 全部 |   下载 B 站音频   |
+|  blogin  |            -            |       SUPERUSER       |  是   | 全部 | 扫码获取 B 站凭证 |
+
+## 🎨 渲染主题
+
+[**主题商店**](https://github.com/sokoko-org/nonebot-plugin-parser-themes)
+
+主题开发文档 -> [`THEME.md`](THEME.md)
+
+主题可以放入插件数据目录下的 `themes/` 文件夹，或通过 `plite_theme_dirs` 配置指定外部目录
+
+## 🎉 致谢
+
+<a href="https://github.com/sokoko-org/nonebot-plugin-parser-lite/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=sokoko-org/nonebot-plugin-parser-lite" />
+</a>
+
+- [fllesser/nonebot-plugin-parser](https://github.com/fllesser/nonebot-plugin-parser) 原始项目
+- [LoCCai/nonebot-plugin-parser-m](https://github.com/LoCCai/nonebot-plugin-parser-m) 本项目基于此项目开发，并在此基础上进行了大幅重构
+- [lumina37/aiotieba](https://github.com/lumina37/aiotieba) 贴吧解析参考
+- [ikenxuan/karin-plugin-kkk](https://github.com/ikenxuan/karin-plugin-kkk) 部分逻辑参考
+- [ikenxuan/amagi](https://github.com/ikenxuan/amagi) 部分接口参考
+- [zly2006/zhihu-plus-plus](https://github.com/zly2006/zhihu-plus-plus) 知乎解析参考
+- [Uesugi Hanako](https://github.com/negichan) 渲染模板设计和部分签名算法
+- [soloxiaoye2022](https://github.com/soloxiaoye2022) 部分签名算法
+- [nemo2011/bilibili-api (RIP)](https://github.com/Nemo2011/bilibili-api) 部分接口参考
+- [10miaomiao/bilimiao2](https://github.com/10miaomiao/bilimiao2) biliProtobuf 数据和接口参考
+- 致2026年的你们

@@ -25,7 +25,7 @@ AST 白名单（`VENDOR_CONSUMERS` 常量即本清单的真值源，增删模块
 守护；上游改名时此测试先红。
 
 **上游平面（plane）**
-渲染模板/显示文本/渲染参数三个数据面，提取源直接跟上游 main 真值，
+渲染模板/显示文本/渲染参数/上游文档四个数据面，提取源直接跟上游 main 真值，
 与 vendor 轨（standalone 发布节奏）的 skew 由 roll 时全量契约测试把关。
 
 ## 同步
@@ -63,7 +63,7 @@ tag 必在 main 历史线 → 确定性测试门禁；不存在人工放行环�
 `scripts/roll_local.py`）把上游源码注入 vendor/（逐字节校验）后，自动分析其配置面产出模板数据
 `vendor_analysis.json`（管线临时产物，不入库，上游元信息不由本仓库维护）。
 第二层注入=利用代码注入模板和 AstrBot 插件模板注入仓库代码实现迭代修改：
-`scripts/run_injection.py`（单命令编排：三数据面提取→分析→生成）产出
+`scripts/run_injection.py`（单命令编排：四数据面提取→分析→生成）产出
 `_conf_schema.json`、`bridge/gen_config.py`、
 `metadata.yaml`（desc 为桥身份手写，许可证/版本随上游注入）、`README.md`（正文上游直通）、
 `bridge/texts.py`（桥显示文本）、`bridge/render_params.py`（桥渲染参数）与 `templates/`
@@ -118,6 +118,16 @@ sha256 全等；Theme API v1 起模板只消费 JSON-like 的 `data` 根
 磁盘模板与快照漂移——都响亮失败。黄金基准活体对照见
 `scripts/upstream_render_probe.py`（单命令：出图 + HTML 截获 +
 `--verify-digest` 自校验）。见 `tests/test_render_templates.py`。
+
+**上游文档注入（readme injection）**
+两层注入的第六条数据面：生成 README 的正文直通源是上游 **main 分支**根
+README.md（项目正典文档：平台支持矩阵、配置说明），与渲染模板/显示文本/
+渲染参数同走平面轨。`scripts/extract_upstream_readme.py` 在 sync 提取 →
+逐字快照 `vendor/_upstream/upstream_readme.json` → 第一层
+`analyze_vendor._vendor_readme` 摄取（存在/非空/尺寸上限校验）→ 第二层
+经 `templates/README.md.jinja` 逐字节直通。standalone 快照自带的
+`vendor/_upstream/README.md` 仍是发布产物逐字节审计面
+（`verify_vendor` 第 3 层），两个角色互不兼任。见 `tests/test_codegen.py`。
 
 ## 分支模型
 
