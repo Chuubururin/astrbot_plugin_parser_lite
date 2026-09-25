@@ -370,9 +370,9 @@ roll 再生的生成工件）与已发布 tag，不一致就在 main 尖端自�
   | `promote-dev-to-main.yml` | push 到 `dev`（保留前缀）+ `chore.*` tag + 手动 | 把 `main` **指针移动**到 `dev` 尖端 |
   | `release.yml` | push tag `v*` | 构建 zip + Syft SBOM + SLSA attestation → 证明落成 release 附件 → 发布 |
 
-  **本版在役五个工作流**。上一版的 `codeql.yml`、`protection-audit.yml`
-  已移除，理由记在 `doc/BRANCHING.md` §10；`sync-upstream.yml` 于
-  2026-09-25 以「PR 轨道」形态恢复在役（维护契约：人只修管道红，不审上游内容）。
+  **在役五个工作流**。`codeql.yml`、`protection-audit.yml` 已移除（不做
+  SAST 与配置漂移巡检，理由见 `doc/BRANCHING.md` §10）；`sync-upstream.yml`
+  以「PR 轨道」形态在役（维护契约：人只修管道红，不审上游内容）。
 
   依赖关系（谁等谁）：
 
@@ -500,9 +500,9 @@ label `upstream-sync`，去重：未关闭的同题 Issue 只追加评论。
 **本仓库的默认分支是 `dev`。** 这个选择的直接收益：
 
 - 你改了 `dev` 上的工作流 → **cron 与手动触发立即用新定义**，无需等 promote
-- 上一版默认分支为 `main` 时，改了 `dev` 上的定时工作流但 cron 仍跑 `main` 上的
-  旧版本 —— 表现为「我明明改了，为什么行为没变」，且 run 的 `headSha` 显示的是
-  `main` 的 sha，极易误判
+- 默认分支设为 `dev` 本身即为防线：若默认分支是 `main`，改了 `dev` 上的定时
+  工作流后，cron 仍会跑 `main` 上的旧版本 —— 表现为「我明明改了，为什么行为
+  没变」，且 run 的 `headSha` 显示 `main` 的 sha，极易误判
 
 **实务建议**：手动触发时**总是显式带 `--ref dev`**，不要依赖默认分支。
 这样即使有人改了默认分支，你的命令行为也不变。
@@ -579,11 +579,10 @@ label `upstream-sync`，去重：未关闭的同题 Issue 只追加评论。
 | `test-reqs` | `true`（默认）/ `false` | 是否装 `tests/requirements-test.txt` |
 | `extras` | `none`（默认）/ `type` / `gate` | `type` = mypy + types-qrcode；`gate` = ruff + mypy + types-qrcode |
 
-**为什么必须收成一处**：2026-09-19 的事故复盘 —— 同一份清单在 4 个工作流里
-各抄一遍，`promote` 那份漏了 ruff，门禁第一步 `lint（ruff check）` 以
-`No module named ruff` 假红。那是**环境缺失、不是代码问题**，却把整条提权通道
-锁死（门禁过不了 → `main` 永远推不动）。断言因此从「逐包检查」改成「必须委派
-给唯一实现」+「不得再手抄清单」，两条互补。
+**为什么必须收成一处**：同一份清单若散落在多个工作流里各抄一遍，任一处漏装
+依赖就会让门禁以 `No module named ruff` 之类**环境缺失、而非代码问题**假红，
+把整条提权通道锁死（门禁过不了 → `main` 永远推不动）。因此断言取「必须委派给
+唯一实现」+「不得再手抄清单」两条互补形态。
 
 **ruff 版本不手抄**：`extras=gate` 时版本由 `scripts/pinned_tool_versions.py`
 从 `config/.pre-commit-config.yaml` 的 `ruff-pre-commit` rev 推导。
@@ -594,8 +593,8 @@ label `upstream-sync`，去重：未关闭的同题 Issue 只追加评论。
 一边判不过」—— 而且报错通常是几百行格式差异，很难看出根因是版本。
 单一来源是唯一不会漂移的做法。
 
-> 注：`promote-dev-to-main.yml` 自 2026-09-19 起**不再跑门禁**，因此不再涉及
-> 版本对账。但本机制仍然必要 —— 只要还有任何一处裸 `python -m ruff`，
+> 注：`promote-dev-to-main.yml` 是纯 ref 手术、**不跑门禁**，因此不涉及版本
+> 对账。但本机制仍然必要 —— 只要还有任何一处裸 `python -m ruff`，
 > 就必须与 pre-commit 的 rev 锁步。
 
 ### 13.2 发布信任链与离线验证
@@ -637,8 +636,8 @@ gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
 
 ### 13.4 平台能力矩阵：哪些用、哪些不用
 
-**2026-09-19 第二次重构**：用户要求**更简单**的 CICD 流程。转 public 后平台侧
-多数防线技术上解锁，但「能用」不等于「该用」——本版**主动放弃**了其中几项。
+本仓库走**极简 CICD**：转 public 后平台侧多数防线技术上已解锁，但「能用」不等于
+「该用」——以下**主动放弃**了其中几项。
 两张表如实分开写，避免两种误判：「以为没做」和「以为做了」。
 
 **本版实际启用的**：
@@ -670,8 +669,8 @@ gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
 #### 缺口：服务端配置没有自动巡检
 
 分支保护可以被人在 Settings 上**随手点掉，且不留任何代码痕迹**。
-上一版用 `protection-audit.yml` 每日巡检堵这个缺口；本版为「更简单」撤掉了，
-**所以缺口是打开的**。
+这个缺口**没有自动巡检**：`protection-audit.yml` 式的工作流可以堵它，但为
+「更简单」主动不做（恢复成本见 §13.4 表）。**所以缺口是打开的**。
 
 **如实声明**比假称「已有巡检」好 —— 后者会让维护者放弃手动确认。
 
@@ -688,7 +687,7 @@ gh attestation verify astrbot_plugin_parser_lite-<tag>.zip \
 
 zizmor 的 `self-repository` 审计（v1.30.0 起）建议把仓库内 action 的引用从
 `./…` 改成 `$/…`（GitHub 2026-07 引入的语法，不受运行时文件系统状态影响，
-且被平台视作 pinning）。但 **actionlint 最新版 v1.7.12（2026-03-30）尚不认识
+且被平台视作 pinning）。但 **actionlint 最新版 v1.7.12 尚不认识
 `$/`**，会判 `ref is missing`；而 actionlint 是本地与 CI 双端硬门禁。
 故当前保留 `./…` 并在调用点写**显式行内豁免**
 `# zizmor: ignore[self-repository]`，理由写在 `ci.yml` 里。
@@ -706,12 +705,12 @@ zizmor 的 `self-repository` 审计（v1.30.0 起）建议把仓库内 action �
 
 `owner/repo/subpath@<sha>` 是**合法**且常见的形态（例如
 `github/codeql-action/init@<sha>` 把 init / analyze 拆成同仓库子路径）。
-`tests/test_supply_chain.py` 的钉扎正则在 2026-09-19 因此**误报过**——
-正则只允许 `owner/repo@sha`。已修正为允许任意深度的子路径。
+`tests/test_supply_chain.py` 的钉扎正则因此允许**任意深度的子路径**——若只
+允许 `owner/repo@sha`，会把合法引用误判为违规。
 
-**教训：断言的正则必须覆盖平台允许的全部合法形态，否则它拦的不是违规，
-而是「用的形态我没预料到」。** 本版虽然不再用 CodeQL，但正则保留 subpath
-支持——下次引入任何多级路径的 action 时不会再踩同一个坑。
+**断言的正则必须覆盖平台允许的全部合法形态，否则它拦的不是违规，
+而是「用的形态我没预料到」。** CodeQL 当前不在役，但 subpath 支持保留——
+将来引入多级路径的 action 引用时无需再改正则。
 
 ### 13.6 从零到可用的执行路径（最该先读）
 

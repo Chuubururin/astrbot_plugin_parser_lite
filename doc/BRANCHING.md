@@ -304,9 +304,9 @@ Releases**。v* tag 与 Release 是审计账本与手动安装通道。所以「
 | `main` 被搞坏 | `v*` tag 仍不可变，从旧 tag 重新指：`git push origin <good-tag>:refs/heads/main`（注意可能需 `--force`） |
 
 **为什么不需要 `lkg` 分支**：`v*` tag 是真正的不可变锚点 —— 分支可以被 force
-push，tag 需要显式删了重建。上一版用 `lkg` 是因为当时的自动上游同步需要
-「上一已验证快照」；现版轨道里 `main` 本身就是「最后一次过全门禁的 sha」，
-tag 另兜一层，`lkg` 没有剩余职责。
+push，tag 需要显式删了重建。本设计中 `main` 本身就是「最后一次过全门禁的
+sha」，tag 另兜一层；「上一已验证快照」已由 `main` + `v*` tag 承载，
+额外的指针分支没有剩余职责。
 
 ---
 
@@ -358,8 +358,8 @@ bash scripts/apply_branch_protection.sh             # 应用并回读校验
 分支保护是**服务端配置**：它真的硬（`enforce_admins` 下连管理员都绕不过），
 但它**可以被人手在 Settings 上点两下关掉，而代码仓库里没有任何痕迹**。
 
-上一版用 `protection-audit.yml` 每日巡检来堵这个缺口。本版为了「更简单」
-撤掉了巡检，**所以缺口重新打开了**。
+本方案不做每日配置巡检（`protection-audit.yml` 式的工作流已移除，为「更简单」
+主动取舍），**所以缺口是打开的**。
 
 ### 缓解措施
 
@@ -397,7 +397,7 @@ bash scripts/apply_branch_protection.sh             # 应用并回读校验
 | **提交签名 / vigilant mode** | 单人仓库收益低、日常摩擦高 |
 | **CODEOWNERS 强制** | 需要 `count ≥ 1`，会与 §3.3 的「避免自我死锁」冲突 |
 | **上游 roll 的人工内容审阅** | 维护契约（§1.1）：人不批内容、只修管道红。安全面由机械判据承接——`scripts/upstream_sync.py` 的供应链「异常即红」+ vendor 三层校验 + 全量契约测试 |
-| **`release` 环境人工放行** | 单人全自动发布下它是停摆点（超时含审批等待、`prevent_self_review` 可致永久死锁），且在 private+Free 时代曾是想象中的门。安全闸已换为机器判定：sync 判据 → tag 必在 main 历史线 → required checks |
+| **`release` 环境人工放行** | 单人全自动发布下它是停摆点（超时含审批等待、`prevent_self_review` 可致永久死锁），且在 private+Free 时代属付费方案的门、根本不可用。安全闸已换为机器判定：sync 判据 → tag 必在 main 历史线 → required checks |
 
 ---
 

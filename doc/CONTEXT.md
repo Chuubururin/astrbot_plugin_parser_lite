@@ -88,8 +88,7 @@ AST 提取 → `vendor/_upstream/display_texts.json`（入库的上游元数据�
 卡面模板文案脱离上游子集、桥运行时新写 CJK 文案（白名单外）——三者都
 响亮失败。全量提取模式附带**上游文案候选扫描**（advisory）：含 CJK 的
 未收编文案打印进 sync 日志，锚点表扩充从「人工重读上游 diff」收敛为
-「看候选清单」（2026-09-13 该扫描即发现 download_failed_count 整句可归
-源）。见 `tests/test_user_texts.py`。
+「看候选清单」（download_failed_count 整句即经此扫描发现可归源）。见 `tests/test_user_texts.py`。
 
 **渲染参数注入（render-param injection）**
 两层注入的第四条数据面：桥内渲染/裁剪与发送编排关键数值（渲染缓存键版本、
@@ -107,8 +106,8 @@ bridge/render.py / main.py / bridge/sender.py 消费、桥内不再硬编码。�
 
 **渲染模板注入（render-template injection）**
 两层注入的第五条数据面：桥内 `templates/` 卡面模板族（default 模板与
-theme.json 清单、macros 宏、CSS）逐字节来自上游 main 分支 render/templates（2026-09-13
-活体核验 sha256 全等；Theme API v1 起模板只消费 JSON-like 的 `data` 根
+theme.json 清单、macros 宏、CSS）逐字节来自上游 main 分支 render/templates（活体核验
+sha256 全等；Theme API v1 起模板只消费 JSON-like 的 `data` 根
 变量，桥的适配面收敛为 bridge/render.py 的数据层镜像——`_resolve_src`
 内联与 `build_theme_data`，模板内不再有过滤器调用面）。`scripts/extract_render_templates.py` 在 sync 工作流中 git ls-tree
 动态发现文件全集（新增/删除/改名自动跟随）→ 逐字快照
@@ -154,7 +153,7 @@ promote 在 `main` 上撞 `git cherry` 判红。
 人手动跑同一脚本。双轨语义：vendor 轨跟 standalone
 发布节奏，渲染模板/文本/参数三个平面轨直接跟 origin/main tip（提取源
 即 main），两者的 skew 由全量契约测试在 roll 时把关。
-**祖先校验门（2026-09-14 release 通道分析）**：standalone 分支除 main
+**祖先校验门（release 通道分析结论）**：standalone 分支除 main
 构建外还会发布未合入 PR 的预览构建（f9e8c67 即 PR #306 中间态的预览）
 ——构建源不在 origin/main 祖先内时跳过 vendor roll（平面照常跟进、
 state 留痕 last_skipped_build），防止未合入代码进入生产。release
@@ -171,9 +170,8 @@ profile 覆盖 send_content 分支：forward（生产默认主路径：文本/�
 开无适配器环境），桥侧在 astrbot 容器运行（桩事件不真发）。归一化词表：
 上游 alconna Reference ≡ 桥 Comp.Nodes ≡ forward、图集「img+alt 复合段」
 ≡ 桥 _AltMedia、相邻文本段拼接（上游 UniMessage 合并/桥逐段）；媒体桩
-必须返回 anyio.Path（上游 main 默认 use_base64=True 走异步读——2026-09-14
-对照器抓到的第一处运行栈差异）。bot 名/uin 为配置面不参判。2026-09-13/14
-结论：逐消息/逐段/逐节点等价（forward 8 段 + flat 3 段 + 真实 URL 消息）。
+必须返回 anyio.Path（上游 main 默认 use_base64=True 走异步读，桩的返回类型须匹配运行栈）。bot 名/uin 为配置面不参判。对照器
+已验结论：逐消息/逐段/逐节点等价（forward 8 段 + flat 3 段 + 真实 URL 消息）。
 切分算法与 _ForwardText.split/text 另有 AST 结构指纹钉扎。
 见 `tests/test_message_probe.py`。
 
