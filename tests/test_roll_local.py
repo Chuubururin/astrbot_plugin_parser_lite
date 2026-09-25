@@ -468,3 +468,15 @@ def test_plane_truth_disciplines_delegate_to_shared_base(roll: ModuleType) -> No
     assert roll.remote_branch_sha is pipeline_common.remote_branch_sha
     assert roll.resolve_plane_ref is pipeline_common.resolve_plane_ref
     assert roll.git_show_text is pipeline_common.git_show_text
+
+
+def test_roll_pytest_invocation_matches_gate_1() -> None:
+    """roll 序列的 pytest 调用必须与门禁 1 完全同参（-c config + --rootdir）。
+
+    裸 `-q` 拿不到仓库 pytest 配置（根目录无默认发现路径上的 ini），asyncio
+    用例整批假红（2026-09-25 票07 彩排实证 82 failed）——管线红必须只可
+    归因契约本身，不可归因调用形态漂移。
+    """
+    source = (REPO_ROOT / "scripts" / "roll_local.py").read_text(encoding="utf-8")
+    invocation = '"python3", "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"'
+    assert invocation in source

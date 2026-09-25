@@ -380,7 +380,15 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
         (VENDOR_META / "pyproject.toml").read_text(encoding="utf-8"),
     )["project"]["version"]
 
-    result = subprocess.run(["python3", "-m", "pytest", "-q"], capture_output=True, text=True)
+    # pytest 必须与门禁 1 完全同参（-c config/pyproject.toml --rootdir=.）：
+    # 裸 `-q` 落到 rootdir 自动发现、拿不到仓库 pytest 配置，asyncio 用例
+    # 整批假红（82 failed，2026-09-25 票07 彩排实证），管线红必须只反映
+    # 契约本身。
+    result = subprocess.run(
+        ["python3", "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"],
+        capture_output=True,
+        text=True,
+    )
     print(result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "")
     if result.returncode != 0:
         raise SystemExit(f"roll 后契约测试失败：\n{result.stdout[-2000:]}{result.stderr[-500:]}")
