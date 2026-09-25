@@ -1,18 +1,21 @@
 
 <!-- 生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
-     手写面仅「桥接说明」一节；正文全部为上游 main 分支 README（随 roll 再生）。 -->
+     手写面为徽章行与「桥接说明」一节；正文全部为上游 main 分支 README（随 roll 再生）。 -->
 
 # astrbot_plugin_parser_lite
 
+![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.8rc6-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
+
 [nonebot-plugin-parser-lite](https://github.com/sokoko-org/nonebot-plugin-parser-lite) 的
-AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
+AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接与 JSON 卡片，并转发为内容卡片。
 
 ## 桥接说明（AstrBot 用户只需看本节）
 
-- **安装**：AstrBot WebUI「插件」页上传发布 zip，或解压到 `data/plugins/` 后重启
+- **安装与更新**：AstrBot 插件市场安装，或 WebUI「插件」页上传发布 zip；手动部署的覆盖后重启
 - **配置**：WebUI 插件页共 34 个配置项（3 桥接 + 31 上游），保存后自动重载
 - **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.8rc6），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
 - **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
+- **问题反馈**：[仓库 Issues](https://github.com/Chuubururin/astrbot_plugin_parser_lite/issues)，请附可复现的分享链接与 WebUI 日志
 
 ### 常见问题
 

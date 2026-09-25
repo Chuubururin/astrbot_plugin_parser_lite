@@ -1,22 +1,27 @@
 {# 生成模板：README 正文全部来自上游 main 分支 README（第一层注入
-   upstream_meta.readme，平面快照 upstream_readme.json），
-   手写面仅「桥接说明」一节固定文案（规则层）。readme 直通用 |safe：产物是
+   upstream_meta.readme，平面快照 upstream_readme.json），手写面为徽章行与
+   「桥接说明」一节固定文案（规则层）。徽章行（badges）由 generate_config 从
+   宿主约束与上游元数据预装配，message 经百分号编码后不含裸 <>&，autoescape
+   不触发、无需 |safe。readme 直通用 |safe：产物是
    Markdown 文档（无代码/字符串字面量逃逸语境），autoescape 会破坏原文，
    注入风险由第一层来源校验（存在/非空/尺寸上限）与快照逐字节比对把守。 #}
 <!-- 生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
-     手写面仅「桥接说明」一节；正文全部为上游 main 分支 README（随 roll 再生）。 -->
+     手写面为徽章行与「桥接说明」一节；正文全部为上游 main 分支 README（随 roll 再生）。 -->
 
 # astrbot_plugin_parser_lite
 
+{{ badges }}
+
 [nonebot-plugin-parser-lite](https://github.com/sokoko-org/nonebot-plugin-parser-lite) 的
-AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
+AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接与 JSON 卡片，并转发为内容卡片。
 
 ## 桥接说明（AstrBot 用户只需看本节）
 
-- **安装**：AstrBot WebUI「插件」页上传发布 zip，或解压到 `data/plugins/` 后重启
+- **安装与更新**：AstrBot 插件市场安装，或 WebUI「插件」页上传发布 zip；手动部署的覆盖后重启
 - **配置**：WebUI 插件页共 {{ vendor_count + bridge_count }} 个配置项（{{ bridge_count }} 桥接 + {{ vendor_count }} 上游），保存后自动重载
 - **版本与许可证**：随上游快照滚动自动再生（当前上游 v{{ upstream_version }}），与 release tag 锁步；许可证随上游（{{ upstream_meta.license }}），vendor 快照零修改
 - **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
+- **问题反馈**：[仓库 Issues]({{ meta.repo }}/issues)，请附可复现的分享链接与 WebUI 日志
 
 ### 常见问题
 

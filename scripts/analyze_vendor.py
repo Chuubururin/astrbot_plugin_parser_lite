@@ -208,8 +208,24 @@ def _vendor_meta() -> dict[str, str]:
     return {
         "description": description,
         "license": license_value,
+        "requires_python": _requires_python(project),
         "readme": _vendor_readme(),
     }
+
+
+def _requires_python(project: dict[str, Any]) -> str:
+    """上游 requires-python（README 徽章的 Python 兼容性事实，源=上游 pyproject）。"""
+    value = project.get("requires-python")
+    # 形态防火墙：非空、有界、无换行/引号/反斜杠（渲染侧经 quote 百分号编码，
+    # >/</= 等 PEP 440 比较符属合法取值）
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > 64
+        or any(ch in value for ch in "\r\n\"'\\")
+    ):
+        raise SystemExit("上游 requires-python 缺失或形态异常（README 徽章输入），拒绝写入分析产物")
+    return value
 
 
 # 上游 README 直通进生成文档：摄取 main 平面提取件（extract_upstream_readme

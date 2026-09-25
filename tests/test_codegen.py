@@ -229,13 +229,14 @@ def test_plugin_meta_handwritten_surface_is_minimal(gen: ModuleType) -> None:
 
 
 def test_analysis_includes_upstream_meta(analyzer: ModuleType) -> None:
-    """上游元数据（description/license）进分析数据，与上游 pyproject 同源。"""
+    """上游元数据（description/license/requires-python）进分析数据，与上游同源。"""
     analysis = json.loads(analyzer.build_analysis())
     project = tomllib.loads(
         (analyzer.REPO_ROOT / "vendor" / "_upstream" / "pyproject.toml").read_text(encoding="utf-8")
     )["project"]
     assert analysis["upstream_meta"]["description"] == project["description"]
     assert analysis["upstream_meta"]["license"] == project["license"]
+    assert analysis["upstream_meta"]["requires_python"] == project["requires-python"]
     assert (
         analysis["upstream_meta"]["readme"]
         == json.loads(
@@ -330,15 +331,19 @@ def test_readme_upstream_passthrough_and_minimal_bridge(
     gen: ModuleType,
     analyzer: ModuleType,
 ) -> None:
-    """README 契约：上游正文逐字直通 + 桥接说明行数上限锁死（含核准的
-    「安全说明」披露节：SSRF/ffmpeg 例外、TLS 姿态、渲染数据外发）。"""
+    """README 契约：上游正文逐字直通 + 桥接说明行数上限锁死。
+
+    手写面核准构成：徽章行（Python/AstrBot/license/upstream，取值全部来自
+    宿主约束与上游元数据）、桥接说明、安全披露节、反馈条目。上限随之定
+    ≤44 行——超出即手写面失控，须删内容而非抬上限。
+    """
     ANALYSIS_PATH.write_text(analyzer.build_analysis(), encoding="utf-8")
     upstream = json.loads(analyzer.build_analysis())["upstream_meta"]["readme"]
     generated = gen.build_readme()
     assert upstream in generated, "上游 README 必须逐字直通"
     bridge_extra = generated.replace(upstream, "")
-    assert len(bridge_extra.splitlines()) <= 40, (
-        "桥接说明超出上限（≤40 行，含安全披露节），手写面失控"
+    assert len(bridge_extra.splitlines()) <= 44, (
+        "桥接说明超出上限（≤44 行，含徽章行与安全披露节），手写面失控"
     )
 
 

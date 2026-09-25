@@ -67,7 +67,7 @@ tag 必在 main 历史线 → 确定性测试门禁；不存在人工放行环�
 `_conf_schema.json`、`bridge/gen_config.py`、
 `metadata.yaml`（desc 为桥身份手写，许可证/版本随上游注入）、`README.md`（正文上游直通）、
 `bridge/texts.py`（桥显示文本）、`bridge/render_params.py`（桥渲染参数）与 `templates/`
-卡面模板族（逐字节再生），手写面仅桥身份与桥接说明，机械镜像面随上游演进
+卡面模板族（逐字节再生），手写面仅桥身份（展示字段与兼容性徽章）与桥接说明，机械镜像面随上游演进
 自动再生（一次维护长期有效）。两层各自幂等（重生成 diff=0），由
 `tests/test_codegen.py` 与 `tests/test_render_templates.py` 守护；设计取舍
 发布（release）再把
@@ -125,7 +125,10 @@ README.md（项目正典文档：平台支持矩阵、配置说明），与渲�
 渲染参数同走平面轨。`scripts/extract_upstream_readme.py` 在 sync 提取 →
 逐字快照 `vendor/_upstream/upstream_readme.json` → 第一层
 `analyze_vendor._vendor_readme` 摄取（存在/非空/尺寸上限校验）→ 第二层
-经 `templates/README.md.jinja` 逐字节直通。standalone 快照自带的
+经 `templates/README.md.jinja` 逐字节直通。第一层同时摄取上游 pyproject 的
+`requires-python`（`requires_python`），供 README 兼容性徽章行取数——徽章
+四元（Python/AstrBot/license/upstream 版本）全部取自宿主约束常量与上游
+元数据，非新增硬编码。standalone 快照自带的
 `vendor/_upstream/README.md` 仍是发布产物逐字节审计面
 （`verify_vendor` 第 3 层），两个角色互不兼任。见 `tests/test_codegen.py`。
 

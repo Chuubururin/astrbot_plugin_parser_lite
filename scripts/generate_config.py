@@ -37,6 +37,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import jinja2
 
@@ -405,14 +406,47 @@ def build_metadata(analysis: dict[str, Any] | None = None) -> str:
     return rendered
 
 
+def _readme_badges(analysis: dict[str, Any]) -> str:
+    """README 徽章行（shields 静态徽章，插件生态文档规范要素）。
+
+    取值全部来自当前态事实：Python 约束=上游 pyproject（第一层摄取），
+    AstrBot 约束与桥=宿主约定常量，许可证/版本=上游元数据。message 经
+    百分号编码后不含裸 ``<>&``，渲染侧无需 |safe（模板 autoescape 不受触发）。
+    """
+    meta = analysis["upstream_meta"]
+
+    def badge(label: str, message: str, color: str, link: str | None = None) -> str:
+        img = (
+            f"![{label}](https://img.shields.io/badge/"
+            f"{quote(label, safe='')}-{quote(message, safe='')}-{color})"
+        )
+        return f"[{img}]({link})" if link else img
+
+    upstream = "https://github.com/sokoko-org/nonebot-plugin-parser-lite"
+    return " ".join(
+        (
+            badge("Python", meta["requires_python"], "blue"),
+            badge("AstrBot", PLUGIN_META["astrbot_version"], "blue"),
+            badge("license", meta["license"], "yellow", upstream),
+            badge(
+                "upstream",
+                f"v{analysis['upstream_version']}",
+                "informational",
+                f"{upstream}/releases",
+            ),
+        )
+    )
+
+
 def build_readme(analysis: dict[str, Any] | None = None) -> str:
-    """渲染 README.md（正文为上游 README 直通，手写面仅模板内桥接说明）。"""
+    """渲染 README.md（正文为上游 README 直通，手写面为徽章行与桥接说明）。"""
     analysis = analysis if analysis is not None else _load_analysis()
     template = ENVIRONMENT.from_string(
         (TEMPLATES / "README.md.jinja").read_text(encoding="utf-8"),
     )
     return template.render(
         meta=PLUGIN_META,
+        badges=_readme_badges(analysis),
         upstream_version=analysis["upstream_version"],
         upstream_meta=analysis["upstream_meta"],
         vendor_count=len(analysis["config_fields"]),
