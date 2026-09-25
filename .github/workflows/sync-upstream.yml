@@ -166,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           # gh 不会随 issue create 自动建 label——先幂等确保存在，
-          # 否则失败通知自己先红（2026-09-25 实弹抓到）。
+          # 否则失败通知自己先红。
           gh label create "$SYNC_LABEL" --color "0E8A16" \
             --description "上游同步管道失败（异常即红）" >/dev/null 2>&1 || true
           if EXISTING="$(gh issue list --state open --label "$SYNC_LABEL" --json number --jq '.[0].number // empty')" && [ -n "$EXISTING" ]; then

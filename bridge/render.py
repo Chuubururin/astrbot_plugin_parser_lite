@@ -59,8 +59,8 @@ INLINE_BUDGET_BYTES = 24 * 1024 * 1024
 """单次渲染允许内联进 HTML 的媒体总预算（base64 编码后字节）。
 
 按 base64 后的实际字节记账（HTML 里 data URI 的真实体量，约原始文件的
-4/3）：旧实现按原始字节计，24MB 预算实际会产出约 32MB HTML 整段 POST 给
-远程 t2i（2026-09-17 评审 M14）。
+4/3）——若按原始字节记账，24MB 预算实际会产出约 32MB HTML 整段 POST 给
+远程 t2i。
 """
 INLINE_MAX_FILE_BYTES = 8 * 1024 * 1024
 """单个媒体文件的内联上限（原始文件字节）"""
@@ -146,11 +146,10 @@ _CSS_HREF_RE = re.compile(r'\bhref="([^"]+)"', re.IGNORECASE)
 _T2I_CARD_WIDTH = render_params.VIEWPORT_WIDTH
 """卡面画布宽 = 上游 get_new_page viewport.width（渲染
 参数注入层）。消费注入值而非硬编码，上游调整视口宽时缩放比自动跟随——
-硬编码副本会在上游变更时静默产出错误缩放（2026-09-14 双轴评审发现的
-双源漂移：注入面有值、桥内另存一份 620）。"""
+硬编码副本会与注入面构成双源，上游变更时静默产出错误缩放。"""
 _T2I_CONTENT_WIDTH = 1280
 """桥侧内容宽目标：实测公共端点视口宽不一致（soulter=800 / rcfortress=
-1280，viewport/dsf 参数均被忽略，2026-09-14 逐端点实测），full_page 截图
+1280，viewport/dsf 参数均被忽略，逐端点实测），full_page 截图
 取「内容宽与视口宽的较大值」——把卡面放大到 1280px 内容宽后，任意端点
 出图都无留白条，且与上游 dsf=2 的 1240px 输出同量级。"""
 _T2I_ZOOM = _T2I_CONTENT_WIDTH / _T2I_CARD_WIDTH
@@ -163,14 +162,13 @@ _T2I_VIEWPORT_PATCH = (
     "</style>"
 )
 """桥侧视口、底色与缩放补丁：远程 t2i 端点忽略 viewport/dsf 参数且视口
-宽度因端点而异（2026-09-14 实测 800/1280 两档），620px 卡片直接渲染会
-随端点漂移出宽窄不一的留白条（群 1124969653 实发卡 1280×2558，两侧约
+宽度因端点而异（实测 800/1280 两档），620px 卡片直接渲染会
+随端点漂移出宽窄不一的留白条（实发卡出图 1280×2558，两侧约
 330px 空白）。body zoom 放大卡面至内容宽 1280px（zoom 是布局级缩放，
 文字按 2.06x 重排保持锐利，等效上游 dsf=2 的输出）——full_page 截图宽
 取内容宽，任意端点都满幅无留白。画布底色：模板数据面回归上游逐字节后，
-上游模板不含 body 底色规则（2026-09-13 活体对照发现，旧副本冻结了上游
-已删除的两条规则），远程端点默认白底会让暗色卡两侧穿帮——底色规则按
-主题选择器留在本补丁。"""
+上游模板不含 body 底色规则，远程端点默认白底会让暗色卡两侧穿帮——底色
+规则按主题选择器留在本补丁。"""
 
 
 def _inline_css_sync(html: str) -> str:
@@ -684,13 +682,11 @@ async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> b
 
 
 RENDER_CACHE_REV = "4"
-"""桥本地渲染行为版本：桥侧渲染管线变更（如 2026-09-14 zoom 缩放补丁）
+"""桥本地渲染行为版本：桥侧渲染管线变更（如 zoom 缩放补丁）
 时递增，使旧键缓存整体失效——上游模板变更走注入的 RENDER_TEMPLATE_VERSION，
-桥自身变更走这里，两把钥匙互不覆盖。
-
-v4：Theme API v1 数据面重建（post/meta 嵌套、数据层单点转义、stats.extra
-形状翻译退役、QR 键位迁移 post.qrcode、JPEG 转换改桥内 PIL）——旧缓存
-产物与新数据面的转义/形状语义不同，必须整体失效重建。"""
+桥自身变更走这里，两把钥匙互不覆盖。当前值对应 Theme API v1 数据面：
+post/meta 嵌套、数据层单点转义、QR 键位 post.qrcode、JPEG 转换走桥内 PIL——
+凡改变转义/形状/键位语义的桥侧变更都须 bump，否则旧缓存产物会按过时语义复用。"""
 
 
 MAX_COMMENTS_LIMIT = 100
@@ -699,8 +695,7 @@ MAX_COMMENTS_LIMIT = 100
 AstrBot 4.28 的插件配置面板对 int 字段**不做范围校验**：`_conf_schema.json`
 里的 `minimum`/`maximum` 不是宿主消费的键，`slider` 也只是**额外**渲染一个
 滑块，旁边的 `type="number"` 数字输入框仍然可自由输入任意整数（含负数）。
-因此非法值必须由运行期钳制兜住——这正是本常量的存在理由（2026-09-20 审计
-缺陷 1/2 的修复）。"""
+因此非法值必须由运行期钳制兜住——这正是本常量的存在理由。"""
 
 
 def _clamp_config_int(value: Any, *, minimum: int, maximum: int) -> int:

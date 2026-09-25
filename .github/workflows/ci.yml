@@ -69,10 +69,11 @@ jobs:
         with:
           python-version: "3.12"
       # 依赖安装统一走复合 action（.github/actions/setup-env）：单一来源，
-      # 杜绝多处 Install deps 手抄漂移（2026-09-19 提权通道被假红锁死即此类事故）。
+      # 杜绝多处 Install deps 手抄漂移（任一处漏装依赖 = 门禁以环境缺失误红，
+      # 把提权通道锁死）。
       #
       # 为什么用 `./` 而非 zizmor 推荐的 `$/`（self-repository 语法）：actionlint
-      # 最新版 v1.7.12（2026-03-30）**尚不认识** `$/`，会直接判
+      # 最新版 v1.7.12 **尚不认识** `$/`，会直接判
       # "specifying action ... in invalid format because ref is missing"。而
       # actionlint 是本地与 CI 双端硬门禁，`$/` 过不了。故此处保留 `./` 并**显式
       # 豁免**该条建议（行内 ignore），理由与风险如实声明：
@@ -124,7 +125,7 @@ jobs:
       # test_*_when_clone_present / generate_config --check / run_injection
       # --check 在 CI 上现场提取活体对照（注入与结构指纹按 git show 读
       # main 血统的提取锚点）。HEAD 克隆会随上游自动发布漂移出假红；
-      # 只 fetch standalone 则缺提取锚点对象（2026-09-24 CI 首跑两连红实证）。
+      # 只 fetch standalone 则缺提取锚点对象。
       # 无克隆时那 4 条按设计 SKIP，skip 门禁已按原因放行。
       - name: 浅克隆上游（启用 vendor 第 3 层与生成工件 --check）
         run: |
@@ -154,12 +155,12 @@ jobs:
         run: python scripts/run_injection.py --offline --check
       - name: pytest
         run: python -m pytest -c config/pyproject.toml --rootdir=. -q --junit-xml=/tmp/pytest-junit.xml
-      # 原实现是「skip 数 > BUDGET(3) 即失败」。阈值按开发机标定（那里有
-      # .sync-work/upstream 克隆），而 CI 无克隆时 test_*_when_clone_present
-      # 家族会多出 4 条**设计内**skip（测试名即写明 when_clone_present），阈值
-      # 必然误报。改为按**原因**分类：只放行「网络隔离区」与「无上游克隆」两类，
-      # 其余任何 skip 一律失败——这才是原本想守的「整模块因缺依赖静默失效」，
-      # 且不再与「本地有没有克隆」耦合。
+      # skip 判据按**原因**分类而非总数：总数阈值须按开发机（有
+      # .sync-work/upstream 克隆）标定，而 CI 无克隆时 test_*_when_clone_present
+      # 家族会多出 4 条**设计内**skip（测试名即写明 when_clone_present），总数
+      # 阈值必然误报。只放行「网络隔离区」与「无上游克隆」两类，
+      # 其余任何 skip 一律失败——这才是真正要守的「整模块因缺依赖静默失效」，
+      # 且不与「本地有没有克隆」耦合。
       - name: 断言 skip 仅为已知原因（缺依赖导致的静默失效必须被门禁发现）
         run: |
           python - <<'PY'

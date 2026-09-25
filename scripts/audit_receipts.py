@@ -12,8 +12,9 @@ r"""回执污染扫描器（非阻断）：doc/注释只陈述当前态，不记
 - 放行：合法的缺口/非目标当前态声明（`不做 SAST`、`服务端配置无漂移巡检`、
   `移除了 codeql.yml，因为…`）不含上述过程标记，天然不命中。
 
-**扫描面**：git 跟踪的 `.py`（仅 `#` 注释 + docstring，避开字符串字面量与
-测试断言）、`.md`、`.jinja`。豁免：`CHANGELOG.md`（历史落点）、`.scratch/`
+**扫描面**：git 跟踪的 `.py`（仅 `#` 注释 + docstring，含常量属性 docstring；
+避开字符串字面量与测试断言）、`.md`、`.jinja`（全文）、`.yml`/`.yaml`
+（仅注释，值不扫）。豁免：`CHANGELOG.md`（历史落点）、`.scratch/`
 （本地票据，历史区）、`vendor/`（零修改快照）、`docs/`（未跟踪的本地产物区）、
 本脚本自身（内含标记正则字面量）。
 
@@ -40,10 +41,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 故不入常驻护栏——它们对应的真实回执几乎必伴随下列高置信标记之一。
 RECEIPT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("date-stamp", re.compile(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b")),
-    ("review-id", re.compile(r"评审\s*M?\d+")),
+    ("review-id", re.compile(r"评审\s*[#M]?\d+")),
     ("ticket-ref", re.compile(r"票\s*0\d")),
     ("prior-version", re.compile(r"上一版|前一版|原实现")),
-    ("was-once", re.compile(r"曾是|曾把|曾按|曾设|旧实现")),
+    ("was-once", re.compile(r"曾是|曾把|曾按|曾设|曾以|旧实现")),
     ("first-draft-pitfall", re.compile(r"第[一二]版.{0,8}(?:踩|失败|就)")),
 )
 
@@ -59,6 +60,21 @@ EXCLUDE_SUFFIXES = ("CHANGELOG.md",)
 SELF = Path(__file__).resolve()
 
 
+SCANNABLE_SUFFIXES = (".py", ".md", ".jinja", ".yml", ".yaml")
+
+
+def _is_scannable(path: Path) -> bool:
+    """排除谓词单点：整树枚举与显式传参两面共用，防两处漂移。"""
+    rel = path.relative_to(REPO_ROOT)
+    return (
+        path.is_file()
+        and path.suffix in SCANNABLE_SUFFIXES
+        and not any(part in EXCLUDE_PARTS for part in rel.parts)
+        and rel.name not in EXCLUDE_SUFFIXES
+        and path.resolve() != SELF
+    )
+
+
 def _tracked_files() -> list[Path]:
     out = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
@@ -70,29 +86,41 @@ def _tracked_files() -> list[Path]:
         if not raw:
             continue
         path = (REPO_ROOT / raw.decode("utf-8")).resolve()
-        rel = path.relative_to(REPO_ROOT)
-        if any(part in EXCLUDE_PARTS for part in rel.parts):
-            continue
-        if rel.name in EXCLUDE_SUFFIXES or path == SELF:
-            continue
-        if path.suffix in (".py", ".md", ".jinja"):
+        if _is_scannable(path):
             files.append(path)
     return files
 
 
 def _docstring_ranges(tree: ast.Module) -> set[int]:
-    """module/class/function 首语句 docstring 覆盖的行号（含多行区间）。"""
-    lines: set[int] = set()
+    """docstring 覆盖的行号（含多行区间）。
+
+    两类都算：module/class/function 首语句 docstring，以及紧跟赋值的
+    **常量属性 docstring**（module/class 级 ``Expr(Constant[str])``——
+    工具链文档字符串惯例，本仓库大量用于常量语义说明）。
+    """
+    lines: set[int] = set[int]()
+
+    def _add(value: ast.Constant) -> None:
+        if isinstance(value.value, str):
+            start = value.lineno
+            end = getattr(value, "end_lineno", start) or start
+            lines.update(range(start, end + 1))
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        body = getattr(node, "body", None)
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-            value = body[0].value
-            if isinstance(value.value, str):
-                start = value.lineno
-                end = getattr(value, "end_lineno", start) or start
-                lines.update(range(start, end + 1))
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                _add(body[0].value)
+        if isinstance(node, ast.Module | ast.ClassDef):
+            prev = None
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(prev, ast.Assign | ast.AnnAssign)
+                ):
+                    _add(stmt.value)
+                prev = stmt
     return lines
 
 
@@ -114,6 +142,24 @@ def _scannable_python_lines(text: str) -> list[tuple[int, str]]:
     return [(n, line) for n, line in enumerate(text.splitlines(), start=1) if n in keep]
 
 
+def _scannable_yaml_lines(text: str) -> list[tuple[int, str]]:
+    """YAML 注释面：整行注释与行尾注释（引号内 '#' 不算），值不扫。"""
+    out: list[tuple[int, str]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        quote: str | None = None
+        for idx, ch in enumerate(line):
+            if quote:
+                if ch == quote:
+                    quote = None
+                continue
+            if ch in "'\"":
+                quote = ch
+            elif ch == "#" and (idx == 0 or line[idx - 1] in " \t"):
+                out.append((lineno, line[idx:]))
+                break
+    return out
+
+
 def _match(line: str) -> str | None:
     if IGNORE_MARKER in line:
         return None
@@ -130,6 +176,8 @@ def scan(paths: list[Path] | None = None) -> list[tuple[str, int, str, str]]:
         rel = path.relative_to(REPO_ROOT).as_posix()
         if path.suffix == ".py":
             candidates = _scannable_python_lines(text)
+        elif path.suffix in (".yml", ".yaml"):
+            candidates = _scannable_yaml_lines(text)
         else:
             candidates = list(enumerate(text.splitlines(), start=1))
         for lineno, line in candidates:
@@ -137,17 +185,6 @@ def scan(paths: list[Path] | None = None) -> list[tuple[str, int, str, str]]:
             if label is not None:
                 hits.append((rel, lineno, label, line.strip()[:120]))
     return hits
-
-
-def _is_scannable(path: Path) -> bool:
-    rel = path.relative_to(REPO_ROOT)
-    return (
-        path.is_file()
-        and path.suffix in (".py", ".md", ".jinja")
-        and not any(part in EXCLUDE_PARTS for part in rel.parts)
-        and rel.name not in EXCLUDE_SUFFIXES
-        and path.resolve() != SELF
-    )
 
 
 def main(argv: list[str] | None = None) -> int:

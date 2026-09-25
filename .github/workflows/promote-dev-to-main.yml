@@ -113,7 +113,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write # 唯一向 main 写的通道；zizmor 要求 job 级显式声明
-      actions: write # tag push 不触发 release（2026-09-25 实测），dispatch 是唯一续链口
+      actions: write # GITHUB_TOKEN 推的 tag 不触发新 workflow run，dispatch 是唯一续链口
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -190,10 +190,10 @@ jobs:
       # 「main 尖端版本 ≠ 已发布 tag」= 有一个已验证但未发布的版本。
       # 人工打 tag 会把同一个判断做第二遍，忘了就造成「main 绿着但用户
       # 拿不到」的静默漂移。
-      # tag push 之后必须显式 dispatch release.yml：2026-09-25 实测
-      # GITHUB_TOKEN 的 tag push **不触发** release（防循环规则覆盖 push 事件），
-      # dispatch 是发布轨唯一的确定性入口。若哪天 tag push 也触发了，release 的
-      # concurrency 与「已存在则跳过」双保险消化重复。
+      # tag push 之后必须显式 dispatch release.yml：GITHUB_TOKEN 的 tag push
+      # **不触发** release（防循环规则覆盖 push 事件），dispatch 是发布轨唯一的
+      # 确定性入口。若哪天 tag push 也触发了，release 的 concurrency 与
+      # 「已存在则跳过」双保险消化重复。
       # 已存在同名 tag 且指 main 尖端时**也派发**：覆盖「tag 成功、dispatch 失败」
       # 的中间态——不补发就永久停摆（release.yml 侧幂等，重复派发无副作用）。
       - name: 自动打发布 tag（版本 ≠ 已发布 tag → main 尖端）

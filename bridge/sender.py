@@ -68,7 +68,7 @@ FORWARD_TEXT_THRESHOLD_MAX = 4500
 
 AstrBot 4.28 的插件配置面板对 int 字段不做范围校验（`minimum`/`maximum`
 不是宿主消费的键，`slider` 也只是额外渲染一个滑块，旁边的数字输入框仍可
-自由输入），因此上下界必须由运行期钳制兜住（2026-09-20 审计缺陷 2/7）。
+自由输入），因此上下界必须由运行期钳制兜住。
 """
 
 VIDEO_FILE_THRESHOLD_DEFAULT_MB = 100
