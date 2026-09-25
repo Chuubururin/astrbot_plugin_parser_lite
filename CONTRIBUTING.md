@@ -56,7 +56,7 @@ pre-commit install --hook-type pre-push
 
 | # | 门禁 | 命令 | 说明 |
 |---|---|---|---|
-| 1 | 测试 | `python -m pytest -c config/pyproject.toml --rootdir=. -q` | 基线 **570 passed / 3 skipped**（本地与 CI 一致：CI 已浅克隆上游做活体对照；3 条 skip 均为 network 隔离区，设 `RUN_NETWORK_TESTS=1` 启用）。无上游克隆的裸环境为 **566 passed / 7 skipped**——多出的 4 条需要 `.sync-work/` 上游克隆（跳过原因写作「无上游克隆」），属设计内 |
+| 1 | 测试 | `python -m pytest -c config/pyproject.toml --rootdir=. -q` | 基线 **573 passed / 3 skipped**（本地与 CI 一致：CI 已浅克隆上游做活体对照；3 条 skip 均为 network 隔离区，设 `RUN_NETWORK_TESTS=1` 启用）。无上游克隆的裸环境为 **569 passed / 7 skipped**——多出的 4 条需要 `.sync-work/` 上游克隆（跳过原因写作「无上游克隆」），属设计内 |
 | 2 | Lint | `ruff check --config config/pyproject.toml .` | 选 `E,F,W,I,UP,B,SIM,RUF,ASYNC,C4,COM,FURB,PERF,RET` |
 | 3 | 格式 | `ruff format --config config/pyproject.toml --check .` | `line-length = 100`，`target-version = "py312"` |
 | 4 | 类型 | `python scripts/typecheck.py` | 根目录无 `__init__.py`，需显式包基（见脚本 docstring）；`warn_unused_ignores` 打开，多余的 `# type: ignore` 会变红 |

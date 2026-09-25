@@ -13,8 +13,9 @@ r"""回执污染扫描器（非阻断）：doc/注释只陈述当前态，不记
   `移除了 codeql.yml，因为…`）不含上述过程标记，天然不命中。
 
 **扫描面**：git 跟踪的 `.py`（仅 `#` 注释 + docstring，避开字符串字面量与
-测试断言）、`.md`、`.jinja`。豁免历史区：`CHANGELOG.md`、`.scratch/`、
-`vendor/`（零修改快照）、本脚本自身（内含标记正则字面量）。
+测试断言）、`.md`、`.jinja`。豁免：`CHANGELOG.md`（历史落点）、`.scratch/`
+（本地票据，历史区）、`vendor/`（零修改快照）、`docs/`（未跟踪的本地产物区）、
+本脚本自身（内含标记正则字面量）。
 
 退出码：有命中→1，干净→0。由 `maintenance/checklist.json` 的 MC-15 以
 advisory 方式消费（命中显红但不阻断 CI——维护清单通道整体 exit 0）。
@@ -49,7 +50,11 @@ RECEIPT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # 行内豁免标记（确需保留的过程事实，如复评触发条件里的真实日期）。
 IGNORE_MARKER = "audit-receipts:ignore"
 
-EXCLUDE_PARTS = ("vendor", ".sync-work", ".venv", ".git", "__pycache__", "docs")
+# 排除项对整树扫描与显式传参两面同时生效（见 _is_scannable）：`.scratch` 与
+# `docs` 均未被 git 跟踪、默认枚举不会命中，但显式传入时仍须挡住，兑现上方
+# 豁免声明。`doc/` 是常规扫描面（当前态文档正是本工具要守的地方），与
+# 未跟踪的 `docs/` 无关，不列入排除。
+EXCLUDE_PARTS = ("vendor", ".sync-work", ".venv", ".git", "__pycache__", "docs", ".scratch")
 EXCLUDE_SUFFIXES = ("CHANGELOG.md",)
 SELF = Path(__file__).resolve()
 
