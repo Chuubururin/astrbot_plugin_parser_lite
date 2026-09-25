@@ -48,3 +48,7 @@ DOWNLOAD_FAILED_COUNT = "{0} 项媒体下载失败"
 EXTRA_LABEL_DANMAKU = "弹幕"
 # bilibili/__init__.py@main
 EXTRA_LABEL_COIN = "硬币"
+# render/context.py@main
+UNKNOWN_SIZE = "未知大小"
+# render/context.py@main
+COVER_ALT = "专辑封面"

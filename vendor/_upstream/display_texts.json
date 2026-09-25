@@ -87,17 +87,22 @@
     "extra_label_coin": {
       "value": "硬币",
       "source": "bilibili/__init__.py@main"
+    },
+    "unknown_size": {
+      "value": "未知大小",
+      "source": "render/context.py@main"
+    },
+    "cover_alt": {
+      "value": "专辑封面",
+      "source": "render/context.py@main"
     }
   },
   "template_texts": [
-    "分享",
     "多选",
     "实况",
-    "收藏",
-    "浏览",
-    "点赞",
-    "评论"
+    "评论",
+    "音频"
   ],
-  "source_revision": "8ac7f4aedd3b357902f991a191de2fe24895dfab",
-  "source_digest": "6a861073b65e9132a3bb1ff6aa17e51a6341f8c70074450b75eba07d8341e103"
+  "source_revision": "bcc2465bda9aa7c98c3576435f1e07e25b7f6a7d",
+  "source_digest": "b7be3b68e7351aed7d1d8f0b29053d66270ab27e178b650a44792932bfd343ac"
 }

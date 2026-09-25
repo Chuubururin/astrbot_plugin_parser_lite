@@ -1,6 +1,7 @@
 # 由 scripts/derive_requirements.py 从 vendor/_upstream/pyproject.toml 派生，勿手改
 
 # 新增安装（宿主未提供）
+Pillow>=9.0.0
 curl_cffi>=0.15.0,<1.0.0
 msgspec>=0.20.0,<1.0.0
 protobuf>=7.34.2,<8.0.0

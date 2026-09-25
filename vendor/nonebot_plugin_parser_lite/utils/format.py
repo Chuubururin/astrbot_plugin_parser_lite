@@ -66,14 +66,14 @@ def replace_placeholder_to_sticker(
     return result
 
 
-def format_num(num: int | None) -> str:
+def format_num(num: int | None) -> str | None:
     """将数字格式化为 1.2万 的形式"""
     if num is None:
-        return "-"
+        return None
     return str(num) if num < 10000 else f"{num / 10000:.1f}万"
 
 
-def clean_clank(value: str) -> str | None:
+def clean_blank(value: str) -> str | None:
     """清理文本中的空白符号(包括换行)"""
     text = re.sub(r"\s+", " ", value).strip()
     return text or None
@@ -89,15 +89,17 @@ def append_html_text(
         result.append(normalized)
 
 
-def html_to_text(root: BeautifulSoup | Tag) -> str:
+def html_to_text(root: BeautifulSoup | Tag | str) -> str:
     """按 HTML 标签语义提取文本"""
     parts: list[str] = []
+    if isinstance(root, str):
+        root = BeautifulSoup(root)
     for element in root.descendants:
         if isinstance(element, Tag):
             if element.name in HTML_NEWLINE_TAGS:
                 parts.append("\n")
         elif isinstance(element, NavigableString):
-            if text := clean_clank(str(element)):
+            if text := clean_blank(str(element)):
                 parts.append(text)
     return "".join(parts).strip()
 

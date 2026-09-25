@@ -33,6 +33,8 @@ class Config(BaseModel):
     """知乎 cookies"""
     plite_linuxdo_ck: str | None = None
     """linuxdo cookies"""
+    plite_x_ck: str | None = None
+    """X cookies"""
     plite_need_upload: bool = False
     """是否需要上传音视频文件（兼容旧配置）"""
     plite_need_upload_audio: bool = False
@@ -64,6 +66,10 @@ class Config(BaseModel):
     """B站视频清晰度"""
     plite_need_forward_contents: bool = True
     """是否需要合并转发内容(大于四项时始终转发)"""
+    plite_summary_in_forward: bool = False
+    """是否将总结卡片放入内容合并转发"""
+    plite_video_in_forward: bool = False
+    """是否将视频放入内容合并转发"""
     plite_lazy_download: bool = False
     """是否开启懒下载模式，仅在用户请求时才下载视频"""
     plite_lazy_download_tip: bool = False
@@ -82,6 +88,10 @@ class Config(BaseModel):
     """最大下载重试次数"""
     plite_day_range: list[str] = ["6:00", "19:00"]
     """白天时间范围 [开始, 结束]，格式 h:m；范围内为浅色主题，范围外为夜间模式"""
+    plite_render_theme: str = "default"
+    """渲染主题 ID，主题目录可放在插件数据目录的 themes 下"""
+    plite_theme_dirs: list[str] = []
+    """额外的主题目录，可填写主题目录或包含多个主题的目录"""
     plite_bili_cdn_region: str = "zh"
     """哔哩哔哩 CDN 地区；支持 zh、en、ja、proxy 线路"""
     plite_bili_cdn_domain: str | None = None
@@ -161,6 +171,11 @@ class Config(BaseModel):
         return self.plite_linuxdo_ck
 
     @property
+    def x_ck(self) -> str | None:
+        """X cookies"""
+        return self.plite_x_ck
+
+    @property
     def need_upload_audio(self) -> bool:
         """是否需要上传音频文件"""
         return self.plite_need_upload_audio or self.plite_need_upload
@@ -194,6 +209,16 @@ class Config(BaseModel):
     def need_forward_contents(self) -> bool:
         """是否需要合并转发"""
         return self.plite_need_forward_contents
+
+    @property
+    def summary_in_forward(self) -> bool:
+        """是否将总结卡片放入内容合并转发"""
+        return self.plite_summary_in_forward
+
+    @property
+    def video_in_forward(self) -> bool:
+        """是否将视频放入内容合并转发"""
+        return self.plite_video_in_forward
 
     @property
     def blacklist_users(self) -> list[str]:
@@ -247,6 +272,16 @@ class Config(BaseModel):
             parse_hm_to_minutes(self.plite_day_range[0]),
             parse_hm_to_minutes(self.plite_day_range[1]),
         )
+
+    @property
+    def render_theme(self) -> str:
+        """渲染主题 ID"""
+        return self.plite_render_theme
+
+    @property
+    def theme_dirs(self) -> list[str]:
+        """额外的主题目录"""
+        return self.plite_theme_dirs
 
     @property
     def bili_cdn_region(self) -> str:

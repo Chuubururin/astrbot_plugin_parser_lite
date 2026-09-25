@@ -1,9 +1,16 @@
-"""渲染桥：ParseResult → 模板 HTML → AstrBot t2i 截图。
+"""渲染桥：ParseResult → Theme API v1 数据 → 模板 HTML → AstrBot t2i 截图。
 
-模板与 safe_src 过滤器语义照搬上游 main 分支 render 模块（.sync-work 参考
-件）；截图引擎用 AstrBot 内置 html_render。AstrBot 自定义模板只走网络
-t2i 端点（远端浏览器渲染），读不到本地 file:// 路径，因此本地媒体必须
-内联为 base64 data URI；任何渲染失败由调用方降级为 sender 纯文本路径。
+数据面镜像上游 main 分支 render/context.py（Theme API v1：模板只消费
+JSON-like 的 ``data`` 根变量，不再接触模型对象与过滤器）；模板为上游
+render/templates 的逐字节快照（模板数据面注入层）；截图引擎用 AstrBot
+内置 html_render。AstrBot 自定义模板只走网络 t2i 端点（远端浏览器渲染），
+读不到本地 file:// 路径，因此本地媒体必须内联为 base64 data URI；任何
+渲染失败由调用方降级为 sender 纯文本路径。
+
+已知边界：上游 Theme API 的用户主题目录（plite_theme_dirs/plite_render_theme）
+在桥不生效——远端 t2i 无 base_url 相对资源解析，自定义主题目录的
+file:// 与外链样式在桥管线里必然穿帮；桥固定渲染内置 default 主题
+（templates/theme.json 快照），扩展用户主题是显式的未来缺口。
 """
 
 from __future__ import annotations
@@ -11,25 +18,39 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import json
 import logging
 import mimetypes
 import re
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from collections.abc import Mapping
 from datetime import datetime
+from html import escape
 from io import BytesIO
 from pathlib import Path as SyncPath
 from typing import Any, Literal, cast
 
 import qrcode
 from anyio import Path, to_thread
-from markupsafe import Markup, escape
+from PIL import Image
 
 from ..vendor.nonebot_plugin_parser_lite.config import _nickname, pconfig
-from ..vendor.nonebot_plugin_parser_lite.data import ParseResult
+from ..vendor.nonebot_plugin_parser_lite.data import (
+    AudioContent,
+    Comment,
+    GraphicContent,
+    ImageContent,
+    LinkContent,
+    LivePhotoContent,
+    MediaContent,
+    ParseResult,
+    PollContent,
+    QuoteContent,
+    Stats,
+    StickerContent,
+    VideoContent,
+)
 from ..vendor.nonebot_plugin_parser_lite.utils.cache import CacheManager
-from ..vendor.nonebot_plugin_parser_lite.utils.ffmpeg import FFmpeg
 from . import render_params, texts
 
 PLACEHOLDER_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
@@ -79,8 +100,9 @@ class InlineBudget:
     def degraded(self) -> int:
         """因超预算/超单文件上限而降级为占位图的媒体数（按文件去重）。
 
-        按路径去重而非按调用次数：模板对同一张图会多次调 safe_src（get_path /
-        get_base / get_cover_path 等），按次数计会让阈值随模板调用次数漂移。
+        按路径去重而非按调用次数：同一张媒体可在主卡面/转发卡面被多次取源
+        （get_path / get_base / get_cover_path 等），按次数计会让阈值随
+        取源次数漂移。
         """
         return len(self._degraded_paths)
 
@@ -99,6 +121,23 @@ class InlineBudget:
 Theme = Literal["light", "dark"]
 
 TEMPLATES_DIR = SyncPath(__file__).resolve().parent.parent / "templates"
+
+_MUSIC_PLATFORMS = frozenset({"kugou", "netease", "kuwo", "qsmusic"})
+"""镜像上游 render/theme.py ``MUSIC_PLATFORMS``（Theme API v1 模板选择规则）。"""
+
+_THEME_SCHEMA_VERSION = 1
+"""Theme 数据面契约版本（镜像上游 render/theme.py ``THEME_SCHEMA_VERSION``）。"""
+
+
+def _theme_manifest() -> dict[str, Any]:
+    """内置主题清单（templates/theme.json，模板数据面逐字节快照产物）。
+
+    ``data.theme_id`` 从这里取值而非硬编码：上游改主题清单 id 时随 roll
+    自动跟随（与渲染参数注入层同一「按源取值」纪律）。
+    """
+    manifest_text = (TEMPLATES_DIR / "theme.json").read_text(encoding="utf-8")
+    return cast(dict[str, Any], json.loads(manifest_text))
+
 
 _CSS_LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
 _CSS_REL_RE = re.compile(r'\brel="stylesheet"', re.IGNORECASE)
@@ -180,7 +219,7 @@ def get_theme() -> Theme:
 def _inline_image_sync(path_str: str, budget: InlineBudget) -> str | None:
     """本地文件 → base64 data URI；非图片/超预算返回 None 交给调用方降级。
 
-    同步实现：由 safe_src 经 to_thread 调用，读文件+编码（单文件上限 8MB）
+    同步实现：由 _resolve_src 经 to_thread 调用，读文件+编码（单文件上限 8MB）
     不占事件循环。记账口径为 base64 后的字节，且「读成功后才记账」——旧
     实现先记账后读文件，读失败会漏账虚耗预算（2026-09-17 评审 M14）。
     """
@@ -207,256 +246,348 @@ async def _inline_image(path_str: str, budget: InlineBudget) -> str | None:
     return await to_thread.run_sync(_inline_image_sync, path_str, budget)
 
 
-def make_safe_src(budget: InlineBudget) -> Callable[..., Awaitable[Markup | None]]:
-    """构造带内联预算的 safe_src 过滤器（每次渲染独立预算，避免跨请求串账）。
+async def _resolve_src(
+    obj: Any,
+    method: str = "get_path",
+    *,
+    budget: InlineBudget,
+    return_none_on_fail: bool = False,
+) -> str | None:
+    """safe_src 的内联镜像（上游 render/context.py@main 数据层，Theme API v1）。
 
-    用法与上游一致：{{ cont | safe_src }}、{{ cont | safe_src("get_cover_path") }}、
-    {{ author | safe_src("get_avatar_path", return_none_on_fail=True) }}
+    上游把 safe_src 从模板过滤器收进数据层：模板拿到的已是 URI，不再接触
+    模型对象。桥镜像的唯一实质差异是 URI 形态——上游产 ``file://``（本地
+    浏览器 base_url 可解），远端 t2i 读不到本地路径，必须换成本地内联的
+    base64 data URI；失败回退形态与上游同构（PLACEHOLDER_IMAGE 或 None）。
 
-    返回 Markup 而非 str：autoescape 开启后普通字符串会被 HTML 转义，而
-    data URI 里的 ``&``（SVG/多参数 MIME）转义成 ``&amp;`` 会让图片加载
-    失败——safe_src 的产物是桥内自造的受控 URL，标记为安全是正确语义。
+    桥侧记账纪律（沿用旧过滤器契约，非上游语义）：
+    - fail 为 PLACEHOLDER 时是**可见灰块**，必须计入整页降级判据——否则
+      「方法缺失/异常/None src」的灰块卡会被当成功缓存（灰块永久卡）；
+    - 去重键按 reason:type:method 折叠不同对象，是刻意取舍：占位图为 1×1
+      透明 GIF（非可见灰块），评论头像/回复头像不带 return_none_on_fail——
+      逐对象计数会让多条无头像评论的正常卡片误触整页降级。内容图的预算类
+      降级按文件路径逐张计数（_inline_image），不受此折叠影响；结构性失败
+      （vendor 改名等）同时命中多个不同 (type, method) 组合，折叠后仍能触发
+      阈值；
+    - 上游同处有 logger.warning，桥此前一律静默——vendor 改名这类事故会表现
+      为「卡片上几张图变灰块」而日志里一个字都没有（2026-09-18 复核）。
     """
+    fail = None if return_none_on_fail else PLACEHOLDER_IMAGE
 
-    async def safe_src(
-        obj: Any,
-        method: str = "get_path",
-        *,
-        return_none_on_fail: bool = False,
-    ) -> Markup | None:
-        # fail 为 None 时（avatar/logo 等装饰路径）失败不计 degraded；
-        # fail 为 PLACEHOLDER 时是**可见灰块**，必须计入整页降级判据——
-        # 否则「方法缺失/异常/None src」的灰块卡会被当成功缓存（灰块永久卡）。
-        fail = None if return_none_on_fail else Markup(PLACEHOLDER_IMAGE)
+    def _note_placeholder(reason: str) -> None:
+        if fail is not None:
+            budget.note_degraded(f"{reason}:{type(obj).__name__}:{method}")
 
-        def _note_placeholder(reason: str) -> None:
-            if fail is not None:
-                # 去重键按 reason:type:method 折叠不同对象，是刻意取舍：
-                # 占位图为 1×1 透明 GIF（非可见灰块），评论头像/回复头像
-                # （macros.jinja:80/105）不带 return_none_on_fail——逐对象
-                # 计数会让多条无头像评论的正常卡片误触整页降级。内容图的
-                # 预算类降级按文件路径逐张计数（_inline_image），不受此
-                # 折叠影响；结构性失败（vendor 改名等）同时命中多个不同
-                # (type, method) 组合，折叠后仍能触发阈值。
-                budget.note_degraded(f"{reason}:{type(obj).__name__}:{method}")
-
-        try:
-            if obj is None:
-                _note_placeholder("obj-none")
-                return fail
-            attr = getattr(obj, method, None)
-            if attr is None:
-                logger.warning("对象 %s 不存在方法 '%s'", type(obj).__name__, method)
-                _note_placeholder("no-method")
-                return fail
-            if not callable(attr):
-                logger.warning("%s 的属性 '%s' 不是可调用对象", type(obj).__name__, method)
-                _note_placeholder("not-callable")
-                return fail
-            src = attr()
-            if hasattr(src, "__await__"):
-                src = await src
-            if src is None:
-                _note_placeholder("src-none")
-                return fail
-            # vendor 返回 anyio.Path / pathlib.Path，统一取文件系统路径
-            inlined = await _inline_image(str(src), budget)
-            if inlined:
-                return Markup(inlined)
-            _note_placeholder("inline-miss")
+    try:
+        if obj is None or not hasattr(obj, method):
+            _note_placeholder("obj-none" if obj is None else "no-method")
             return fail
-        except Exception as e:
-            # 上游同处有 3 处 logger.warning；桥此前一律静默 return fail ——
-            # vendor 改名这类事故会表现为「卡片上几张图变灰块」而日志里
-            # 一个字都没有（2026-09-18 复核）
-            logger.warning("safe_src(%s) 处理 %s 时失败: %r", method, type(obj).__name__, e)
-            _note_placeholder("error")
+        attr = getattr(obj, method)
+        if not callable(attr):
+            _note_placeholder("not-callable")
             return fail
+        src = attr()
+        if hasattr(src, "__await__"):
+            src = await src
+        if src is None:
+            _note_placeholder("src-none")
+            return fail
+        inlined = await _inline_image(str(src), budget)
+        if inlined:
+            return inlined
+        _note_placeholder("inline-miss")
+        return fail
+    except Exception as error:
+        logger.warning("safe_src(%s) 处理 %s 时失败: %r", method, type(obj).__name__, error)
+        _note_placeholder("error")
+        return fail
 
-    return safe_src
+
+def _json_value(value: Any) -> Any:
+    """把扩展字段限制为模板可安全消费的 JSON-like 值（镜像上游）。"""
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple | set):
+        return [_json_value(item) for item in value]
+    return str(value)
 
 
-_EXTRA_LABELS = {"danmaku": texts.EXTRA_LABEL_DANMAKU, "coin": texts.EXTRA_LABEL_COIN}
-"""vendor standalone 的 stats.extra 值为标量（B 站 danmaku/coin），上游
-main 模板契约要求值为（标签, 数值）二元组、键为图标类名（macros.jinja
-``{% set label, amount = value %}``，标量直供必然 ValueError 降级文本，
-2026-09-13 生产流量复现）。标签文案经显示文本注入层逐字取上游 main
-parsers/bilibili；vendor roll 到 main 新形状（值已是二元组）
-后自动透传、本表退化 no-op。"""
+def _escape_html(value: Any) -> Any:
+    """递归转义进模板的字符串值（镜像上游 render/context.py ``_escape_html``）。
 
-
-def _translate_stats_extra(stats: Any) -> Any:
-    """ACL 翻译：stats.extra 标量值 → main 模板二元组契约（幂等，不改原对象）。
-
-    ``ParseResult`` 是 sender 与 render 共享的同一实例——返回副本而非原地改写，
-    与 ``_escaped_author``/``_escaped_comment`` 的副本纪律一致。
+    Theme API v1 的转义责任**全量在数据层**：模板全部裸插值、Environment
+    autoescape=False。旧「逐字段判定模板里有没有 ``| e``」的双模板转义矩阵
+    随 music 模板与模板内过滤器一起退役——单点转义，无二次转义分叉。
+    桥内联产物（data URI）的 base64 字母表不含 ``& < > \"``，``+ /=`` 与
+    MIME ``;`` 均非 html.escape 的转义对象，属性上下文按实体正确还原。
     """
-    extra = getattr(stats, "extra", None)
-    if not isinstance(extra, dict):
-        return stats
-    return replace(
-        stats,
-        extra={
-            k: (v if isinstance(v, (tuple, list)) else (_EXTRA_LABELS.get(k, k), v))
-            for k, v in extra.items()
+    if isinstance(value, str):
+        return escape(value, quote=True)
+    if isinstance(value, Mapping):
+        return {
+            escape(key, quote=True) if isinstance(key, str) else key: _escape_html(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple | set):
+        return [_escape_html(item) for item in value]
+    return value
+
+
+def _task_url(item: MediaContent) -> str | None:
+    task = getattr(item, "path_task", None)
+    url = getattr(task, "url", None)
+    return url if isinstance(url, str) else None
+
+
+async def _display_size(item: MediaContent) -> str:
+    try:
+        return await item.get_display_size()
+    except Exception:
+        return texts.UNKNOWN_SIZE
+
+
+async def _serialize_author(author: Any, *, budget: InlineBudget) -> dict[str, Any]:
+    return {
+        "name": author.name,
+        "id": author.id,
+        "description": author.description,
+        "location": author.location,
+        "avatar": await _resolve_src(author, "get_avatar_path", budget=budget),
+    }
+
+
+async def _serialize_comment(comment: Comment, *, budget: InlineBudget) -> dict[str, Any]:
+    return {
+        "author": await _serialize_author(comment.author, budget=budget),
+        "content": [await _serialize_content(item, budget=budget) for item in comment.content],
+        "timestamp": comment.timestamp,
+        "formatted_datetime": comment.formatted_datetime,
+        "stats": _serialize_stats(comment.stats),
+        "replies": [await _serialize_comment(reply, budget=budget) for reply in comment.replies],
+        "parent_author": (
+            await _serialize_author(comment.parent_author, budget=budget)
+            if comment.parent_author
+            else None
+        ),
+    }
+
+
+def _serialize_stats(stats: Stats) -> dict[str, Any]:
+    extra: list[dict[str, Any]] = []
+    for key, value in stats.extra.items():
+        label, amount = value[0], value[1]
+        extra.append({"key": str(key), "label": _json_value(label), "value": _json_value(amount)})
+    return {
+        "view_count": stats.view_count,
+        "like_count": stats.like_count,
+        "collect_count": stats.collect_count,
+        "share_count": stats.share_count,
+        "comment_count": stats.comment_count,
+        "extra": extra,
+    }
+
+
+async def _serialize_content(
+    item: Any, *, budget: InlineBudget, is_cover: bool = False
+) -> dict[str, Any]:
+    if isinstance(item, str):
+        return {"type": "text", "text": item}
+    if isinstance(item, ImageContent):
+        content: dict[str, Any] = {
+            "type": "cover" if is_cover else "image",
+            "src": await _resolve_src(item, budget=budget),
+            "layout": item.layout,
+            "is_live": False,
+            "source_url": _task_url(item),
+        }
+        if is_cover:
+            content["alt"] = texts.COVER_ALT
+        return content
+    if isinstance(item, LivePhotoContent):
+        return {
+            "type": "live_photo",
+            "src": await _resolve_src(item, "get_base", budget=budget),
+            "layout": "grid",
+            "is_live": True,
+            "source_url": _task_url(item),
+        }
+    if isinstance(item, GraphicContent):
+        content = {
+            "type": "cover" if is_cover else "graphic",
+            "src": await _resolve_src(item, budget=budget),
+            "alt": item.alt,
+            "source_url": _task_url(item),
+        }
+        if is_cover:
+            content["layout"] = "grid"
+            content["is_live"] = False
+        return content
+    if isinstance(item, StickerContent):
+        return {
+            "type": "sticker",
+            "src": await _resolve_src(item, budget=budget, return_none_on_fail=True),
+            "size": item.size,
+            "description": item.desc,
+            "source_url": _task_url(item),
+        }
+    if isinstance(item, VideoContent):
+        return {
+            "type": "video",
+            "src": await _resolve_src(item, "get_cover_path", budget=budget),
+            "duration": item.display_duration,
+            "size": await _display_size(item),
+            "source_url": _task_url(item),
+        }
+    if isinstance(item, AudioContent):
+        return {
+            "type": "audio",
+            "duration": item.display_duration,
+            "size": await _display_size(item),
+            "source_url": _task_url(item),
+        }
+    if isinstance(item, LinkContent):
+        return {
+            "type": "link",
+            "url": item.url,
+            "title": item.title,
+            "site_name": item.site_name,
+            "description": item.description,
+            "icon": await _resolve_src(
+                item, "get_icon_path", budget=budget, return_none_on_fail=True
+            ),
+            "preview": await _resolve_src(
+                item, "get_preview_path", budget=budget, return_none_on_fail=True
+            ),
+        }
+    if isinstance(item, QuoteContent):
+        return {
+            "type": "quote",
+            "text": item.text,
+            "title": item.title,
+            "url": item.url,
+            "icon": await _resolve_src(
+                item, "get_icon_path", budget=budget, return_none_on_fail=True
+            ),
+        }
+    if isinstance(item, PollContent):
+        total = item.option_vote_total
+        return {
+            "type": "poll",
+            "title": item.title,
+            "options": [
+                {
+                    "text": option.text,
+                    "votes": option.votes,
+                    "percentage": item.option_percentage(option, total),
+                }
+                for option in item.options
+            ],
+            "option_vote_total": total,
+            "total_votes": item.total_votes,
+            "total_voters": item.total_voters,
+            "multiple": item.multiple,
+            "closed": item.closed,
+            "close_at": item.close_at,
+        }
+    return {"type": "unknown", "text": str(item)}
+
+
+async def _serialize_result(
+    result: ParseResult, *, budget: InlineBudget, max_comments: int
+) -> dict[str, Any]:
+    content: list[dict[str, Any]] = []
+    cover_found = False
+    for item in result.content:
+        is_cover = (
+            str(result.platform.name) in _MUSIC_PLATFORMS
+            and not cover_found
+            and (isinstance(item, ImageContent | GraphicContent))
+        )
+        content.append(await _serialize_content(item, budget=budget, is_cover=is_cover))
+        cover_found = cover_found or is_cover
+
+    return {
+        "title": result.title,
+        "url": result.url,
+        "formatted_datetime": result.formatted_datetime,
+        "timestamp": result.timestamp,
+        "extra": _json_value(result.extra),
+        "platform": {
+            "id": str(result.platform.name),
+            "name": result.platform.display_name,
+            "logo": await _resolve_src(result.platform, "get_logo_path", budget=budget),
+        },
+        "author": await _serialize_author(result.author, budget=budget),
+        "content": content,
+        "stats": _serialize_stats(result.stats),
+        "comments": [
+            await _serialize_comment(comment, budget=budget)
+            for comment in result.comments[:max_comments]
+        ],
+        "qrcode": None,
+        "ai_summary": result.ai_summary,
+        "embed_url": result.embed_url,
+        "repost": (
+            await _serialize_result(result.repost, budget=budget, max_comments=max_comments)
+            if result.repost
+            else None
+        ),
+    }
+
+
+def _build_qrcode(url: str) -> str:
+    """二维码 data URI（镜像上游 render/context.py ``_build_qrcode``）。
+
+    差异：点阵参数不取上游字面量，走渲染参数注入层（四项锚点与上游
+    现场 AST 同值，注入层守护）——上游调参时随 roll 自动跟随。
+    """
+    qr = qrcode.QRCode(
+        version=render_params.QRCODE_VERSION,
+        error_correction=render_params.QRCODE_ERROR_CORRECTION,
+        box_size=render_params.QRCODE_BOX_SIZE,
+        border=render_params.QRCODE_BORDER,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white")
+    buffer = BytesIO()
+    cast(Any, image).save(buffer, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode()}"
+
+
+async def build_theme_data(
+    result: ParseResult, *, color_scheme: Theme, budget: InlineBudget
+) -> dict[str, Any]:
+    """构造 Theme API v1 模板数据（镜像上游 render/context.py ``build_theme_data``）。
+
+    返回值只含 JSON-like 数据，且逐字镜像上游的构建顺序：**先递归转义整棵
+    数据树、再塞二维码**——上游如此，qr 的 base64 因此不被二次转义成
+    ``&amp;``。桥打乱该顺序会在模板裸插值下截断二维码。
+
+    桥侧取值差异（其余与上游一致）：``color_scheme`` 由 get_theme() 的日夜
+    判定传入（上游同构）；``theme_id`` 恒为内置主题清单 id（桥不解析用户
+    主题目录，见模块文档）；``meta.width`` 消费渲染参数注入层；
+    ``max_comments`` 用钳制后的桥配置（WebUI 负数防御）、``bot_name`` 取
+    vendor 配置全局 ``_nickname``；二维码参数走注入层（_build_qrcode）。
+    """
+    post = await _serialize_result(result, budget=budget, max_comments=max_comments_count())
+    data: dict[str, Any] = _escape_html(
+        {
+            "schema_version": _THEME_SCHEMA_VERSION,
+            "theme": color_scheme,
+            "theme_id": _theme_manifest()["id"],
+            "post": post,
+            "meta": {
+                "bot_name": _nickname,
+                "rendering_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "width": render_params.VIEWPORT_WIDTH,
+            },
         },
     )
-
-
-def _esc(value: str | None) -> str | None:
-    """HTML 转义模板插值用的字符串（None 原样透传，供模板做存在性判断）。"""
-    return None if value is None else str(escape(value))
-
-
-def _escaped_author(author: Any) -> Any:
-    """作者信息副本：仅转义进模板的展示字段，不动 vendor 对象本身。
-
-    ``ParseResult`` 是 sender 与 render 共享的同一实例，原地改写会污染发送
-    到聊天平台的文本（本该显示原样昵称却显示 ``&amp;``）。模板字典必须是
-    独立副本。
-    """
-    if author is None:
-        return None
-    return replace(
-        author,
-        id=_esc(getattr(author, "id", None)),
-        name=_esc(author.name),
-        location=_esc(author.location),
-        description=_esc(author.description),
-    )
-
-
-def _escaped_comment(comment: Any) -> Any:
-    """评论文本副本：作者、正文、统计均按模板插值口径转义。
-
-    模板对 ``comment.stats.like_count`` 等做裸插值（macros.jinja:90-115），
-    计数字段同样是解析侧文本，必须经桥转义后才进模板数据面。
-    """
-    content = [_esc(item) if isinstance(item, str) else item for item in (comment.content or [])]
-    return replace(
-        comment,
-        author=_escaped_author(comment.author),
-        content=content,
-        stats=_escaped_stats(comment.stats),
-        replies=[_escaped_comment(reply) for reply in (comment.replies or [])],
-    )
-
-
-def _escaped_stats(stats: Any) -> Any:
-    """统计条目副本：各计数与 ``extra`` 的标签/数值都是解析侧字符串。
-
-    ``extra`` 先经 ``_translate_stats_extra`` 归一为模板要求的二元组契约，
-    再按二元组逐项转义——顺序不能反：标量形状下按 ``value[0]`` 取值会把
-    数值字符串切碎（"321" → ("3","2")），形状翻译随之失效。
-    ``extra`` 的**键**进模板 ``fa-{{ key }}`` class 名（macros.jinja），同样
-    须转义——键来自解析侧（如 B 站 danmaku/coin），可被上游数据污染。
-    """
-    translated = _translate_stats_extra(stats)
-    extra = {
-        _esc(str(key)) if isinstance(key, str) else key: (
-            (_esc(value[0]), _esc(value[1]))
-            if isinstance(value, (tuple, list)) and len(value) == 2
-            else (_esc(str(value)) if isinstance(value, str) else value)
-        )
-        for key, value in (getattr(translated, "extra", None) or {}).items()
-    }
-    return replace(
-        translated,
-        view_count=_esc(stats.view_count),
-        like_count=_esc(stats.like_count),
-        collect_count=_esc(stats.collect_count),
-        share_count=_esc(stats.share_count),
-        comment_count=_esc(stats.comment_count),
-        extra=extra,
-    )
-
-
-def _escaped_extra(extra: Any) -> Any:
-    """平台扩展字段副本（音乐专辑/歌词/简介等均为解析侧文本，dict[str, Any]）。"""
-    if extra is None:
-        return None
-    if isinstance(extra, dict):
-        return {k: (_esc(v) if isinstance(v, str) else v) for k, v in extra.items()}
-    return extra
-
-
-async def resolve_parse_result(result: ParseResult) -> dict[str, Any]:
-    """把 ParseResult 解析为模板字典（与上游 resolve_parse_result 等价）。
-
-    文本字段在此转义，但**只转模板未过滤的那些**——模板是上游
-    render/templates 的逐字节镜像（模板数据面，``test_render_templates``
-    守护），桥不能为转义去改它，而两个模板对同一字段的处理不一致，转义
-    责任因此必须逐字段判定：
-
-    - ``result.title``：**桥转**。default 卡在 macros.jinja:420 套了 ``| e``，
-      music 模板（music.html.jinja:6/52）却是**裸插值**——桥若透传，音乐卡
-      会被注入原始 HTML。两害相权取安全：桥先转，default 卡上被 ``| e``
-      二次转义成可见的 ``&lt;`` 字面量（仅对含特殊字符的标题，观感损失
-      可接受；正常标题无特殊字符不受影响），music 卡得到正确转义。
-    - ``result.content`` 各项：**模板转**（render_content_items 内逐字段
-      ``| e``），桥原样透传，否则二次转义。
-    - ``author.name/location/description``、``ai_summary``、``comments``
-      的作者与正文、``stats`` 各计数与 extra 标签/数值、``extra``（音乐
-      专辑/歌词/简介）、``formatted_datetime``、``bot_name``：**桥转**
-      （模板均为裸插值）。
-    - ``platform`` / ``rendering_time`` / ``qrcode_path``：桥自造或受控值。
-
-    判据是「模板里这个字段有没有 ``| e``」，且**两个模板都要看**（同名字段
-    在 default 与 music 里的过滤状态可以不同，title 即是反例）。改模板插值
-    或增删字段时两边必须同看；``tests/test_render_smoke.py`` 的转义用例
-    覆盖两种模板。不开启 Jinja autoescape 的理由是模板用 ``~`` 拼装 HTML：
-    autoescape 会把 ``(v|e)`` 的 Markup 产物在字符串拼接时重新转义，整张
-    卡片退化成标签源码（2026-09-14 实测）。
-    """
-    data: dict[str, Any] = {
-        # title 必须此处转义：default 模板有 `| e`，music 模板没有（见 docstring）
-        "title": _esc(result.title),
-        "formatted_datetime": _esc(result.formatted_datetime),
-        "extra": _escaped_extra(result.extra),
-        # platform.display_name 进两模板裸插值（macros.jinja:414 /
-        # music.html.jinja:59）；platform 本身还被 _select_template 读
-        # .name 选模板——只转义 display_name 副本，不污染 name。
-        "platform": (
-            replace(result.platform, display_name=_esc(result.platform.display_name))
-            if result.platform is not None and getattr(result.platform, "display_name", None)
-            else result.platform
-        ),
-        "content": result.content,  # render_content_items 内逐字段 `| e`
-        "stats": _escaped_stats(result.stats),  # 内含形状翻译，勿另包一层
-        # 切片前必须钳制：WebUI 面板不校验 int 范围，负数会让 [:-1] 变成
-        # 「去掉末尾一条」而非「取零条」，评论数随之**非单调**（2026-09-20
-        # 审计缺陷 1）。钳制值与缓存键共用 max_comments_count()，两者不会分叉。
-        "comments": [_escaped_comment(c) for c in result.comments[: max_comments_count()]],
-        "author": _escaped_author(result.author),
-        "ai_summary": _esc(result.ai_summary),
-        "rendering_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "bot_name": _esc(_nickname),
-        # music 模板裸插值 result.url / result.qr_code_path（music.html.jinja:
-        # 37/74-80）；default 用 qrcode_path 键。两者都进模板数据面。
-        "url": _esc(result.url),
-        "qr_code_path": None,
-    }
-    if result.repost:
-        data["repost"] = await resolve_parse_result(result.repost)
-
     if pconfig.append_qrcode:
-        # 二维码点阵参数为上游 main 注入值（渲染参数注入层）
-        qr = qrcode.QRCode(
-            version=render_params.QRCODE_VERSION,
-            error_correction=render_params.QRCODE_ERROR_CORRECTION,
-            box_size=render_params.QRCODE_BOX_SIZE,
-            border=render_params.QRCODE_BORDER,
-        )
-        qr.add_data(result.url)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buffer = BytesIO()
-        cast(Any, img).save(buffer, format="PNG")
-        qr_uri = f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode()}"
-        data["qrcode_path"] = qr_uri
-        # music 模板读 qr_code_path（无 qrcode_path）；键名是上游模板契约，
-        # 桥侧补别名而非改模板（templates/* 逐字节镜像）
-        data["qr_code_path"] = qr_uri
+        data["post"]["qrcode"] = _build_qrcode(result.url)
     return data
 
 
@@ -464,47 +595,54 @@ _SAFE_PLATFORM_NAME = re.compile(r"[a-z0-9_-]+")
 
 
 def _select_template(result: ParseResult) -> str:
-    """上游模板选择规则；不存在的平台/音乐模板回退 default。
+    """镜像上游 ThemeDefinition.resolve_template 候选序（Theme API v1）。
+
+    上游候选依次：``{platform}.html.jinja`` →（音乐平台）``music.html.jinja``
+    → ``default.html.jinja``，取第一个存在文件——平台专属模板**优先于**音乐
+    模板（旧桥序相反，本版随上游镜像）。内置模板族当前只有 default，全部
+    平台实际落 default；上游新增平台/音乐模板时模板数据面随 roll 进入
+    ``TEMPLATES_DIR``，本选择逻辑自动跟随。
 
     平台名在拼接前做白名单校验：模板名会进 ``FileSystemLoader``，含 ``/``
     或 ``..`` 的值能穿出 ``TEMPLATES_DIR``（``../../etc/passwd.html.jinja``
-    实测可解析，2026-09-14 评审 #10）。当前 ``PlatformEnum`` 是值域封闭的
-    ``[a-z0-9]`` StrEnum，走不到该路径——但 ``ParseResult.platform`` 是桥
-    对外组装的字段，此处按「输入不可信」设防，白名单不匹配即回退 default
+    实测可解析，2026-09-14 评审 #10）。``ParseResult.platform`` 是桥对外
+    组装的字段，此处按「输入不可信」设防，白名单不匹配即回退 default
     而非抛错（选择模板失败不该让整次渲染失败）。
     """
     default = "default.html.jinja"
     if not result.platform:
         return default
     platform_name = str(result.platform.name).lower()
-    if platform_name in {"kugou", "netease", "kuwo", "qsmusic"}:
-        candidate = "music.html.jinja"
-    elif _SAFE_PLATFORM_NAME.fullmatch(platform_name):
-        candidate = f"{platform_name}.html.jinja"
-    else:
+    if not _SAFE_PLATFORM_NAME.fullmatch(platform_name):
         return default
-    return candidate if (TEMPLATES_DIR / candidate).is_file() else default
+    candidates = [f"{platform_name}.html.jinja"]
+    if platform_name in _MUSIC_PLATFORMS:
+        candidates.append("music.html.jinja")
+    for candidate in candidates:
+        if (TEMPLATES_DIR / candidate).is_file():
+            return candidate
+    return default
 
 
 async def build_html(result: ParseResult, theme: Theme) -> str:
     """两段式渲染的第一段：本地 Jinja 产出自包含 HTML（冒烟接缝）。
 
-    safe_src 过滤器逐张内联本地媒体为 base64 data URI（远程 t2i 读不到
-    本地 file://）；每次渲染独立内联预算，避免跨请求串账。样式表同样
-    内联（_inline_css_sync），产出完全自包含 HTML。
+    调用面镜像上游 render_image：数据面为 build_theme_data 的纯 JSON-like
+    树，模板唯一根变量 ``data``。autoescape=False 与上游一致——转义责任
+    全量在数据层（_escape_html），模板裸插值，开启 autoescape 会二次转义
+    卡片正文。本地媒体由 _resolve_src 内联为 base64 data URI（远程 t2i
+    读不到本地 file://），每次渲染独立内联预算。样式表同样内联
+    （_inline_css_sync），并以此覆盖上游的 _inject_fallback_icon_css：
+    内置模板自带 icon.css/tailwind.css link，替换后已在 ``<style>`` 内，
+    无需再注入重复副本。
     """
     from jinja2 import Environment, FileSystemLoader
 
-    template_data = await resolve_parse_result(result)
-    # autoescape 保持关闭：模板会用 `~` 把字面标签与值拼成 HTML 再整体
-    # `| safe` 输出，开启 autoescape 后 `| e` 的产物在 `~` 拼接时被二次
-    # 转义（Markup.__add__ 重新转义），卡片会渲染成可见的标签源码。
-    # 用户可控字段因此在模板内逐点显式 `| e`（见 macros.jinja/music）。
-    env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), enable_async=True)
     budget = InlineBudget()
-    env.filters["safe_src"] = make_safe_src(budget)
+    data = await build_theme_data(result, color_scheme=theme, budget=budget)
+    env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), enable_async=True, autoescape=False)
     template = env.get_template(_select_template(result))
-    rendered = await template.render_async(result=template_data, theme=theme)
+    rendered = await template.render_async(data=data)
     if budget.degraded > INLINE_DEGRADE_THRESHOLD:
         # 缺图不再静默：超阈值的降级意味着卡片大面积缺图，整页降级为文本
         # 比发一张「一半是灰块」的卡更诚实（2026-09-17 评审 M14）
@@ -528,9 +666,9 @@ async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> b
     """渲染结果卡片长图，返回 PNG 原始字节（上游 render_image 等价）。
 
     两阶段渲染：桥内 jinja2（build_html）产出完整 HTML，再交给 AstrBot
-    html_render 截图——html_render 不支持注册过滤器，因此不能把上游模板
-    直接当它的模板传入。renderer 为插件实例（Star 基类提供 html_render
-    方法）。
+    html_render 截图——远端 t2i 只接收最终 HTML 字符串（``{{ html }}``
+    变量注入），渲染编排全在桥侧。renderer 为插件实例（Star 基类提供
+    html_render 方法）。
     """
     html = await build_html(result, theme)
 
@@ -545,14 +683,14 @@ async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> b
     return await Path(str(image_path)).read_bytes()
 
 
-RENDER_CACHE_REV = "3"
+RENDER_CACHE_REV = "4"
 """桥本地渲染行为版本：桥侧渲染管线变更（如 2026-09-14 zoom 缩放补丁）
 时递增，使旧键缓存整体失效——上游模板变更走注入的 RENDER_TEMPLATE_VERSION，
 桥自身变更走这里，两把钥匙互不覆盖。
 
-v3：safe_src 占位计入 degraded、comment.stats/author.id/platform.display_name
-转义、music qr_code_path/url 补键、JPEG 魔数校验——旧缓存里的灰块/未转义
-产物必须整体重建。"""
+v4：Theme API v1 数据面重建（post/meta 嵌套、数据层单点转义、stats.extra
+形状翻译退役、QR 键位迁移 post.qrcode、JPEG 转换改桥内 PIL）——旧缓存
+产物与新数据面的转义/形状语义不同，必须整体失效重建。"""
 
 
 MAX_COMMENTS_LIMIT = 100
@@ -605,8 +743,25 @@ def render_cache_key(result: ParseResult, theme: Theme) -> str:
 
 
 _JPEG_MAGIC = b"\xff\xd8\xff"
-"""JPEG SOI 魔数（前 3 字节）。png_to_jpeg 失败可能返回非 JPEG 字节，
+"""JPEG SOI 魔数（前 3 字节）。PNG→JPEG 转换失败可能返回非 JPEG 字节，
 仅判非空会把坏产物写进缓存并当命中（灰块/花屏卡永久复用）。"""
+
+
+async def _png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
+    """PNG→JPEG（体积约为原图 1/8，与旧上游 FFmpeg.png_to_jpeg 同语义）。
+
+    上游 1.3.8rc6 移除 ``FFmpeg.png_to_jpeg``（渲染改 PNG 分段拼接），
+    桥的「落图片段而非 5MB 文件段」发送策略不随之改变，转换收编进桥内
+    PIL（qrcode 已依赖 Pillow，无新增依赖）；to_thread 执行不卡事件循环。
+    """
+
+    def convert() -> bytes:
+        with Image.open(BytesIO(png_data)) as im:
+            buf = BytesIO()
+            im.convert("RGB").save(buf, format="JPEG", quality=quality)
+            return buf.getvalue()
+
+    return await to_thread.run_sync(convert)
 
 
 def _is_jpeg(data: bytes) -> bool:
@@ -648,12 +803,12 @@ async def cache_or_render_image(result: ParseResult, renderer: Any) -> Path:
     key = render_cache_key(result, theme)
     dest = cache_dir / f"{uuid.uuid5(uuid.NAMESPACE_URL, key)}.jpeg"
     if not await _cache_artifact_usable(dest):
-        jpeg = await FFmpeg.png_to_jpeg(await render_image(result, renderer, theme=theme))
+        jpeg = await _png_to_jpeg(await render_image(result, renderer, theme=theme))
         if not _is_jpeg(jpeg):
             logger.warning(
                 "渲染产物非 JPEG 或为空（len=%d），拒绝写入缓存：%s", len(jpeg or b""), dest.name
             )
-            raise RenderArtifactError("render artifact is not JPEG (png_to_jpeg failed?)")
+            raise RenderArtifactError("render artifact is not JPEG (png conversion failed?)")
         temp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
         try:
             await temp.write_bytes(jpeg)

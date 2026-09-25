@@ -160,7 +160,7 @@ def _patch_buff_news_content() -> None:
     from ..vendor.nonebot_plugin_parser_lite.utils.format import (
         HTML_NEWLINE_TAGS,
         append_html_text,
-        clean_clank,
+        clean_blank,
         replace_anchor_hrefs,
     )
 
@@ -219,7 +219,7 @@ def _patch_buff_news_content() -> None:
                         data.append(Creator.graphic(url=str(src_attr)))
 
             elif isinstance(element, NavigableString):
-                if text := clean_clank(str(element)):
+                if text := clean_blank(str(element)):
                     text_buffer.append(text)
 
         flush_text()
@@ -241,7 +241,7 @@ def _patch_hupu_iter_media_and_text() -> None:
     from ..vendor.nonebot_plugin_parser_lite.utils.format import (
         HTML_NEWLINE_TAGS,
         anchor_text,
-        clean_clank,
+        clean_blank,
     )
 
     def _iter_media_and_text(
@@ -294,7 +294,7 @@ def _patch_hupu_iter_media_and_text() -> None:
                     continue
                 if anchor is not None:
                     continue
-                if text := clean_clank(str(element)):
+                if text := clean_blank(str(element)):
                     yield text
 
     # parse_rich_content 按模块全局查找调用本函数，bbs/comment 的

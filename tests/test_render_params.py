@@ -377,4 +377,7 @@ def test_render_params_match_upstream_when_clone_present(extractor: ModuleType) 
     )
     if fresh.returncode != 0:
         pytest.skip("快照 source_revision 对象不在本地克隆，跳过提取复检")
-    assert extractor.extract(fresh.stdout)["params"] == committed["params"]
+    # qrcode 锚点次源与生产调用面（run_injection）同形：Theme API v1 起
+    # QRCode 住在 render/context.py，只喂主树必然零命中。
+    context_src = extractor.read_context_source(clone, revision)
+    assert extractor.extract(fresh.stdout, context_src)["params"] == committed["params"]

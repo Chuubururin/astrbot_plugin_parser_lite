@@ -6,12 +6,8 @@ from typing import Any
 from httpx import AsyncClient
 import ujson
 
+from ...constants import COMMON_HEADER, COMMON_TIMEOUT
 from ...utils.log import logger
-
-if __name__ == "__main__":
-    COMMON_TIMEOUT = 5  # pyright: ignore[reportGeneralTypeIssues]
-else:
-    from ...constants import COMMON_TIMEOUT
 
 callback_pattern = re.compile(r"visitor_gray_callback\((.*)\)")
 
@@ -22,7 +18,7 @@ class AuthHelper:
     _refresh_lock: asyncio.Lock | None = None
 
     XSRF_TTL: float = 3 * 60 * 60  # XSRF 有效期，暂定 3 小时
-    SESSION: AsyncClient = AsyncClient(timeout=COMMON_TIMEOUT)
+    SESSION: AsyncClient = AsyncClient(timeout=COMMON_TIMEOUT, headers=COMMON_HEADER)
 
     @classmethod
     async def aclose(cls) -> None:
@@ -109,17 +105,3 @@ class AuthHelper:
             headers=await cls.get_headers(),
             follow_redirects=follow_redirects,
         )
-
-
-if __name__ == "__main__":
-
-    async def main():
-        a = await AuthHelper.get(
-            "https://m.weibo.cn/statuses/extend", params={"id": "R9JSKvDoO"}
-        )
-        try:
-            print(a.json())  # noqa: T201
-        except Exception:
-            print(a.text)  # noqa: T201
-
-    asyncio.run(main())

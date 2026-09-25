@@ -12,6 +12,8 @@ from .download.task import DownloadTaskWrapper
 from .utils.cache import CacheManager
 from .utils.ffmpeg import FFmpeg
 
+ImageLayout = Literal["grid", "x"]
+
 
 def repr_path_task(path_task: DownloadTaskWrapper[Path]) -> str:
     return f"url={path_task.url!r}"
@@ -25,6 +27,8 @@ class MediaContent:
 
     # 以字节为单位的文件大小缓存
     _size_bytes: int | None = field(default=None, init=False, repr=False)
+    is_dynamic_size: bool = field(default=False, init=False)
+    """流媒体在下载完成前无法确定文件大小"""
 
     async def get_path(self) -> Path:
         """
@@ -52,6 +56,8 @@ class MediaContent:
 
     async def get_display_size(self) -> str:
         """获取媒体文件大小"""
+        if self.is_dynamic_size:
+            return "动态大小"
         if self._size_bytes is None:
             try:
                 self._size_bytes = await DOWNLOADER.head_size(
@@ -126,7 +132,7 @@ class VideoContent(MediaContent):
 class ImageContent(MediaContent):
     """图片内容"""
 
-    pass
+    layout: ImageLayout = "grid"
 
 
 @dataclass(repr=False, slots=True)
@@ -221,7 +227,7 @@ class Author:
         return None if self.avatar is None else await self.avatar
 
 
-StatExtra = tuple[str, Any]
+StatExtra = tuple[str, str | None]
 
 
 @dataclass(slots=True)

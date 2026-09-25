@@ -10,6 +10,7 @@ from .log import logger
 K = TypeVar("K")
 V = TypeVar("V")
 
+
 class LimitedSizeDict(OrderedDict[K, V]):
     """
     定长字典

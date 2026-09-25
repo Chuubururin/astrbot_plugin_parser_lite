@@ -122,9 +122,34 @@
         'default': 'False',
         'required': False,
       }),
+      'plite_render_theme': dict({
+        'annotation': "<class 'str'>",
+        'default': "'default'",
+        'required': False,
+      }),
+      'plite_summary_in_forward': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_theme_dirs': dict({
+        'annotation': 'list[str]',
+        'default': '[]',
+        'required': False,
+      }),
       'plite_use_base64': dict({
         'annotation': "<class 'bool'>",
         'default': 'False',
+        'required': False,
+      }),
+      'plite_video_in_forward': dict({
+        'annotation': "<class 'bool'>",
+        'default': 'False',
+        'required': False,
+      }),
+      'plite_x_ck': dict({
+        'annotation': 'str | None',
+        'default': 'None',
         'required': False,
       }),
       'plite_zhihu_ck': dict({

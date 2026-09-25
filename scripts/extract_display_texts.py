@@ -2,7 +2,7 @@
 
 三层文本注入的最前端：桥内全部面向用户的运行时文案（渲染降级、懒下载问询、
 合并转发文本族、投票格式串、下载失败提示等）逐字来自上游 main 分支
-render/matchers/exception 模块；
+render/render-context/matchers/exception/helper/parsers-bilibili 模块；
 standalone 快照剥离了发送层，因此提取源是 main 分支本体（vendor 单一权威
 上游的另一条数据面）。本脚本只在 sync-upstream 工作流中运行（那里已克隆
 上游仓库）；产物 JSON **入库**（与 vendor/_upstream/pyproject.toml 同类的
@@ -48,6 +48,7 @@ from pipeline_common import dump_json, git_show, rev_parse  # noqa: E402
 _UPSTREAM_PKG = "src/nonebot_plugin_parser_lite"
 _SOURCES = {
     "render": f"{_UPSTREAM_PKG}/render/__init__.py",
+    "context": f"{_UPSTREAM_PKG}/render/context.py",
     "matchers": f"{_UPSTREAM_PKG}/matchers/__init__.py",
     "macros": f"{_UPSTREAM_PKG}/render/templates/macros.jinja",
     "exception": f"{_UPSTREAM_PKG}/exception.py",
@@ -87,6 +88,10 @@ _TEXT_ANCHORS: dict[str, tuple[str, str]] = {
     # 路径后规则即失效，须降级为 equals（2026-09-17 评审 M10）
     "extra_label_danmaku": ("equals_repeated", "弹幕"),
     "extra_label_coin": ("equals_repeated", "硬币"),
+    # Theme API v1 数据层（render/context.py）的兜底与 alt 文案：桥镜像
+    # _display_size/_serialize_content 时逐字消费（2026-09-25 票07 适配）
+    "unknown_size": ("equals", "未知大小"),
+    "cover_alt": ("equals", "专辑封面"),
 }
 
 # 模板常量的占位符语义（texts.py 行尾注释；顺序即 {0}/{1}/… 顺序）
@@ -107,6 +112,8 @@ _ANCHOR_SOURCE: dict[str, str] = {
     "video_zero_size": "helper",
     "extra_label_danmaku": "bilibili",
     "extra_label_coin": "bilibili",
+    "unknown_size": "context",
+    "cover_alt": "context",
 }
 
 # 注入防火墙：显示文本经分析数据进入生成代码字符串字面量，回车符破坏行结构、
@@ -264,10 +271,12 @@ def extract(
     exception_src: str = "",
     helper_src: str = "",
     bilibili_src: str = "",
+    context_src: str = "",
 ) -> dict[str, Any]:
     """纯函数：上游源码 → 提取产物数据（幂等确定）。"""
     found = (
         _candidates(ast.parse(render_src))
+        + _candidates(ast.parse(context_src))
         + _candidates(ast.parse(matchers_src))
         + _candidates(ast.parse(exception_src))
         + _candidates(ast.parse(helper_src))
@@ -292,7 +301,7 @@ def extract(
 
 
 # 快照注记的拼接顺序（source_digest 公式的一部分；新增提取源时须显式扩展）
-_DIGEST_ORDER = ("render", "matchers", "macros", "exception", "helper", "bilibili")
+_DIGEST_ORDER = ("render", "matchers", "macros", "exception", "helper", "bilibili", "context")
 
 
 def build_payload(sources: dict[str, str], revision: str) -> dict[str, Any]:
@@ -304,6 +313,7 @@ def build_payload(sources: dict[str, str], revision: str) -> dict[str, Any]:
         sources["exception"],
         sources["helper"],
         sources["bilibili"],
+        sources["context"],
     )
     payload["source_revision"] = revision
     payload["source_digest"] = hashlib.sha256(
@@ -331,6 +341,7 @@ def scan_candidates(sources: dict[str, str], known_values: set[str]) -> list[str
     """
     found = (
         _candidates(ast.parse(sources["render"]))
+        + _candidates(ast.parse(sources["context"]))
         + _candidates(ast.parse(sources["matchers"]))
         + _candidates(ast.parse(sources["exception"]))
         + _candidates(ast.parse(sources["helper"]))

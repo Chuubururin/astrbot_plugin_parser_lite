@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROBE_PATH = REPO_ROOT / "scripts" / "message_structure_probe.py"
 SENDER_PATH = REPO_ROOT / "bridge" / "sender.py"
 UPSTREAM_RENDER = "src/nonebot_plugin_parser_lite/render/__init__.py"
+UPSTREAM_RENDER_CONTEXT = "src/nonebot_plugin_parser_lite/render/context.py"
 _SPLIT_FUNCTIONS = ("_find_text_split_end", "split_text_by_length_with_punct")
 # ``_ForwardText.split`` **刻意不对齐上游**：protected 块硬超 max_len 时
 # 桥内按 max_len 硬切（保护语义让位于不可发送的硬上限，见 sender.py 与
@@ -254,7 +255,18 @@ def test_bridge_split_surface_matches_upstream_ast(extractor: ModuleType) -> Non
     if upstream.returncode != 0:
         pytest.skip("快照 source_revision 对象不在本地克隆，跳过结构指纹钉扎")
     upstream_src = upstream.stdout
-    upstream_punct = extractor.extract(upstream_src)["params"]["text_split_punctuation"]["value"]
+    # qrcode 锚点跟随 Theme API 住在 render/context.py，两棵树一起交给提取器
+    # （与 scripts/run_injection.py 的生产调用面同形；文件缺失时回退 None）。
+    up_context = subprocess.run(
+        ["git", "-C", str(clone), "show", f"{revision}:{UPSTREAM_RENDER_CONTEXT}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    context_src = up_context.stdout if up_context.returncode == 0 else None
+    upstream_punct = extractor.extract(upstream_src, context_src)["params"][
+        "text_split_punctuation"
+    ]["value"]
     assert upstream_punct == render_params.TEXT_SPLIT_PUNCTUATION, (
         "标点切分集漂移：渲染参数注入层与上游不一致"
     )

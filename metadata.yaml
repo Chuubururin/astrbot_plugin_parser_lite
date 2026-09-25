@@ -9,10 +9,10 @@ name: astrbot_plugin_parser_lite
 desc: 自动解析 B 站/抖音/小红书等平台分享链接与 JSON 卡片并转发为内容卡片；nonebot-plugin-parser-lite 的 AstrBot 桥接版
 short_desc: 自动解析社交平台分享链接并转发内容
 display_name: 链接解析 Lite
-# 版本直接沿用上游 nonebot-plugin-parser-lite（当前 v1.3.7-pre-release.4），
+# 版本直接沿用上游 nonebot-plugin-parser-lite（当前 v1.3.8rc6），
 # 由两层注入流水线随 roll 自动再生；release tag 必须与本字段锁步（release.yml
 # 校验）。version 行保持裸值、无引号——release 工作流的正则解析依赖此格式契约。
-version: v1.3.7-pre-release.4
+version: v1.3.8rc6
 author: Chuubururin
 repo: https://github.com/Chuubururin/astrbot_plugin_parser_lite
 # 宿主版本范围：文档要求 PEP 440 且无 v 前缀；以 > 开头裸写会被 YAML 当作

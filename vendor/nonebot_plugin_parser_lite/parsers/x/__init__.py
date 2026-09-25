@@ -1,11 +1,14 @@
-from typing import Any, ClassVar
+from time import monotonic
+from typing import Any, ClassVar, Final
+import uuid
 
 from msgspec import convert
+import ujson
 
-from ...data import Comment
+from ...utils.cookie import ck2dict
 from ...utils.format import format_num
+from ...utils.log import logger
 from ..base import (
-    DOWNLOADER,
     BaseParser,
     ContentItem,
     MatchWithParams,
@@ -14,69 +17,93 @@ from ..base import (
     Platform,
     PlatformEnum,
     handle,
+    pconfig,
 )
 from .model import Tweet, TweetCard, TweetEntry
 from .util import parse_link_card
 
-
-def _get_tweet_result(item: dict) -> dict | None:
-    item_content = item.get("itemContent")
-    if not isinstance(item_content, dict):
-        return None
-    if item_content.get("__typename") != "TimelineTweet":
-        return None
-
-    tweet_results = item_content.get("tweet_results") or {}
-    result = tweet_results.get("result") or {}
-    if result.get("__typename") not in {"Tweet", "TweetWithVisibilityResults"}:
-        return None
-    return tweet_results
-
-
-def _iter_timeline_tweet_results(node: dict):
-    """提取 TimelineItem 和 TimelineModule.items 中的 Tweet"""
-    if tweet_result := _get_tweet_result(node):
-        yield tweet_result
-        return
-
-    content = node.get("content")
-    if isinstance(content, dict):
-        yield from _iter_timeline_tweet_results(content)
-
-    for item in node.get("items", []):
-        if isinstance(item, dict):
-            yield from _iter_timeline_tweet_results(item)
-
-    item = node.get("item")
-    if isinstance(item, dict):
-        yield from _iter_timeline_tweet_results(item)
-
-
-def _get_rest_id(result: dict) -> str | None:
-    """兼容 Tweet / TweetWithVisibilityResults，取出真实 tweet 的 rest_id."""
-    typename = result.get("__typename")
-    if typename == "Tweet":
-        return result.get("rest_id")
-    if typename == "TweetWithVisibilityResults":
-        inner = result.get("tweet") or {}
-        return inner.get("rest_id")
-    return None
-
-
-def _get_tweet_legacy(result: dict) -> dict[str, Any]:
-    if result.get("__typename") == "TweetWithVisibilityResults":
-        result = result.get("tweet") or {}
-    return result.get("legacy") or {}
+V2_BEARER = (
+    "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8x"
+    "nZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+)
+FEATURES: Final[str] = (
+    '{"creator_subscriptions_tweet_preview_api_enabled":true,"premium_content_api_read_enabled":false,'
+    '"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,'
+    '"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,'
+    '"rweb_cashtags_composer_attachment_enabled":true,"responsive_web_jetfuel_frame":true,"rweb_sports_post_context_enabled":true,'
+    '"responsive_web_grok_share_attachment_enabled":true,"responsive_web_grok_annotations_enabled":true,"articles_preview_enabled":true,'
+    '"responsive_web_edit_tweet_api_enabled":true,"rweb_conversational_replies_downvote_enabled":false,'
+    '"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,'
+    '"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,'
+    '"content_disclosure_indicator_enabled":true,"content_disclosure_ai_generated_indicator_enabled":true,'
+    '"responsive_web_grok_show_grok_translated_post":true,"responsive_web_grok_analysis_button_from_backend":true,'
+    '"post_ctas_fetch_enabled":false,"rweb_cashtags_enabled":true,"freedom_of_speech_not_reach_fetch_enabled":true,'
+    '"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,'
+    '"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":false,'
+    '"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,'
+    '"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"responsive_web_nested_quote_preview_enabled":false,'
+    '"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,'
+    '"responsive_web_grok_community_note_auto_translation_is_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true}'
+)
+FIELD_TOGGLES: Final[str] = (
+    '{"withArticleRichContentState":true,"withArticlePlainText":false,"withArticleSummaryText":true,"withArticleVoiceOver":true}'
+)
 
 
 class XParser(BaseParser):
     platform: ClassVar[Platform] = Platform(name=PlatformEnum.X, display_name="X")
+    guest_token_ttl: ClassVar[float] = 2 * 60 * 60
 
     def __init__(self):
         super().__init__()
-        self.headers.update(
-            {"Host": "easycomment.ai", "Content-Type": "application/json"}
+        self.guestToken = None
+        self.guestTokenCreatedAt = 0.0
+        self.httpx.headers.update(
+            {
+                "Authorization": V2_BEARER,
+            }
         )
+        if ck := pconfig.x_ck:
+            self.cookies = ck2dict(ck)
+        else:
+            self.cookies = None
+
+    async def ensure_guest_token(self) -> str:
+        """Return a guest token and refresh it after its two-hour TTL."""
+        now = monotonic()
+        if (
+            self.guestToken is None
+            or now - self.guestTokenCreatedAt >= self.guest_token_ttl
+        ):
+            r = await self.httpx.post(
+                "https://api.x.com/1.1/guest/activate.json",
+            )
+            try:
+                r.raise_for_status()
+                guest_token = ujson.loads(r.content).get("guest_token")
+                if not isinstance(guest_token, str) or not guest_token:
+                    raise ValueError("guest_token missing")
+                self.guestToken = guest_token
+                self.guestTokenCreatedAt = monotonic()
+            except Exception as e:
+                raise ParseException(r.text) from e
+        return self.guestToken
+
+    async def getAuthHeaders(self) -> dict[str, Any]:
+        csrf_token = (self.cookies or {}).get("ct0") or uuid.uuid4().hex
+        headers = {
+            "x-twitter-active-user": "yes",
+            "x-twitter-client-language": "zh-cn",
+            "x-csrf-token": csrf_token,
+        }
+        if self.cookies and self.cookies.get("auth_token"):
+            headers["Cookie"] = (
+                f"auth_token={self.cookies['auth_token']}; ct0={csrf_token};"
+            )
+            headers["x-twitter-auth-type"] = "OAuth2Session"
+        else:
+            headers["x-guest-token"] = await self.ensure_guest_token()
+        return headers
 
     def _get_link_card(self, card: TweetCard | None) -> ContentItem | None:
         """将 X 的 unified_card 或传统 binding_values 转换为链接卡片"""
@@ -97,55 +124,9 @@ class XParser(BaseParser):
             content.append(link_card)
         return content
 
-    def _build_comment(self, raw: TweetEntry):
-        tweet = raw.result.as_tweet
-        user = tweet.core.user_results.result
-        legacy = tweet.legacy
-        return self.create_comment(
-            author=self.create_author(
-                name=user.core.name,
-                avatar_url=user.avatar_url,
-                description=user.legacy.description,
-                id=user.core.screen_name,
-            ),
-            content=self._build_content(tweet),
-            timestamp=legacy.time_local,
-            stats=self.create_stats(
-                like_count=format_num(legacy.favorite_count),
-                comment_count=format_num(legacy.reply_count),
-            ),
-        )
-
-    def _build_comments(
-        self,
-        root_id: str,
-        tweet_map: dict[str, dict],
-    ) -> list[Comment]:
-        comments: dict[str, Comment] = {}
-        parents: dict[str, str] = {}
-        for rest_id, tweet_results in tweet_map.items():
-            if rest_id == root_id:
-                continue
-            result = tweet_results.get("result") or {}
-            parent_id: str | None = _get_tweet_legacy(result).get(
-                "in_reply_to_status_id_str"
-            )
-            if not parent_id:
-                continue
-            comments[rest_id] = self._build_comment(convert(tweet_results, TweetEntry))
-            parents[rest_id] = parent_id
-
-        roots: list[Comment] = []
-        for rest_id, comment in comments.items():
-            parent_id = parents[rest_id]
-            parent = comments.get(parent_id)
-            if parent is not None:
-                parent.replies.append(comment)
-            elif parent_id == root_id:
-                roots.append(comment)
-        return roots
-
-    def collect_data(self, raw: TweetEntry, is_repost: bool = False) -> ParseResult:
+    async def collect_data(
+        self, raw: TweetEntry, is_repost: bool = False
+    ) -> ParseResult:
         tweet = raw.result.as_tweet
         legacy = tweet.legacy
 
@@ -156,7 +137,42 @@ class XParser(BaseParser):
         repost = None
         repost_status = tweet.quoted_status_result or tweet.retweeted_status_result
         if not is_repost and repost_status:
-            repost = self.collect_data(repost_status, True)
+            repost = await self.collect_data(repost_status, True)
+        if tweet.legacy.lang and tweet.legacy.lang != "zh":
+            translation = tweet.grok_translated_post_with_availability
+            if translation.is_available and translation.data:
+                content.append(
+                    self.create_quote(
+                        text=translation.data.translation,
+                        title=f"由 Grok 翻译自 {tweet.legacy.lang}",
+                    )
+                )
+            elif tweet.is_translatable and self.cookies:
+                try:
+                    response = await self.httpx.post(
+                        "https://api.x.com/2/grok/translation.json",
+                        headers=await self.getAuthHeaders(),
+                        json={
+                            "content_type": "POST",
+                            "id": tweet.rest_id,
+                            "dst_lang": "zh",
+                        },
+                    )
+                    response.raise_for_status()
+                    try:
+                        translated_text = response.json()["result"]["text"]
+                        if not isinstance(translated_text, str) or not translated_text:
+                            raise ValueError("translation text missing")
+                        content.append(
+                            self.create_quote(
+                                text=translated_text,
+                                title=f"由 Grok 翻译自 {tweet.legacy.lang}",
+                            )
+                        )
+                    except Exception:
+                        logger.exception(f"翻译解析失败: {response.text}")
+                except Exception:
+                    logger.exception("获取翻译失败")
 
         return self.result(
             content=content,
@@ -165,11 +181,13 @@ class XParser(BaseParser):
             author=self.create_author(
                 name=user.core.name,
                 avatar_url=user.avatar_url,
-                description=user.legacy.description,
+                description=user.profile_bio.description,
                 id=user.core.screen_name,
             ),
             stats=self.create_stats(
-                view_count=format_num(int(tweet.views.count)),
+                view_count=format_num(
+                    int(tweet.views.count) if tweet.views.count is not None else None
+                ),
                 like_count=format_num(legacy.favorite_count),
                 comment_count=format_num(legacy.reply_count),
                 collect_count=format_num(legacy.bookmark_count),
@@ -184,67 +202,41 @@ class XParser(BaseParser):
     async def _parse(self, searched: MatchWithParams) -> ParseResult:
         tweet_id = searched[1]
 
-        response = await DOWNLOADER.client.post(
-            "https://easycomment.ai/api/twitter/v1/free/get-tweet-detail",
-            json={"pid": tweet_id},
-            headers=self.headers,
-            use_curl_cffi=True,
+        response = await self.httpx.get(
+            "https://x.com/i/api/graphql/Xl0tsHf4AzflMRjbw9e70A/TweetResultByRestId",
+            params={
+                "variables": ujson.dumps(
+                    {
+                        "tweetId": tweet_id,
+                        "includePromotedContent": True,
+                        "withBirdwatchNotes": True,
+                        "withVoice": True,
+                        "withCommunity": True,
+                        "withV2Timeline": True,
+                        "withQuickPromoteEligibilityTweetFields": True,
+                    }
+                ),
+                "features": FEATURES,
+                "fieldToggles": FIELD_TOGGLES,
+            },
+            headers=await self.getAuthHeaders(),
         )
         try:
             response.raise_for_status()
         except Exception as e:
             raise ParseException(response.text) from e
-        res = response.json()
+        try:
+            res = response.json()
+        except Exception as e:
+            raise ParseException("X API 返回了无效 JSON") from e
+        if not isinstance(res, dict):
+            raise ParseException("X API 返回了无效 JSON 对象")
 
-        if res["code"] != 100000:
-            raise ParseException(res)
-
-        entries = next(
-            (
-                instruction["entries"]
-                for instruction in res["data"]["data"][
-                    "threaded_conversation_with_injections_v2"
-                ]["instructions"]
-                if instruction["type"] == "TimelineAddEntries"
-            ),
-            None,
-        )
-        if entries is None:
-            raise ParseException("TimelineAddEntries not found")
-
-        # 所有 Tweet 的索引：rest_id -> tweet_results
-        tweet_map: dict[str, dict] = {}
-        # 当前链接对应的那条 tweet
-        root_entry: dict | None = None
-
-        for entry in entries:
-            for tweet_results in _iter_timeline_tweet_results(entry):
-                result = tweet_results.get("result") or {}
-                rest_id = _get_rest_id(result)
-                if not rest_id:
-                    continue
-
-                tweet_map[rest_id] = tweet_results
-                if rest_id == tweet_id:
-                    root_entry = tweet_results
-
-        if root_entry is None:
-            raise ParseException(f"Tweet {tweet_id} not found")
-
-        root_result = root_entry.get("result") or {}
-        legacy = root_result.get("legacy") or {}
-
-        # 填上“父推文”作为 quoted_status_result，便于后面 collect_data 统一处理
-        if "quoted_status_result" not in root_result:
-            in_reply_to_id = legacy.get("in_reply_to_status_id_str") or legacy.get(
-                "conversation_id_str"
-            )
-            if in_reply_to_id and in_reply_to_id != tweet_id:
-                parent_entry = tweet_map.get(in_reply_to_id)
-                if parent_entry is not None:
-                    root_result["quoted_status_result"] = parent_entry
-
-        tweet = convert(root_entry, TweetEntry)
-        result = self.collect_data(tweet)
-        result.comments = self._build_comments(tweet_id, tweet_map)
-        return result
+        tweet_result = (res.get("data") or {}).get("tweetResult") or {}
+        if not tweet_result:
+            raise ParseException(f"tweetResult not found: {tweet_result}")
+        try:
+            tweet = convert(tweet_result, TweetEntry)
+        except Exception as e:
+            raise ParseException(f"fail to parse entry: {tweet_result}") from e
+        return await self.collect_data(tweet)

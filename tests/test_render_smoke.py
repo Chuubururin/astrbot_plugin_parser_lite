@@ -1,8 +1,9 @@
 """两段式渲染第一段离线冒烟（入库取代 /tmp 脚本）。
 
 断言本地 Jinja 段产出自包含 HTML：无 ``file://`` 引用（远程 t2i 读不到
-本地文件系统）、safe_src 内联与预算按既定约束生效。第二段（AstrBot
-html_render 远程出图）属网络路径，归隔离区而非 required。
+本地文件系统）、_resolve_src 内联与预算按既定约束生效。Theme API v1 起
+转义单点在数据层（build_theme_data/_escape_html），模板族只剩 default。
+第二段（AstrBot html_render 远程出图）属网络路径，归隔离区而非 required。
 """
 
 from __future__ import annotations
@@ -103,8 +104,8 @@ async def test_stage_one_inlines_stylesheets() -> None:
     assert "<link" not in html, "存在外链样式表，远程 t2i 渲染为无样式裸 HTML"
     assert "<style>" in html
     assert "--default-mono-font-family" in html, "tailwind.css 内容未内联"
-    assert ".ambient-canvas" in html, "ambient.css 内容未内联"
-    assert "width: 620px" in html, "620px 卡片画布特征缺失（模板资产未对齐上游）"
+    assert "--icon-color-view" in html, "icon.css 内容未内联"
+    assert "width:620px" in html, "620px 卡片画布特征缺失（模板资产未对齐上游）"
 
 
 async def test_stage_one_centers_card_for_fixed_t2i_viewport() -> None:
@@ -122,11 +123,10 @@ async def test_stage_one_escapes_attacker_controlled_html() -> None:
     """用户可控字段必须 HTML 转义（2026-09-14 双轴评审）：标题/作者名/评论
     作者等字段源自被解析页面，且第一段 HTML 会被送给**远程** t2i 端点渲染，
     裸插值等于把解析侧内容当 HTML 执行（可注入伪造卡片内容、外链、追踪
-    像素）。
-
-    转义走模板内逐点 ``| e`` 而非 Jinja autoescape：模板用 ``~`` 拼装
-    HTML 结构，开启 autoescape 会让 ``| e`` 的产物在拼接处二次转义，卡片
-    退化成可见标签源码（本用例的结构完整性由下一条用例守护）。
+    像素）。Theme API v1 起转义单点在**数据层**（build_theme_data 末尾
+    _escape_html 递归），模板裸插值 + Environment(autoescape=False)，
+    全树恰好一次转义——旧的「两模板逐字段判定有没有 ``| e``」转义矩阵
+    随 music 模板退役（卡片结构不被转义由下一条用例守护）。
     """
     pconfig.plite_append_qrcode = False
     payload = '<img src=x onerror="alert(1)">'
@@ -186,9 +186,10 @@ async def test_stage_one_does_not_mutate_parse_result() -> None:
     assert result.ai_summary == payload, "render.py 就地改写了 ai_summary"
 
 
-async def test_stage_one_escapes_music_template_fields() -> None:
-    """music.html.jinja 的专辑/歌词/简介与标题作者同样无 ``| e``（评审漏点）：
-    模板族里只有 macros 的少数字段带转义，音乐模板整体裸插值。"""
+async def test_stage_one_escapes_music_platform_fields() -> None:
+    """音乐平台卡面转义（Theme API v1）：music.html.jinja 已随上游退役，
+    音乐平台落 default 模板族——专辑/歌词/简介（post.extra）不再进模板
+    输出面，转义由数据层统一兜住；标题/作者等实际渲染字段必须转义。"""
     pconfig.plite_append_qrcode = False
     payload = "<img src=x onerror=alert(1)>"
     result = ParseResult(
@@ -202,58 +203,35 @@ async def test_stage_one_escapes_music_template_fields() -> None:
 
     html = await render.build_html(result, "light")
 
-    assert html.count("&lt;img src=x") >= 5, "音乐模板转义不完整（标题/作者/专辑/歌词/简介）"
-    assert "<img src=x onerror" not in html, "音乐模板存在未转义字段"
+    assert payload not in html, "音乐平台卡面存在未转义字段"
+    assert html.count("&lt;img src=x") >= 2, "标题/作者转义产物缺失"
 
 
-async def test_stage_one_escapes_title_in_both_templates() -> None:
-    """标题在 **default 与 music 两个模板**里都必须无原始 payload。
+async def test_stage_one_escapes_title_exactly_once() -> None:
+    """标题恰好一次转义（旧「双模板过滤状态不一致」契约的换代留痕）。
 
-    2026-09-14 容器端到端实测暴露的漏点：``title`` 在两个模板里的过滤状态
-    不一致——``macros.jinja:420`` 是 ``{{ result.title | e }}``，而
-    ``music.html.jinja:6/52`` 是裸 ``{{ result.title }}``。桥必须自己转义
-    title（否则音乐卡被注入原始 HTML），代价是 default 卡上被模板的 ``| e``
-    二次转义、含特殊字符的标题显示成 ``&amp;lt;`` 字面量——安全优先，接受
-    该观感损失（正常标题无特殊字符不受影响）。
-
-    本用例对两种模板各断言：原始 payload 一律不出现；default 卡断言
-    ``&amp;lt;``（二次转义后形态），music 卡断言 ``&lt;``（单次转义后形态）
-    ——这正是「两模板同名字段过滤状态不同」的机械留痕，模板漂移时先红。
+    旧契约：macros.jinja 的 ``| e`` 与 music 模板裸插值不一致，桥必须预转
+    title，代价是 default 卡 ``&amp;lt;`` 双转义字面量。Theme API v1 把转义
+    收进数据层单点，模板全裸插值 + autoescape=False——桥若恢复字段级预转义
+    （或误开 autoescape），本用例的 ``&amp;lt;`` 断言立即变红。
     """
     pconfig.plite_append_qrcode = False
     payload = "<img src=x onerror=alert(1)>"
+    result = _result()
+    result.title = payload
 
-    # default 卡：模板带 | e，桥转 + 模板转 = 双重转义
-    default_result = _result()
-    default_result.title = payload
-    default_html = await render.build_html(default_result, "light")
-    assert payload not in default_html, "default 模板标题未转义"
-    assert "&amp;lt;img" in default_html, (
-        "default 卡标题未呈现预期的二次转义形态——若模板去掉 | e 需同步本断言"
-    )
-
-    # music 卡：模板裸插值，桥转一次即到位（此处若回归会变成真实 XSS）
-    music_result = ParseResult(
-        platform=Platform(name=PlatformEnum.KUGOU, display_name="酷狗"),
-        author=Author(name="作者"),
-        url="https://x.test/",
-        content=[],
-        title=payload,
-    )
-    music_html = await render.build_html(music_result, "light")
-    assert payload not in music_html, "music 模板标题未转义（此路径无模板兜底 = 注入）"
-    assert "&lt;img src=x" in music_html, "music 卡缺失标题单次转义产物"
-    head = music_html.split("</title>", 1)[0]
-    assert payload not in head, "music 模板的 <title> 元素未转义"
+    html = await render.build_html(result, "light")
+    assert payload not in html, "标题未转义泄入待渲染页面"
+    assert "&lt;img src=x" in html, "标题单次转义产物缺失"
+    assert "&amp;lt;" not in html, "标题被二次转义（数据层之外多了一道转义）"
 
 
 async def test_stage_one_keeps_structural_markup_intact(
     tmp_path: Path,
 ) -> None:
-    """模板自身拼装的 HTML 结构必须仍是真标签：render_content_items 用
-    ``~`` 拼接字符串再整体 ``| safe`` 输出，若被转义会退化成可见的标签
-    源码（autoescape 方案实证踩到该破口，改为逐点 ``| e`` 后此用例守护
-    结构不被回归破坏）。
+    """模板自身拼装的 HTML 结构必须仍是真标签：macros 用 ``~`` 拼接字符串
+    产出结构，转义只在数据层对**值**发生；若数据层/桥误伤结构（或误开
+    autoescape），卡片会退化成可见标签源码——本用例守护结构不被回归破坏。
     """
     from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.data import (
         ImageContent,
@@ -280,8 +258,8 @@ async def test_stage_one_keeps_structural_markup_intact(
     assert "<img" in html, "结构标签被转义成文本"
     assert "&lt;img" not in html, "结构标签被转义成文本"
     assert "纯文本段落" in html
-    assert "media-grid" in html, "图片宫格结构缺失"
-    # 正文里的标签必须被转义（内容项文本走 | e），不得与结构标签混淆
+    assert "single-image" in html, "图片容器结构缺失"
+    # 正文里的标签必须被转义（文本项的值经数据层 _escape_html），不得与结构标签混淆
     assert "<b>不该成标签</b>" not in html, "内容项文本未转义"
     assert "&lt;b&gt;不该成标签&lt;/b&gt;" in html, "内容项文本转义产物缺失"
 
@@ -298,52 +276,45 @@ async def test_stage_one_carries_theme_canvas_background() -> None:
     )
 
 
-async def test_stage_one_translates_scalar_stats_extra() -> None:
-    """P1 回归（2026-09-13 生产流量 BV1enYL6SEtU 渲染失败）：vendor
-    standalone 的 stats.extra 值为标量（{"danmaku": "321"}），而上游 main
-    模板契约要求值为（标签, 数值）二元组（macros.jinja `{% set label,
-    amount = value %}`），标量直供必然 ValueError 降级文本。桥作为 ACL
-    在 resolve_parse_result 完成形状翻译；vendor roll 到 main 新形状后
-    （值已是二元组）翻译自动退化为透传。"""
-    scalar = _result()
-    scalar.stats = Stats(
+async def test_stage_one_renders_paired_stats_extra() -> None:
+    """stats.extra 二元组形状直供渲染（2026-09-13 P1 回归的换代形态）。
+
+    旧 vendor standalone 的标量形状与桥内 ACL 翻译表（_EXTRA_LABELS）已随
+    Theme API v1 roll 退役：vendor 与 main 同源后 stats.extra 值就是
+    （标签, 数值）二元组，_serialize_stats 逐项拆进 ``extra[]`` 列表、
+    模板按 item.label/item.value 裸插值。标量直供在上游/桥镜像里会把
+    字符串按字符切碎（"321" → "3","2"）——那是上游自身语义，桥不另设防线。
+    """
+    paired = _result()
+    paired.stats = Stats(
         view_count="1.2万",
         like_count="500",
-        extra={"danmaku": "321", "coin": "10"},  # vendor B站 parser 现行形状
+        extra={"danmaku": ("弹幕", "321"), "coin": ("硬币", "10")},  # vendor 现行形状
     )
-    html = await render.build_html(scalar, "light")
-    assert "弹幕" in html and "321" in html, "danmaku 标量未翻译渲染"
-    assert "硬币" in html and "10" in html, "coin 标量未翻译渲染"
-
-    paired = _result()
-    paired.stats = Stats(extra={"danmaku": ("弹幕X", "9")})  # main 新形状
-    html2 = await render.build_html(paired, "light")
-    assert "弹幕X" in html2 and "9" in html2, "二元组形状未透传"
+    html = await render.build_html(paired, "light")
+    assert "弹幕" in html and "321" in html, "danmaku 二元组未渲染"
+    assert "硬币" in html and "10" in html, "coin 二元组未渲染"
 
 
-async def test_translate_stats_extra_returns_copy_not_inplace() -> None:
-    """ACL 翻译不改写共享 ParseResult：stats.extra 保持 vendor 原形状。
+async def test_serialize_stats_returns_new_dict_not_inplace() -> None:
+    """数据层镜像不改写共享 ParseResult：stats.extra 保持 vendor 原对象。
 
-    sender 与 render 共享同一 ParseResult 实例；原地改写会把翻译后的二元组
-    泄漏回发送侧（本应显示原样标量值却变成标签元组）。"""
-    stats = Stats(view_count="1.2万", like_count="500", extra={"danmaku": "321"})
-    translated = render._translate_stats_extra(stats)
-    assert stats.extra == {"danmaku": "321"}, "原对象被就地改写"
-    assert translated is not stats
-    assert translated.extra == {"danmaku": ("弹幕", "321")}
-    # 幂等：已是二元组的输入原样透传（vendor roll 到 main 新形状后自动退化）
-    passthrough = Stats(extra={"danmaku": ("弹幕X", "9")})
-    again = render._translate_stats_extra(passthrough)
-    assert again.extra == {"danmaku": ("弹幕X", "9")}
-    assert passthrough.extra == {"danmaku": ("弹幕X", "9")}
+    sender 与 render 共享同一 ParseResult 实例；旧 ACL 的副本纪律由
+    _serialize_stats 的「构建新 dict」天然承接——输出是形状翻译后的
+    JSON-like 列表，原 Stats.extra 字典必须原封不动。"""
+    stats = Stats(view_count="1.2万", like_count="500", extra={"danmaku": ("弹幕", "321")})
+    serialized = render._serialize_stats(stats)
+    assert stats.extra == {"danmaku": ("弹幕", "321")}, "原对象被就地改写"
+    assert serialized["extra"] == [{"key": "danmaku", "label": "弹幕", "value": "321"}]
+    assert serialized["view_count"] == "1.2万"
 
 
-async def test_safe_src_inlines_and_accounts_budget(tmp_path: Path) -> None:
-    """safe_src：本地图片内联为 data URI 并入账预算。"""
+async def test_resolve_src_inlines_and_accounts_budget(tmp_path: Path) -> None:
+    """_resolve_src：本地图片内联为 data URI 并入账预算。"""
     img = tmp_path / "cover.png"
     img.write_bytes(_MINIMAL_PNG)
     budget = render.InlineBudget()
-    src = await render.make_safe_src(budget)(_HasPath(img))
+    src = await render._resolve_src(_HasPath(img), budget=budget)
 
     assert src is not None and src.startswith("data:image/png;base64,")
     # 预算口径为 base64 后的字节（POST 给远程 t2i 的真实体量），非原始文件字节
@@ -352,19 +323,27 @@ async def test_safe_src_inlines_and_accounts_budget(tmp_path: Path) -> None:
     assert budget.degraded == 0
 
 
-async def test_safe_src_enforces_budget_and_placeholder(tmp_path: Path) -> None:
-    """safe_src：超预算/缺失/非图片一律占位图降级，绝不产生本地路径引用。"""
+async def test_resolve_src_enforces_budget_and_placeholder(tmp_path: Path) -> None:
+    """_resolve_src：超预算/缺失/非图片一律占位图降级，绝不产生本地路径引用。"""
     img = tmp_path / "cover.png"
     img.write_bytes(_MINIMAL_PNG)
 
     exhausted_budget = render.InlineBudget()
     exhausted_budget.used = render.INLINE_BUDGET_BYTES
-    exhausted = render.make_safe_src(exhausted_budget)
-    assert await exhausted(_HasPath(img)) == render.PLACEHOLDER_IMAGE
+    assert await render._resolve_src(_HasPath(img), budget=exhausted_budget) == (
+        render.PLACEHOLDER_IMAGE
+    )
 
-    missing: Any = render.make_safe_src(render.InlineBudget())
-    assert await missing(_HasPath(tmp_path / "nope.png")) == render.PLACEHOLDER_IMAGE
-    assert await missing(_HasPath(tmp_path / "not-image.txt")) == render.PLACEHOLDER_IMAGE
+    fresh_budget = render.InlineBudget()
+    assert await render._resolve_src(_HasPath(tmp_path / "nope.png"), budget=fresh_budget) == (
+        render.PLACEHOLDER_IMAGE
+    )
+    assert (
+        await render._resolve_src(
+            _HasPath(tmp_path / "not-image.txt"), budget=render.InlineBudget()
+        )
+        == render.PLACEHOLDER_IMAGE
+    )
 
 
 class _ShotRenderer:
@@ -386,10 +365,6 @@ async def test_cache_or_render_image_reuses_cache(tmp_path: Path, monkeypatch: A
     分钟内被完整重渲并覆写（11.4MB PNG 重复截图），上游「命中即复用、跨
     重启复用」语义从未生效。
     """
-    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.utils.ffmpeg import (
-        FFmpeg,
-    )
-
     shot = tmp_path / "screenshot.png"
     shot.write_bytes(_MINIMAL_PNG)
     jpeg_marker = b"\xff\xd8\xff\xe0-fake-jpeg"
@@ -397,7 +372,7 @@ async def test_cache_or_render_image_reuses_cache(tmp_path: Path, monkeypatch: A
     async def _fake_png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
         return jpeg_marker
 
-    monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_fake_png_to_jpeg))
+    monkeypatch.setattr(render, "_png_to_jpeg", _fake_png_to_jpeg)
 
     calls: list[int] = []
     renderer = _ShotRenderer(shot, calls)
@@ -484,31 +459,33 @@ def test_inline_budget_degrades_are_deduped_by_media(tmp_path: Path, monkeypatch
 async def test_placeholder_degraded_folds_across_objects() -> None:
     """占位降级按 reason:type:method 折叠不同对象（刻意取舍）。
 
-    占位图是 1×1 透明 GIF（非可见灰块）；评论头像（macros.jinja:80/105）
-    不带 return_none_on_fail——若逐对象计数，≥3 条无头像评论的正常卡片
+    占位图是 1×1 透明 GIF（非可见灰块）；评论头像/回复头像不带
+    return_none_on_fail——若逐对象计数，≥3 条无头像评论的正常卡片
     会误触整页降级（INLINE_DEGRADE_THRESHOLD=2），整卡退化为纯文本。
     内容图的预算类降级按文件路径逐张计数（test_inline_budget_degrades_
     are_deduped_by_media），不受此折叠影响。
     """
     budget = render.InlineBudget()
-    safe_src = render.make_safe_src(budget)
 
     class _NoMedia:
         pass
 
     objs = [_NoMedia() for _ in range(3)]
     for obj in objs:
-        placeholder = await safe_src(obj, "get_path")
+        placeholder = await render._resolve_src(obj, budget=budget)
         assert placeholder is not None
     assert budget.degraded == 1, "同类结构失败被逐对象计数——会误触整页降级"
 
     # 不同方法（结构性失败的不同侧面）仍分别计数
-    await safe_src(objs[0], "get_cover_path")
+    await render._resolve_src(objs[0], "get_cover_path", budget=budget)
     assert budget.degraded == 2
 
     # 装饰路径（return_none_on_fail=True）返回 None 且完全不计数
     before = budget.degraded
-    assert await safe_src(None, "get_avatar_path", return_none_on_fail=True) is None
+    assert (
+        await render._resolve_src(None, "get_avatar_path", budget=budget, return_none_on_fail=True)
+        is None
+    )
     assert budget.degraded == before
 
 
@@ -561,10 +538,6 @@ def test_render_cache_key_tracks_render_config(monkeypatch: Any) -> None:
 
 async def test_cache_hit_rejects_empty_artifact(tmp_path: Path, monkeypatch: Any) -> None:
     """0 字节缓存产物不算命中：必须重渲（L10）。"""
-    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.utils.ffmpeg import (
-        FFmpeg,
-    )
-
     shot = tmp_path / "screenshot.png"
     shot.write_bytes(_MINIMAL_PNG)
     jpeg_marker = b"\xff\xd8\xff\xe0-fake-jpeg"
@@ -572,7 +545,7 @@ async def test_cache_hit_rejects_empty_artifact(tmp_path: Path, monkeypatch: Any
     async def _fake_png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
         return jpeg_marker
 
-    monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_fake_png_to_jpeg))
+    monkeypatch.setattr(render, "_png_to_jpeg", _fake_png_to_jpeg)
     calls: list[int] = []
     renderer = _ShotRenderer(shot, calls)
     result = _result(url="https://www.bilibili.com/video/av-empty-cache")
@@ -590,18 +563,14 @@ async def test_cache_hit_rejects_empty_artifact(tmp_path: Path, monkeypatch: Any
 
 
 async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: Any) -> None:
-    """png_to_jpeg 返回 0 字节或非 JPEG 时拒绝写缓存（L10 + 魔数校验）。"""
-    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.utils.ffmpeg import (
-        FFmpeg,
-    )
-
+    """PNG→JPEG 返回 0 字节或非 JPEG 时拒绝写缓存（L10 + 魔数校验）。"""
     shot = tmp_path / "screenshot.png"
     shot.write_bytes(_MINIMAL_PNG)
 
     async def _ok(png_data: bytes, quality: int = 85) -> bytes:
         return b"\xff\xd8\xffok-jpeg"
 
-    monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_ok))
+    monkeypatch.setattr(render, "_png_to_jpeg", _ok)
     calls: list[int] = []
     renderer = _ShotRenderer(shot, calls)
     result = _result(url="https://www.bilibili.com/video/av-empty-artifact")
@@ -612,7 +581,7 @@ async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: 
         return b""
 
     await dest.unlink()
-    monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_empty))
+    monkeypatch.setattr(render, "_png_to_jpeg", _empty)
     with pytest.raises(render.RenderArtifactError):
         await render.cache_or_render_image(result, renderer=renderer)
     assert not await dest.exists(), "0 字节产物被写进了缓存"
@@ -620,7 +589,14 @@ async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: 
     async def _not_jpeg(png_data: bytes, quality: int = 85) -> bytes:
         return b"not-a-jpeg"
 
-    monkeypatch.setattr(FFmpeg, "png_to_jpeg", staticmethod(_not_jpeg))
+    monkeypatch.setattr(render, "_png_to_jpeg", _not_jpeg)
     with pytest.raises(render.RenderArtifactError):
         await render.cache_or_render_image(result, renderer=renderer)
     assert not await dest.exists(), "非 JPEG 产物被写进了缓存"
+
+
+async def test_png_to_jpeg_converts_locally() -> None:
+    """桥内真实转换闭环（上游 1.3.8rc6 移除 FFmpeg.png_to_jpeg 后无 fake）：
+    合法 PNG 必须转出带 SOI 魔数的 JPEG。"""
+    jpeg = await render._png_to_jpeg(_MINIMAL_PNG)
+    assert render._is_jpeg(jpeg), "桥内 PNG→JPEG 转换产物非法"

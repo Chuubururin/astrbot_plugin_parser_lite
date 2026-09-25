@@ -361,6 +361,7 @@ def test_ffmpeg_vendor_signature_contract() -> None:
         "output_path",
         "headers",
         "max_size_mb",
+        "on_progress",
     )
 
 
@@ -382,11 +383,17 @@ def test_ffmpeg_hls_guard_forwards_args_to_original(
     captured: dict[str, Any] = {}
 
     async def fake_monitored(
-        cls: type[FFmpeg], cmd: list[str], *, output_path: AnyioPath, max_size_mb: int
+        cls: type[FFmpeg],
+        cmd: list[str],
+        *,
+        output_path: AnyioPath,
+        max_size_mb: int,
+        on_progress: Any = None,
     ) -> AnyioPath:
         captured["cls"] = cls
         captured["cmd"] = cmd
         captured["max_size_mb"] = max_size_mb
+        captured["on_progress"] = on_progress
         # 复刻真实子进程副作用：产出输出文件供 replace 使用
         await output_path.write_bytes(b"stub-mp4")
         return output_path
@@ -394,18 +401,23 @@ def test_ffmpeg_hls_guard_forwards_args_to_original(
     monkeypatch.setattr(ffmpeg_mod.FFmpeg, "exec_ffmpeg_monitored", classmethod(fake_monitored))
 
     out = AnyioPath(str(tmp_path / "out.mp4"))
+    progress_calls: list[int] = []
+    # 具名捕获：list.append 每次属性访问都新建绑定对象，不能内联比 is
+    on_progress = progress_calls.append
     result = asyncio.run(
         FFmpeg.download_hls_to_mp4(
             "https://cdn.example.com/x.m3u8",
             out,
             headers={"Referer": "https://example.com"},
             max_size_mb=42,
+            on_progress=on_progress,
         )
     )
 
     assert result == out, "HLS 下载成功路径未返回输出路径（参数错位）"
     assert captured["cls"] is ffmpeg_mod.FFmpeg, "cls 未正确绑定到 FFmpeg"
     assert captured["max_size_mb"] == 42, "max_size_mb 上限未转发"
+    assert captured["on_progress"] is on_progress, "on_progress 回调未转发"
     cmd = captured["cmd"]
     assert "https://cdn.example.com/x.m3u8" in cmd, "URL 未传入 ffmpeg 命令"
     assert "-headers" in cmd, "自定义头未转发"
@@ -430,7 +442,12 @@ async def test_ffmpeg_hls_validate_runs_off_event_loop(
         return url
 
     async def fake_monitored(
-        cls: type[FFmpeg], cmd: list[str], *, output_path: AnyioPath, max_size_mb: int
+        cls: type[FFmpeg],
+        cmd: list[str],
+        *,
+        output_path: AnyioPath,
+        max_size_mb: int,
+        on_progress: Any = None,
     ) -> AnyioPath:
         await output_path.write_bytes(b"stub-mp4")
         return output_path

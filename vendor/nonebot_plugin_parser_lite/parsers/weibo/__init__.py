@@ -5,13 +5,7 @@ import ujson
 
 from ...utils.format import format_num
 from ...utils.log import logger
-from ..base import (
-    BaseParser,
-    MatchWithParams,
-    Platform,
-    PlatformEnum,
-    handle,
-)
+from ..base import BaseParser, MatchWithParams, Platform, PlatformEnum, handle, pconfig
 from .article import decoder as articleDecoder
 from .article_comment import decoder as articleCommentDecoder
 from .auth import AuthHelper
@@ -112,27 +106,28 @@ class WeiBoParser(BaseParser):
         comments = []
         total_comment = 0
 
-        try:
-            res = await AuthHelper.get(
-                "https://card.weibo.com/article/m/aj/comment", params={"id": id}
-            )
-            comment_data = articleCommentDecoder.decode(res.content)
-            total_comment = comment_data.data.total_number
-            comments.extend(
-                self.create_comment(
-                    author=self.create_author(
-                        name=sc.user_info.screen_name,
-                        avatar_url=sc.user_info.profile_image_url,
-                        avatar_cache_key=f"weibo:{sc.user_info.id}",
-                        ext_headers={"Referer": "https://weibo.com/"},
-                    ),
-                    content=sc.content,
-                    timestamp=sc.created_at_unix,
+        if pconfig.max_comments:
+            try:
+                res = await AuthHelper.get(
+                    "https://card.weibo.com/article/m/aj/comment", params={"id": id}
                 )
-                for sc in comment_data.data.comments
-            )
-        except Exception as e:
-            logger.warning(f"微博文章评论获取失败, mid={id}, {type(e)}:{e!r}")
+                comment_data = articleCommentDecoder.decode(res.content)
+                total_comment = comment_data.data.total_number
+                comments.extend(
+                    self.create_comment(
+                        author=self.create_author(
+                            name=sc.user_info.screen_name,
+                            avatar_url=sc.user_info.profile_image_url,
+                            avatar_cache_key=f"weibo:{sc.user_info.id}",
+                            ext_headers={"Referer": "https://weibo.com/"},
+                        ),
+                        content=sc.content,
+                        timestamp=sc.created_at_unix,
+                    )
+                    for sc in comment_data.data.comments
+                )
+            except Exception as e:
+                logger.warning(f"微博文章评论获取失败, mid={id}, {type(e)}:{e!r}")
 
         return self.result(
             url=data.url,
@@ -171,53 +166,53 @@ class WeiBoParser(BaseParser):
             cache_key=f"weibo:{fid}",
             ext_headers={"Referer": "https://weibo.com/"},
         )
-
         comments = []
-        try:
-            res = await AuthHelper.get(
-                "https://weibo.com/ajax/statuses/buildComments",
-                params={
-                    "id": fid.split(":")[-1],
-                    "count": 20,
-                    "expand_text": 1,
-                    "is_show_bulletin": 2,
-                },
-            )
-            comment_data = showCommentDecoder.decode(res.content)
-            comments.extend(
-                self.create_comment(
-                    author=self.create_author(
-                        name=sc.user.screen_name,
-                        avatar_url=sc.user.profile_image_url,
-                        avatar_cache_key=f"weibo:{sc.user.id}",
-                        location=sc.source,
-                        ext_headers={"Referer": "https://weibo.com/"},
-                    ),
-                    content=sc.content,
-                    timestamp=sc.timestamp,
-                    stats=self.create_stats(
-                        like_count=format_num(sc.like_counts),
-                        comment_count=format_num(len(sc.comments)),
-                    ),
-                    replies=[
-                        self.create_comment(
-                            author=self.create_author(
-                                name=c.user.screen_name,
-                                avatar_url=c.user.profile_image_url,
-                                avatar_cache_key=f"weibo:{c.user.id}",
-                                location=c.source,
-                                ext_headers={"Referer": "https://weibo.com/"},
-                            ),
-                            content=c.content,
-                            timestamp=c.timestamp,
-                        )
-                        for c in sc.comments
-                    ],
+        if pconfig.max_comments:
+            try:
+                res = await AuthHelper.get(
+                    "https://weibo.com/ajax/statuses/buildComments",
+                    params={
+                        "id": fid.split(":")[-1],
+                        "count": 20,
+                        "expand_text": 1,
+                        "is_show_bulletin": 2,
+                    },
                 )
-                for sc in comment_data.data
-            )
-        except Exception as e:
-            logger.warning(f"微博评论获取失败, mid={fid}, {type(e)}:{e!r}")
+                comment_data = showCommentDecoder.decode(res.content)
+                comments.extend(
+                    self.create_comment(
+                        author=self.create_author(
+                            name=sc.user.screen_name,
+                            avatar_url=sc.user.profile_image_url,
+                            avatar_cache_key=f"weibo:{sc.user.id}",
+                            location=sc.source,
+                            ext_headers={"Referer": "https://weibo.com/"},
+                        ),
+                        content=sc.content,
+                        timestamp=sc.timestamp,
+                        stats=self.create_stats(
+                            like_count=format_num(sc.like_counts),
+                            comment_count=format_num(len(sc.comments)),
+                        ),
+                        replies=[
+                            self.create_comment(
+                                author=self.create_author(
+                                    name=c.user.screen_name,
+                                    avatar_url=c.user.profile_image_url,
+                                    avatar_cache_key=f"weibo:{c.user.id}",
+                                    location=c.source,
+                                    ext_headers={"Referer": "https://weibo.com/"},
+                                ),
+                                content=c.content,
+                                timestamp=c.timestamp,
+                            )
+                            for c in sc.comments
+                        ],
+                    )
+                    for sc in comment_data.data
+                )
+            except Exception as e:
+                logger.warning(f"微博评论获取失败, mid={fid}, {type(e)}:{e!r}")
 
         return self.result(
             title=play_info.title,
@@ -235,6 +230,7 @@ class WeiBoParser(BaseParser):
                 comment_count=play_info.comments_count,
                 share_count=play_info.reposts_count,
             ),
+            comments=comments,
             timestamp=play_info.real_date,
             url=f"https://h5.video.weibo.com/show/{fid}",
         )
@@ -254,7 +250,7 @@ class WeiBoParser(BaseParser):
         if data.retweeted_status:
             repost = await self._collect_statuses(data.retweeted_status, True)
         comments = []
-        if not is_repost:
+        if not is_repost and pconfig.max_comments:
             try:
                 res = await AuthHelper.get(
                     "https://m.weibo.cn/comments/hotflow", params={"mid": data.idstr}

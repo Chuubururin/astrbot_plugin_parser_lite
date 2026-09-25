@@ -24,6 +24,11 @@
     "type": "string",
     "default": ""
   },
+  "plite_x_ck": {
+    "description": "X cookies",
+    "type": "string",
+    "default": ""
+  },
   "plite_need_upload": {
     "description": "是否需要上传音视频文件（兼容旧配置）",
     "type": "bool",
@@ -147,6 +152,16 @@
     "type": "bool",
     "default": true
   },
+  "plite_summary_in_forward": {
+    "description": "是否将总结卡片放入内容合并转发",
+    "type": "bool",
+    "default": false
+  },
+  "plite_video_in_forward": {
+    "description": "是否将视频放入内容合并转发",
+    "type": "bool",
+    "default": false
+  },
   "plite_lazy_download": {
     "description": "是否开启懒下载模式，仅在用户请求时才下载视频",
     "type": "bool",
@@ -197,6 +212,16 @@
       "6:00",
       "19:00"
     ]
+  },
+  "plite_render_theme": {
+    "description": "渲染主题 ID，主题目录可放在插件数据目录的 themes 下",
+    "type": "string",
+    "default": "default"
+  },
+  "plite_theme_dirs": {
+    "description": "额外的主题目录，可填写主题目录或包含多个主题的目录",
+    "type": "list",
+    "default": []
   },
   "plite_bili_cdn_region": {
     "description": "哔哩哔哩 CDN 地区；支持 zh、en、ja、proxy 线路",

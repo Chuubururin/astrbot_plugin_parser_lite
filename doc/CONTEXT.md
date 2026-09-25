@@ -77,8 +77,9 @@ tag 必在 main 历史线 → 确定性测试门禁；不存在人工放行环�
 
 **显示文本注入（display-text injection）**
 两层注入的第三条数据面：桥内面向用户的运行时文案（渲染降级、懒下载问询、
-合并转发文本族、投票格式串、B 站 stats.extra 标签等）逐字来自上游 main
-分支 render/matchers/parsers-bilibili 模块。`scripts/extract_display_texts.py`
+合并转发文本族、投票格式串、B 站 stats.extra 标签、Theme 数据层兜底
+「未知大小」/「专辑封面」等）逐字来自上游 main 分支
+render/render-context/matchers/parsers-bilibili 模块。`scripts/extract_display_texts.py`
 在 sync 工作流中按锚点规则表
 AST 提取 → `vendor/_upstream/display_texts.json`（入库的上游元数据快照，
 含 source_revision）→ 第一层摄取进分析数据 → 第二层渲染 `bridge/texts.py`
@@ -105,10 +106,11 @@ bridge/render.py / main.py / bridge/sender.py 消费、桥内不再硬编码。�
 再生、渲染缓存整体失效重建。见 `tests/test_render_params.py`。
 
 **渲染模板注入（render-template injection）**
-两层注入的第五条数据面：桥内 `templates/` 卡面模板族（default/music 模板、
-macros 宏、CSS）逐字节来自上游 main 分支 render/templates（2026-09-13
-活体核验 sha256 全等；桥的适配面全在 bridge/render.py 的 safe_src 过滤器与数据
-翻译）。`scripts/extract_render_templates.py` 在 sync 工作流中 git ls-tree
+两层注入的第五条数据面：桥内 `templates/` 卡面模板族（default 模板与
+theme.json 清单、macros 宏、CSS）逐字节来自上游 main 分支 render/templates（2026-09-13
+活体核验 sha256 全等；Theme API v1 起模板只消费 JSON-like 的 `data` 根
+变量，桥的适配面收敛为 bridge/render.py 的数据层镜像——`_resolve_src`
+内联与 `build_theme_data`，模板内不再有过滤器调用面）。`scripts/extract_render_templates.py` 在 sync 工作流中 git ls-tree
 动态发现文件全集（新增/删除/改名自动跟随）→ 逐字快照
 `vendor/_upstream/render_templates.json`（入库的上游元数据快照）→ 第一层
 摄取进分析数据 → 第二层 `build_template_files` 逐字节再生（不经过 Jinja

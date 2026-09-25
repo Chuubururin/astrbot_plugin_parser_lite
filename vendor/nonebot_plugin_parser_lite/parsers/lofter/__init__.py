@@ -12,6 +12,7 @@ from ..base import (
     Platform,
     PlatformEnum,
     handle,
+    pconfig,
 )
 from .comments import CommentList
 from .post import Post
@@ -49,13 +50,55 @@ class LofterParser(BaseParser):
         )
         post_data = post_resp.json()
 
-        # 评论数据
-        com_resp = await self.httpx.get(
-            "https://www.lofter.com/comment/l1/hotnew.json",
-            params={"postId": post_id, "blogId": blog_id},
-        )
-        com_data = com_resp.json()
+        if pconfig.max_comments:
+            # 评论数据
+            com_resp = await self.httpx.get(
+                "https://www.lofter.com/comment/l1/hotnew.json",
+                params={"postId": post_id, "blogId": blog_id},
+            )
+            com_data = com_resp.json()
 
+            if com_data.get("code") != 0:
+                logger.warning(f"Lofter 获取评论失败: {com_data.get('msg')}")
+                comment_list = CommentList(hotList=[], default=[])
+            else:
+                comment_list = convert(com_data.get("data") or {}, CommentList)
+
+            comments = [
+                self.create_comment(
+                    author=self.create_author(
+                        name=c.publisherBlogInfo.blogNickName,
+                        avatar_url=c.publisherBlogInfo.bigAvaImg,
+                        id=c.publisherBlogInfo.blogName,
+                        location=c.ipLocation,
+                    ),
+                    content=c.content,
+                    timestamp=c.publishTime // 1000,
+                    stats=self.create_stats(
+                        like_count=format_num(c.likeCount),
+                        comment_count=format_num(len(c.l2Comments)),
+                    ),
+                    replies=[
+                        self.create_comment(
+                            author=self.create_author(
+                                name=s.publisherBlogInfo.blogNickName,
+                                avatar_url=s.publisherBlogInfo.bigAvaImg,
+                                id=s.publisherBlogInfo.blogName,
+                                location=s.ipLocation,
+                            ),
+                            content=s.content,
+                            timestamp=s.publishTime // 1000,
+                            stats=self.create_stats(
+                                like_count=format_num(s.likeCount),
+                            ),
+                        )
+                        for s in c.l2Comments
+                    ],
+                )
+                for c in comment_list.comments
+            ]
+        else:
+            comments = []
         meta = post_data.get("meta") or {}
         if meta.get("status") != 200:
             raise ParseException(f"Lofter 解析失败: {meta.get('msg', '未知错误')}")
@@ -65,51 +108,11 @@ class LofterParser(BaseParser):
             raise ParseException("Lofter 解析失败: 未找到帖子内容")
         post = convert(post_raw[0]["post"], Post)
 
-        if com_data.get("code") != 0:
-            logger.warning(f"Lofter 获取评论失败: {com_data.get('msg')}")
-            comment_list = CommentList(hotList=[], default=[])
-        else:
-            comment_list = convert(com_data.get("data") or {}, CommentList)
-
         contents: list[ContentItem] = [post.text]
         contents.extend(post.medias)
 
         author = post.blogInfo
         stats = post.postCount
-
-        comments = [
-            self.create_comment(
-                author=self.create_author(
-                    name=c.publisherBlogInfo.blogNickName,
-                    avatar_url=c.publisherBlogInfo.bigAvaImg,
-                    id=c.publisherBlogInfo.blogName,
-                    location=c.ipLocation,
-                ),
-                content=c.content,
-                timestamp=c.publishTime // 1000,
-                stats=self.create_stats(
-                    like_count=format_num(c.likeCount),
-                    comment_count=format_num(len(c.l2Comments)),
-                ),
-                replies=[
-                    self.create_comment(
-                        author=self.create_author(
-                            name=s.publisherBlogInfo.blogNickName,
-                            avatar_url=s.publisherBlogInfo.bigAvaImg,
-                            id=s.publisherBlogInfo.blogName,
-                            location=s.ipLocation,
-                        ),
-                        content=s.content,
-                        timestamp=s.publishTime // 1000,
-                        stats=self.create_stats(
-                            like_count=format_num(s.likeCount),
-                        ),
-                    )
-                    for s in c.l2Comments
-                ],
-            )
-            for c in comment_list.comments
-        ]
 
         return self.result(
             title=post.title,

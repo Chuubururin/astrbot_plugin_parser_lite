@@ -428,8 +428,27 @@ def test_extractor_follows_anchors(extractor: ModuleType) -> None:
         video = {"danmaku": ("弹幕", "3"), "coin": ("硬币", "4")}
         """
     )
+    context_src = textwrap.dedent(
+        """\
+        async def _display_size(item):
+            try:
+                return await item.get_display_size()
+            except Exception:
+                return "未知大小"
+
+        async def _serialize_content(item, is_cover=False):
+            if is_cover:
+                content["alt"] = "专辑封面"
+        """
+    )
     payload = extractor.extract(
-        render_src, matchers_src, "<span>评论</span>", exception_src, helper_src, bilibili_src
+        render_src,
+        matchers_src,
+        "<span>评论</span>",
+        exception_src,
+        helper_src,
+        bilibili_src,
+        context_src,
     )
     texts = {key: entry["value"] for key, entry in payload["texts"].items()}
     assert texts == {
@@ -453,6 +472,8 @@ def test_extractor_follows_anchors(extractor: ModuleType) -> None:
         "video_zero_size": "视频文件大小为 0",
         "extra_label_danmaku": "弹幕",
         "extra_label_coin": "硬币",
+        "unknown_size": "未知大小",
+        "cover_alt": "专辑封面",
     }
     assert payload["template_texts"] == ["评论"]
 
@@ -595,6 +616,14 @@ def test_display_texts_match_upstream_when_clone_present(extractor: ModuleType) 
         return result.stdout
 
     pkg = "src/nonebot_plugin_parser_lite"
+    context = subprocess.run(
+        ["git", "-C", str(clone), "show", f"{revision}:{pkg}/render/context.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # 前 Theme API 上游无 context.py：与提取器的可选源语义一致回退空串
+    context_src = context.stdout if context.returncode == 0 else ""
     fresh = extractor.extract(
         show(f"{pkg}/render/__init__.py"),
         show(f"{pkg}/matchers/__init__.py"),
@@ -602,6 +631,7 @@ def test_display_texts_match_upstream_when_clone_present(extractor: ModuleType) 
         show(f"{pkg}/exception.py"),
         show(f"{pkg}/helper.py"),
         show(f"{pkg}/parsers/bilibili/__init__.py"),
+        context_src,
     )
     assert fresh["texts"] == committed["texts"]
     assert fresh["template_texts"] == committed["template_texts"]

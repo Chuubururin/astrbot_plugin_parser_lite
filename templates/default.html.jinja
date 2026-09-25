@@ -1,165 +1,51 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="{{ theme }}">
+<html lang="zh-CN" data-theme="{{ data.theme }}">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Media Card · New</title>
         <link rel="stylesheet" href="icon.css" />
         <link rel="stylesheet" href="tailwind.css" />
-        <link rel="stylesheet" href="ambient.css" />
         {% from "macros.jinja" import render_ambient, render_content, resolve_cover_src %}
-        <style>
-            body {
-                font-family: "PingFang SC", sans-serif;
-                -webkit-font-smoothing: antialiased;
-                margin: 0;
-                width: 620px;
-            }
-
-            .media-shell {
-                position: relative;
-                isolation: isolate;
-            }
-
-            .media-glow {
-                position: absolute;
-                z-index: -1;
-                inset: 6%;
-                width: 88%;
-                height: 88%;
-                object-fit: cover;
-                filter: blur(28px) saturate(1.55);
-                opacity: 0.38;
-                transform: translateY(14px) scale(1.02);
-            }
-
-            .poster-media {
-                width: calc(100% + 4rem);
-                margin-left: -2rem;
-                margin-right: -2rem;
-            }
-
-            .poster-media .media-foreground {
-                border-radius: 0;
-            }
-
-            .poster-media .single-image {
-                display: block;
-                width: 100%;
-            }
-
-            .poster-media .single-image,
-            .poster-media .poster-video {
-            /* 多图引用添加类 `,
-            .poster-media .media-foreground.media-grid`, 但是不好看 */
-                -webkit-mask-image: linear-gradient(to bottom,
-                        transparent 0%,
-                        #000 9%,
-                        #000 78%,
-                        transparent 100%);
-                mask-image: linear-gradient(to bottom,
-                        transparent 0%,
-                        #000 9%,
-                        #000 78%,
-                        transparent 100%);
-            }
-
-            [data-theme="dark"] .media-glow {
-                opacity: 0.56;
-            }
-
-            .media-foreground {
-                position: relative;
-                z-index: 1;
-            }
-
-            .media-overlay {
-                position: absolute;
-                z-index: 3;
-                inset: 0;
-                pointer-events: none;
-            }
-
-            .video-meta {
-                position: absolute;
-                top: 18px;
-                left: 24px;
-                right: 24px;
-                display: flex;
-                align-items: flex-start;
-                justify-content: space-between;
-                gap: 16px;
-                color: rgba(255, 255, 255, 0.9);
-                font-size: 13px;
-                font-weight: 800;
-                line-height: 1.15;
-                text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
-            }
-
-            .video-meta-size {
-                text-align: right;
-            }
-
-            .video-playmark {
-                position: absolute;
-                right: 24px;
-                bottom: 20px;
-                --icon-color: rgba(255, 255, 255, 0.48);
-                font-size: 88px;
-                line-height: 1;
-                text-shadow: 0 4px 24px rgba(0, 0, 0, 0.42);
-                transform: translateX(5px);
-            }
-
-            .square-img {
-                aspect-ratio: 1 / 1;
-                object-fit: cover;
-                width: 100%;
-                height: 100%;
-                display: block;
-            }
-
-            .live-tag-strict {
-                height: 19px;
-                background-color: rgba(0, 0, 0, 0.5);
-                border-radius: 2px;
-                padding: 0 5px;
-                display: flex;
-                align-items: center;
-                color: #fff;
-                border: none;
-                outline: none;
-            }
-        </style>
     </head>
-    <body class="break-all">
-        {% set cover_src = resolve_cover_src(result) %}
-        {% set logo_src = result.platform | safe_src('get_logo_path') %}
-        <main class="ambient-canvas">
+    <body class="m-0 w-[620px] break-all font-sans antialiased">
+        {% set post = data.post %}
+        {% set cover_src = resolve_cover_src(post) %}
+        {% set logo_src = post.platform.logo %}
+        <main class="relative isolate w-[620px] overflow-hidden bg-slate-50 rounded-2xl dark:bg-slate-950">
             {{ render_ambient(cover_src, logo_src) }}
-            <div class="ambient-content">{{ render_content(result) }}</div>
+            <div class="relative z-[1]">{{ render_content(post, data.meta) }}</div>
         </main>
     </body>
     <script defer>
         document.addEventListener("DOMContentLoaded", function() {
-            document
-                .querySelectorAll(".comment .single-image img")
-                .forEach((img) => {
-                    const applyStyle = () => {
-                        const h = img.offsetHeight;
-                        const w = img.offsetWidth;
-                        if (!h || !w || !isFinite(h / w)) return;
-                        const aspectRatio = h / w;
-                        if (aspectRatio >= 0.9) {
-                            // 竖图：限制宽度，放高
-                            img.classList.add("max-w-36", "h-auto");
-                        } else {
-                            // 横图：限制高度，放宽
-                            img.classList.add("max-h-36", "w-auto");
-                        }
-                    };
+            document.querySelectorAll(".comment .single-image img").forEach((img) => {
+                const applyStyle = () => {
+                    if (!img.naturalWidth || !img.naturalHeight) return;
+                    const aspectRatio = img.naturalHeight / img.naturalWidth;
+                    img.classList.remove(
+                        "w-full",
+                        "w-auto",
+                        "max-w-36",
+                        "max-h-36",
+                        "object-cover",
+                    );
+                    if (aspectRatio >= 0.9) {
+                        // 竖图：限制宽度，保持原比例自动计算高度
+                        img.classList.add("w-full", "max-w-36", "h-auto");
+                    } else {
+                        // 横图：限制高度，保持原比例自动计算宽度
+                        img.classList.add("w-auto", "max-h-36", "h-auto");
+                    }
+                    img.classList.add("object-contain");
+                };
+
+                if (img.complete) {
                     applyStyle();
-                });
+                } else {
+                    img.addEventListener("load", applyStyle, { once: true });
+                }
+            });
         });
     </script>
 </html>

@@ -193,6 +193,8 @@ def test_display_texts_build_payload_shape() -> None:
         )
         + "\n"
     )
+    # context 夹具覆盖 Theme API v1 数据层锚点（unknown_size/cover_alt）
+    context_src = 't = "未知大小"\nw = "专辑封面"\n'
     payload = display.build_payload(
         {
             "render": render_src,
@@ -201,15 +203,17 @@ def test_display_texts_build_payload_shape() -> None:
             "exception": "",
             "helper": "",
             "bilibili": bilibili_src,
+            "context": context_src,
         },
         "deadbeef" * 5,
     )
     assert payload["texts"]["render_failed"]["value"] == "图片渲染失败"
     assert payload["texts"]["extra_label_danmaku"]["value"] == "弹幕"
+    assert payload["texts"]["unknown_size"]["value"] == "未知大小"
     assert payload["source_revision"] == "deadbeef" * 5
     import hashlib
 
-    joined = render_src + "" + "" + "" + "" + bilibili_src
+    joined = render_src + "" + "" + "" + "" + bilibili_src + context_src
     assert payload["source_digest"] == hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
