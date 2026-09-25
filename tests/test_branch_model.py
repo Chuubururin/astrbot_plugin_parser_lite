@@ -1,14 +1,10 @@
 """分支模型的机械钉扎（doc/BRANCHING.md）。
 
-背景（2026-09-19 第二次重构）：用户要求**更简单**的 CICD，只保留两个分支，
-并指定参考 SnowLuma/SnowLuma 的 actions 配置。模型因此从「PR 合并」改为
-**「指针移动」**：
+模型：只保留两个分支，CICD 从简，`main` 的形态是**指针移动**而非「PR 合并」：
 
-- **旧（本次被替换）**：public + 分支保护全开，`main` 开 PR 保护 +
-  required checks（4 项，含 CodeQL）。dev → main 走 promote 工作流做**快进推送**。
-- **新（本文件守护）**：只留两个分支。`main` 是**发布指针**，由
-  `promote-dev-to-main.yml` 用 `git push --force-with-lease` **移动**过去，
-  不产生 merge commit。CodeQL 与每日巡检移除；上游自动同步以「sync 走
+- `main` 是**发布指针**，由 `promote-dev-to-main.yml` 用
+  `git push --force-with-lease` **移动**过去，不产生 merge commit。
+  不采用 CodeQL 与每日保护巡检；上游自动同步以「sync 走
   PR 轨道」的形态在役（roll 序列单实现 = scripts/roll_local.py）。
 
 **本模型最关键、也最容易被人「好心改坏」的一条**：
@@ -231,16 +227,15 @@ def test_promote_keeps_credentials_out_of_checkout() -> None:
     )
 
 
-# ==================================================== 守卫工作流（本版恢复）
+# ==================================================== 守卫工作流
 #
-# 注意与上一版的**语义反转**：上一版把 guard 删了（因为服务端会拒绝 base=main
-# 的 PR）；本版把它**加回来**。为什么？
+# guard 为什么必须存在：
 #
 # 服务端的分支保护在 main 上**不能开 PR 保护**（否则 promote 失效）。
-# 也就是说：服务端不再拒绝「以 main 为 base 的 PR」了 —— 那正是上一版删它的理由，
-# 而这个理由在本版不成立了。
+# 也就是说：服务端不拒绝「以 main 为 base 的 PR」——这个缺口只能由
+# 工作流层的 guard 来堵。
 #
-# 若不恢复 guard，有人开一个 base=main 的 PR 并合并，就会在 main 上造出
+# 若没有 guard，有人开一个 base=main 的 PR 并合并，就会在 main 上造出
 # dev 没有的提交，随后 promote 失败（"main 存在 dev 之外的提交"）。
 # guard 让这个错误**在打开 PR 时就暴露**，并给出可操作的提示。
 
@@ -395,8 +390,8 @@ def test_main_protection_has_no_pull_request_requirement() -> None:
         "main 必须允许 force push，否则 --force-with-lease 在非快进场景会被拒"
     )
     # main 上不跑 CI（ci.yml 的 push 只跟 dev），所以不能挂 required checks。
-    # 漏掉这条断言就会重演 2026-09-19 的真实失误：脚本里写着三条 contexts，
-    # 而文档写着 null，两边不一致却**没有任何测试发现**（只断言了 PR 保护那三项）。
+    # 若缺这条断言，会留下静默漂移空间：脚本里写着三条 contexts、
+    # 文档写着 null，两边不一致却**没有任何测试发现**（其余断言只覆盖 PR 保护那三项）。
     assert '"required_status_checks": null' in main_payload, (
         "main 的 required_status_checks 必须为 null —— main 上不跑 CI，"
         "挂上必需检查会让 main 在缺失 check run 时永久卡在 "
@@ -423,8 +418,8 @@ def test_dev_protection_requires_checks_but_not_admins() -> None:
     # dev 是唯一跑必需检查的分支 —— 三条必须真的在它的 payload 里。
     #
     # ⚠️ 不能直接断言三个检查名出现在 DEV_PAYLOAD 里：payload 用的是
-    # `${REQUIRED_CHECKS}` 变量插值（shell heredoc），字面名字只在变量定义处出现。
-    # 第一版这么写就红了（2026-09-19）。正确判据分两步：
+    # `${REQUIRED_CHECKS}` 变量插值（shell heredoc），字面名字只在变量定义处出现，
+    # 直接断言必然误红。正确判据分两步：
     #   ① dev 的 payload 必须引用 REQUIRED_CHECKS 变量；
     #   ② REQUIRED_CHECKS 变量里必须有全部三条（含精确的括号/斜杠/空格）。
     assert "required_status_checks" in dev_payload, "dev 必须有必需检查"
@@ -505,7 +500,7 @@ def test_release_accepts_dispatch_and_verifies_main_lineage() -> None:
     main 尖端校验把 BRANCHING「发布只在 main 上打 tag」从人工纪律升格为
     门禁：dev 上未经 promote 的旁路 tag 不再可能产出 Release
     （判据取「祖先」而非「= 尖端」：版本未变的修复把 main 前移后，补发
-    上一版本是合法补救——尖端相等判据会把它锁死，2026-09-25 实弹抓到）。
+    旧版本是合法补救——尖端相等判据会把它锁死）。
     """
     doc = _load(RELEASE_PATH)
     triggers = _workflow_triggers(doc)
@@ -519,8 +514,8 @@ def test_release_accepts_dispatch_and_verifies_main_lineage() -> None:
 
 def test_release_marks_pep440_prerelease_by_derivation() -> None:
     """预发布标记由版本号机械派生：rc/alpha/beta/dev/pre-release 形态 →
-    ``--prerelease``，人不判内容、台账如实反映版本语义（v1.3.8rc6 曾以
-    稳定形态发布，2026-09-25 补判定）。"""
+    ``--prerelease``，人不判内容、台账如实反映版本语义（若无此派生，
+    rc 形态版本会以稳定形态发布）。"""
     text = RELEASE_PATH.read_text(encoding="utf-8")
     assert "--prerelease" in text, "缺 PEP440 前奏形态的 prerelease 派生"
     assert "(alpha|beta|preview|pre-release|rev)" in text, (
@@ -602,7 +597,7 @@ def test_default_branch_choice_is_documented() -> None:
     """默认分支选 dev 的决策必须写进文档。
 
     默认分支设成 dev 之后，「改了工作流但 cron / dispatch 仍跑旧版本」
-    这个坑才消失。
+    的坑才会消失——这是选择本身成立的理由，文档要带着它。
 
     本断言只要求两份文档**合起来**说清这件事：事件 × ref 映射表在
     CONTRIBUTING.md §12.2（运维视角），BRANCHING.md §8 引用默认分支选择本身。
@@ -620,15 +615,14 @@ def test_default_branch_choice_is_documented() -> None:
 def test_docs_contain_per_branch_workflow_matrix() -> None:
     """分支×工作流矩阵是运维参考，别被删掉，且必须与实际文件一致。
 
-    **注意判据**（这条断言第一版就踩过坑）：不能简单断言「已删除的文件名不得
-    出现」——文档需要解释「我们移除了 codeql.yml，理由是…」，这既要提及文件名
-    又是**正确内容**。字面禁令会与「如实说明为什么不做了」直接冲突。
+    **注意判据**：不能简单断言「已删除的文件名不得出现」——文档需要解释
+    「为什么移除 codeql.yml」，这既要提及文件名又是**正确内容**；
+    字面禁令会与「如实说明为什么不做了」直接冲突。
+    也不能只把判据范围缩到「工作流清单那一节」：若小节切段依赖
+    ``split("\n\n\n")`` 这类按空行分段的写法，CONTRIBUTING.md 那里实际只有
+    **一个**空行，切出来的「段」会吞掉整篇文档的剩余部分——范围根本没缩住。
 
-    第一版修正只把范围缩到「工作流清单那一节」，仍然失败。原因很值得记下来：
-    它用 ``split("\n\n\n")`` 切段，而 CONTRIBUTING.md 那里只有**一个**空行，
-    于是「切出来的段」实际吞掉了整篇文档的剩余部分 —— 范围根本没缩住。
-
-    所以本版改用**结构性判据**：
+    所以判据取**结构性**：
       ① 「在役清单」= 清单小节里的**表格行**（形如 ``| `` + 反引号文件名 +
          反引号 + `` |``）。
          表格行才是「这个文件在役」的声明；散文不是。
@@ -682,13 +676,13 @@ def test_branching_doc_does_not_reference_removed_workflows() -> None:
     """doc/BRANCHING.md 不得把已删除的工作流当作**在役**描述。
 
     BRANCHING.md **允许**而且**需要**点名这些文件：
-    - §9「已知缺口」必须说「上一版用 protection-audit.yml 每日巡检来堵这个缺口，
-      本版撤掉了，所以缺口重新打开」——这是本设计最诚实的部分；
+    - §9「已知缺口」必须如实声明：该缺口曾由 protection-audit.yml 的每日巡检
+      堵住，巡检已撤除，故缺口重新打开——这是本设计最诚实的部分；
     - §10「明确不做的项」要逐条说明为什么不恢复。
 
-    所以判据不能是「出现即违规」（第一版踩了这个坑）。本版改判**时态/语气**：
+    所以判据不能是「出现即违规」。判据取**时态/语气**：
     已删除的工作流若出现，其所在行必须带**过去式或否定式**限定词
-    （上一版/原/曾经/已移除/不再/不做/撤掉…）；若它出现在
+    （见下方 `retired_markers` 元组）；若它出现在
     **现在时**的架构描述句里，才判违规 —— 那才是「让运维以为它还在跑」。
     """
     doc = BRANCHING_DOC.read_text(encoding="utf-8")

@@ -64,7 +64,7 @@ def main() -> int:
     if not missing:
         if broken:
             # broken 非空时「完整」是假绿：导入期副作用失败（数据目录不可写、
-            # 配置损坏）同样让 astrbot 不可用，只是原因不是缺包（2026-09-18 复核）
+            # 配置损坏）同样让 astrbot 不可用，只是原因不是缺包
             print(
                 f"::error::astrbot 导入链有 {len(broken)} 个模块导入失败（非缺依赖），"
                 "见上方 warning",

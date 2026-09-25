@@ -1,21 +1,21 @@
 """vendor_patches 桥内补丁：挂载契约 + 行为哨兵 + 行为回归。
 
 四类测试：
-1. 挂载契约（M5）：每个挂载点承载的函数 __module__ 必须指向 vendor_patches
+1. 挂载契约：每个挂载点承载的函数 __module__ 必须指向 vendor_patches
    （而不是上游模块）；锚点缺失/形态不符必须响亮失败（RuntimeError）——
    模块属性 setattr 永远成功，上游改名时补丁会静默失效，本类用例先红；
 2. 行为哨兵：直接调用挂载前留存的上游原件，用构造的 HTML 验证缺陷仍在
    （视频块之后的正文仍丢失）——上游修复后本类用例翻红，提醒按哨兵约定
-   撤销补丁；旧版「源码里还有某字符串」的哨兵已删除（改名后字符串仍在，
-   测不出补丁失效）；
+   撤销补丁；哨兵必须是行为形态，「源码里还有某字符串」的文本形态在上游
+   改名后字符串仍在，测不出补丁失效；
 3. 行为回归：调用补丁后的函数，验证视频块之后的正文未丢失（buff/hupu
    各一条）、video 缺属性不再产出字面 "None" URL、music_id 无空格；
 4. 幂等与绑定：apply_vendor_patches 可重复调用；hupu bbs/comment 的
    from .util import 绑定自动走到修复版。
 
 kuwo：上游 #307（740e6c7）已修复 ``music_id`` 尾随空格（端点路径同版
-修正），对应补丁已按哨兵约定移除；``music_id`` 无空格与请求行为保留为
-vendor 冒烟，防上游回退。
+修正），桥侧无需补丁；``music_id`` 无空格与请求行为以 vendor 冒烟钉住，
+防上游回退。
 """
 
 from __future__ import annotations
@@ -66,22 +66,19 @@ def _strs(items: list[Any]) -> list[str]:
     return [i for i in items if isinstance(i, str)]
 
 
-# ---------------------------------------------------------------- 挂载契约（M5）
+# ---------------------------------------------------------------- 挂载契约
 
 
 def test_contract_kuwo_upstream_fix_stays() -> None:
-    """反向哨兵：上游 #307 已修复 music_id 尾随空格，此处防回退。
-
-    （原为补丁契约断言缺陷仍在；上游修复→补丁按约定移除→断言翻转。）
-    """
+    """反向哨兵：上游 #307 已修复 music_id 尾随空格，此处钉住修复态防回退。"""
     assert '"music_id "' not in _vendor_src("parsers/kuwo.py")
 
 
 def test_mount_points_are_bridge_owned() -> None:
     """每个挂载点承载的函数必须来自 vendor_patches（不是上游模块）。
 
-    模块属性 setattr 永远成功，「补丁没挂上去」在运行期毫无声息（2026-09-17
-    评审 M5）——本用例把「补丁归属」变成可机械核验的事实：上游改名/形态
+    模块属性 setattr 永远成功，「补丁没挂上去」在运行期毫无声息——本用例
+    把「补丁归属」变成可机械核验的事实：上游改名/形态
     变化时挂载即响亮失败，本用例连同收集期报错一起变红。
     """
     points = vendor_patches.mounted_points()
@@ -104,7 +101,7 @@ def test_mount_points_are_bridge_owned() -> None:
 
 
 def test_mount_raises_loudly_when_anchor_renamed() -> None:
-    """锚点不存在即 RuntimeError（M5 核心）：复现「上游把函数改名」。"""
+    """锚点不存在即 RuntimeError：模拟「上游把函数改名」的漂移。"""
     with pytest.raises(RuntimeError, match="不存在"):
         vendor_patches.resolve_mount_point(hupu_util.__name__, "_iter_media_and_text_renamed")
 
@@ -131,7 +128,7 @@ _BUFF_VIDEO_BODY = (
 )
 
 # 视频块带子节点（source + 内部 img）才是上游缺陷的触发形状：空 <video>
-# 下 decompose 不破坏迭代，旧用例因此是假绿（实测确认）
+# 下 decompose 不破坏迭代，用空样本做哨兵只会得出假绿
 _HUPU_VIDEO_HTML = (
     "<p>前文</p>"
     '<video src="https://example.com/v.mp4?token=x" poster="https://example.com/p.jpg">'
@@ -351,7 +348,7 @@ def test_ffmpeg_hls_guard_is_applied_once() -> None:
 
 
 def test_ffmpeg_vendor_signature_contract() -> None:
-    """vendor 签名契约（M6）：上游改 download_hls_to_mp4 形参即红。
+    """vendor 签名契约：上游改 download_hls_to_mp4 形参即红。
 
     守卫用 *args/**kwargs 透传，因此上游签名是唯一真相源；改签名需同步复核
     本契约与守卫的 url 位置参数假设。
@@ -368,13 +365,13 @@ def test_ffmpeg_vendor_signature_contract() -> None:
 def test_ffmpeg_hls_guard_forwards_args_to_original(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SSRF 守卫放行后必须把整套参数正确转交原始实现（成功路径回归）。
+    """SSRF 守卫放行后必须把整套参数正确转交原始实现（成功路径）。
 
-    历史缺陷：包装器以 ``__func__`` 取出未绑定 classmethod（签名含 cls）后
-    按 (url, output_path, ...) 调用，参数整体错位一位、必然 TypeError——
+    风险形状：包装器以 ``__func__`` 取出未绑定 classmethod（签名含 cls）后
+    若按 (url, output_path, ...) 调用，参数整体错位一位、必然 TypeError——
     被 vendor 调用点的 except Exception 吞成 DownloadException，表现为
-    所有 HLS 视频静默下载失败。此用例桩掉真实 ffmpeg 子进程，只钉参数
-    转发，是原先缺失的 happy path 覆盖。
+    所有 HLS 视频静默下载失败。本用例桩掉真实 ffmpeg 子进程，只钉参数
+    转发（happy path 覆盖）。
     """
     vendor_patches.apply_vendor_patches()
     # 校验层放行（其余用例证明它确实会拦），聚焦纯转发
@@ -428,7 +425,7 @@ def test_ffmpeg_hls_guard_forwards_args_to_original(
 async def test_ffmpeg_hls_validate_runs_off_event_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """validate_url 内含阻塞的 socket.getaddrinfo，必须在工作线程执行（M6）。
+    """validate_url 内含阻塞的 socket.getaddrinfo，必须在工作线程执行。
 
     同步调用会冻结整个 AstrBot 事件循环（DNS 慢/黑洞时最明显），
     ssrf.py 自己注明「放线程池执行避免卡死事件循环」。
@@ -465,11 +462,11 @@ async def test_ffmpeg_hls_validate_runs_off_event_loop(
 async def test_hls_guard_transparently_forwards_new_upstream_param(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """上游给 download_hls_to_mp4 新增带默认值的形参时不得被守卫静默丢弃（M6）。
+    """上游给 download_hls_to_mp4 新增带默认值的形参时不得被守卫静默丢弃。
 
     固定签名转发下该形参会消失，且必填才 TypeError、还会被 vendor 调用点的
-    except Exception 吞成 DownloadException——本用例用「升级版」原实现复现
-    上游新增形参，直接断言它到达了原实现。
+    except Exception 吞成 DownloadException——本用例用「升级版」替身模拟
+    上游新增形参，直接断言它到达了被包装实现。
     """
     monkeypatch.setattr(ssrf, "validate_url", lambda url: url)
     seen: dict[str, Any] = {}

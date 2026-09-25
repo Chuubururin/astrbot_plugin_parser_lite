@@ -22,8 +22,8 @@ standalone 分支由其 CI 随 main 每次 push 自动发布，本脚本把 vend
 路径（pathlib 拼接）。
 
 两条编排层上游真值纪律（提交主题解析 / 远端 main 真值提取源）与祖先校验门
-本章程**由 scripts/pipeline_common.py 承载**，历史上与 sync-upstream 工作流
-共用单点语义：双轨各写一份曾在细节上漂移（2026-09-17 评审 M16）。
+本章程由 **scripts/pipeline_common.py 单点承载**，双轨共用同一语义——
+逐轨各写一份会在细节上漂移。
 
 用法::
 
@@ -209,8 +209,8 @@ def _rebuild_vendor(standalone_sha: str) -> None:
     """整树重建 vendor（唯一升级方式，禁止 merge/patch）。
 
     归档/检出源必须是显式 standalone sha：FETCH_HEAD 会被 _fetch_main 覆写
-    （2026-09-15 实证：main 根结构改版去掉 pyproject.toml 后，沿用
-    FETCH_HEAD 误档 main 树，PLITES 复制直接 FileNotFoundError），孤儿
+    （沿用 FETCH_HEAD 时可能误档 main 树，standalone 专有文件直接
+    FileNotFoundError），孤儿
     分支的构建 sha 才是跨函数稳定的唯一引用。
     """
     for stale in (VENDOR_PKG, VENDOR_META):
@@ -382,7 +382,7 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
 
     # pytest 必须与门禁 1 完全同参（-c config/pyproject.toml --rootdir=.）：
     # 裸 `-q` 落到 rootdir 自动发现、拿不到仓库 pytest 配置，asyncio 用例
-    # 整批假红（82 failed，2026-09-25 票07 彩排实证），管线红必须只反映
+    # 整批假红，管线红必须只反映
     # 契约本身。
     result = subprocess.run(
         ["python3", "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"],
@@ -456,8 +456,8 @@ def main(argv: list[str] | None = None) -> int:
         _roll(new_standalone, new_main, old_standalone)
     except (SystemExit, Exception):
         # 覆盖 SystemExit 之外的类型：_roll 里 copytree / tomllib 在上游树结构
-        # 变化时会抛 OSError / TOMLDecodeError，此前直接冒泡、失败计数不增长
-        # → 本地熔断低估失败次数（2026-09-18 复核）。刻意不含 KeyboardInterrupt
+        # 变化时会抛 OSError / TOMLDecodeError，若任其冒泡则失败计数不增长
+        # → 本地熔断低估失败次数。刻意不含 KeyboardInterrupt
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
         _state_write(state)

@@ -1,20 +1,20 @@
-"""静态轨契约①：import 面 AST 白名单（ACL R1/R2，工单 09）。
+"""静态轨契约①：import 面 AST 白名单（ACL R1/R2）。
 
 R2 Fan-in=1：vendor 是最末端叶子，唯一消费面 = 桥接六模块（消费清单即下方
 ``VENDOR_CONSUMERS`` 常量）；任何其他模块新增 vendor 导入都会使本测试变红。
 白名单即《被依赖行为清单》的 import 维度，扩白名单需过契约评审。
 
-检测面（2026-09-17 评审 H3 后加固）：相对导入、绝对路径导入（含包名前缀
+检测面：相对导入、绝对路径导入（含包名前缀
 ``astrbot_plugin_parser_lite.vendor.*``）、以及 ``ast.Import`` 形态三种写法
-均被识别。原实现只遍历 ``ast.ImportFrom`` 且仅认 ``level >= 1`` 或
-``module.startswith("vendor")``，故绝对路径与 ``import x.y`` 两种写法可
-静默绕开本白名单；检测器自身由文件末的 ``test_vendor_import_detector_covers_known_forms``
-反向验证（守护的守护）。
+均须识别——若漏认任一形态，该写法即可静默绕开白名单（只遍历
+``ast.ImportFrom`` 且仅认 ``level >= 1`` 或 ``module.startswith("vendor")``
+的窄检测就是此故障模式）；检测器自身由文件末的
+``test_vendor_import_detector_covers_known_forms`` 反向验证（守护的守护）。
 
 残余边界（如实声明）：``importlib.import_module`` / ``__import__`` 等动态
 导入无法静态分析，不在本测试覆盖面内。
 
-扫描面（2026-09-18 迁移后）：仓库根的 ``main.py`` + ``bridge/`` 下六个 ACL
+扫描面：仓库根的 ``main.py`` + ``bridge/`` 下六个 ACL
 模块；清单与实际扫描结果的一致性由 ``test_bridge_source_scan_is_complete``
 自身钉扎。
 """
@@ -176,7 +176,7 @@ def _normalize_vendor_module(name: str, level: int) -> str | None:
 def _vendor_imports(tree: ast.AST) -> set[str]:
     """收集模块内（含函数级）对 vendor 子包的导入，规范化为 vendor 内模块名。
 
-    覆盖三种写法（H3 加固）：``from .vendor.X import ...``、
+    覆盖三种写法：``from .vendor.X import ...``、
     ``from astrbot_plugin_parser_lite.vendor.X import ...``、``import X.Y``。
     ``from .vendor import X`` 形态单独还原（此时 ``X`` 才是 vendor 子模块）。
 
@@ -248,7 +248,7 @@ def test_no_nonebot_ecosystem_import_in_bridge():
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        # 相对导入（原实现已覆盖）
+        # 相对导入
         (
             "from .vendor.nonebot_plugin_parser_lite import Parser",
             {"nonebot_plugin_parser_lite"},
@@ -259,12 +259,12 @@ def test_no_nonebot_ecosystem_import_in_bridge():
         ),
         # 包 + 子模块名分开写的相对形态
         ("from .vendor import nonebot_plugin_parser_lite", {"nonebot_plugin_parser_lite"}),
-        # 绝对路径导入（原实现漏判）
+        # 绝对路径导入（不带 vendor 前缀，须同样入账）
         (
             "from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite import Parser",
             {"nonebot_plugin_parser_lite"},
         ),
-        # ast.Import 形态（原实现完全忽略）
+        # ast.Import 形态（非 ImportFrom，同样须入账）
         ("import nonebot_plugin_parser_lite.creator", {"nonebot_plugin_parser_lite.creator"}),
         (
             "import astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.creator",
@@ -285,8 +285,8 @@ def test_no_nonebot_ecosystem_import_in_bridge():
 def test_vendor_import_detector_covers_known_forms(source: str, expected: set[str]) -> None:
     """守护的守护：检测器必须识别全部已知越桥写法。
 
-    没有这条反向验证时，「白名单机械守护」只是一个声称——2026-09-17 评审
-    实测原实现对绝对路径与 ``ast.Import`` 两种写法全绿。
+    没有这条反向验证时，「白名单机械守护」只是一个声称——绝对路径与
+    ``ast.Import`` 两种写法若未被识别，会静默绕开白名单保持全绿。
     """
     assert _vendor_imports(ast.parse(source)) == expected
 

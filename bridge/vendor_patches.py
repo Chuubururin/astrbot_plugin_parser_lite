@@ -1,6 +1,6 @@
 """vendor 运行态缺陷的桥内注入补丁（vendor 零修改铁律下的唯一修法）。
 
-上游 main 分支（2026-09-15 roll 核验）两处缺陷未修复：
+上游 main 分支两处运行态缺陷未修复：
 
 - parsers/buff/news.py：News.content 在 descendants 迭代中对视频块调
   decompose()，销毁子树断链导致迭代终止，视频块之后的正文静默丢失；
@@ -8,9 +8,8 @@
   断链截断，含文本子节点时 bs4 甚至抛 AttributeError），且 video 缺 src /
   poster 属性时 str(None) 产出字面 "None" URL。
 
-历史：kuwo ``music_id`` 参数名尾随空格缺陷已由上游修复（#307 / 740e6c7，
-接口端点同版修正），对应补丁按哨兵约定随本次 roll 移除；
-tests/test_vendor_patches.py 保留参数无空格的 vendor 冒烟防回退。
+kuwo ``music_id`` 参数尾随空格缺陷已由上游修复（#307 / 740e6c7），无对应
+补丁；tests/test_vendor_patches.py 冒烟钉住「参数无空格」防上游回退。
 
 修法遵循 bs4 官方惯例（Launchpad #2091118 的社区共识：先快照后修改）：
 descendants 先 list 化，配 destroyed id 集合跳过已销毁子树成员，保留
@@ -24,8 +23,8 @@ except Exception 包装为 DownloadException，走 sender 下载失败降级）�
 局限：校验与 ffmpeg 实际解析存在 DNS TOCTOU 窗口（子进程无法钉扎 IP），
 为子进程出站的行业尽力而为做法。
 
-挂载契约（2026-09-17 评审 M5）：模块属性 setattr 永远成功，上游改名/改
-形态时补丁会静默失效而旧哨兵（源码字符串仍在）测不出——每次挂载前经
+挂载契约：模块属性 setattr 永远成功，上游改名/改
+形态时补丁会静默失效而源码字符串哨兵（字符串仍在）测不出——每次挂载前经
 _mount 断言锚点存在且形态符合预期，否则响亮失败（RuntimeError）；实际
 挂载点由 mounted_points() 记录，测试断言其承载函数 __module__ 指向本模块。
 被复刻函数的「上游原件」在挂载前留存（VENDOR_BUFF_CONTENT /
@@ -111,7 +110,7 @@ def _mount(
     """挂载前断言锚点存在且形态符合预期，否则响亮失败；返回挂载前的原件。
 
     模块属性 setattr 永远成功，不会因上游改名而报错——若不显式断言，补丁会
-    静默失效而源码字符串哨兵测不出（2026-09-17 评审 M5）。
+    静默失效而源码字符串哨兵测不出。
     """
     current = resolve_mount_point(module.__name__, qualname)
     shape_ok = {
@@ -340,8 +339,8 @@ def _patch_ffmpeg_hls_ssrf() -> None:
     if getattr(FFmpeg.download_hls_to_mp4, "_ssrf_guarded", False):
         return
     # 取绑定后的 classmethod（cls 自动携带）而非 __func__：后者签名首位
-    # 是 cls，按 (url, output_path, ...) 调用会整体错位一位（2026-09-14
-    # 评审实测 TypeError，被调用点 except Exception 吞成 DownloadException，
+    # 是 cls，按 (url, output_path, ...) 调用会整体错位一位而抛 TypeError，
+    # 且被调用点的 except Exception 吞成 DownloadException，
     # 表现为全部 HLS 视频静默下载失败）
     original = FFmpeg.download_hls_to_mp4
     global VENDOR_HLS_PARAMS

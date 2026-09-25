@@ -1,8 +1,8 @@
-"""两段式渲染第一段离线冒烟（入库取代 /tmp 脚本）。
+"""两段式渲染第一段离线冒烟。
 
 断言本地 Jinja 段产出自包含 HTML：无 ``file://`` 引用（远程 t2i 读不到
-本地文件系统）、_resolve_src 内联与预算按既定约束生效。Theme API v1 起
-转义单点在数据层（build_theme_data/_escape_html），模板族只剩 default。
+本地文件系统）、_resolve_src 内联与预算按既定约束生效。转义单点在数据层
+（build_theme_data/_escape_html），模板族只有 default。
 第二段（AstrBot html_render 远程出图）属网络路径，归隔离区而非 required。
 """
 
@@ -50,7 +50,7 @@ class _HasPath:
 
 
 def test_stage_one_rejects_platform_name_path_traversal() -> None:
-    """平台名不得穿出模板目录（2026-09-14 评审 #10）。
+    """平台名不得穿出模板目录。
 
     模板名进 ``FileSystemLoader`` 前先过 `[a-z0-9_-]+` 白名单。当前
     ``PlatformEnum`` 值域封闭走不到这里，但 ``ParseResult.platform`` 由桥
@@ -95,9 +95,9 @@ async def test_stage_one_html_is_self_contained() -> None:
 
 
 async def test_stage_one_inlines_stylesheets() -> None:
-    """样式表与媒体同理必须内联（P0 回归 2026-09-12）：远程 t2i 端点的
-    浏览器解析不了相对模板路径，``<link rel="stylesheet">`` 必然 404，
-    导致全部卡片渲染为无样式裸 HTML（6 张生产渲染图视觉取证）。"""
+    """样式表与媒体同理必须内联：远程 t2i 端点的浏览器解析不了相对模板
+    路径，``<link rel="stylesheet">`` 必然 404，卡片全部渲染为无样式裸
+    HTML。"""
     pconfig.plite_append_qrcode = False
     html = await render.build_html(_result(), "light")
 
@@ -109,24 +109,22 @@ async def test_stage_one_inlines_stylesheets() -> None:
 
 
 async def test_stage_one_centers_card_for_fixed_t2i_viewport() -> None:
-    """桥侧视口适配（活体复验 2026-09-14）：公共 t2i 端点忽略 viewport/dsf
-    参数且视口宽因端点而异（实测 800/1280 两档），620px 卡片直接渲染会
-    随端点漂移出宽窄不一的留白条（群 1124969653 实发卡 1280×2558，两侧
-    约 330px 空白）；body zoom 放大卡面至内容宽 1280px——full_page 截图
-    取内容宽，任意端点都满幅无留白，文字按布局级缩放保持锐利。"""
+    """桥侧视口适配：公共 t2i 端点忽略 viewport/dsf 参数且视口宽因端点而异
+    （实测 800/1280 两档），620px 卡片直接渲染会随端点漂移出宽窄不一的留
+    白条；body zoom 放大卡面至内容宽 1280px——full_page 截图取内容宽，任意
+    端点都满幅无留白，文字按布局级缩放保持锐利。"""
     html = await render.build_html(_result(), "light")
     assert "margin:0 auto" in html or "margin: 0 auto" in html, "620px 卡片未居中"
     assert f"zoom:{render._T2I_ZOOM:.6f}" in html, "卡面未按内容宽目标缩放"
 
 
 async def test_stage_one_escapes_attacker_controlled_html() -> None:
-    """用户可控字段必须 HTML 转义（2026-09-14 双轴评审）：标题/作者名/评论
-    作者等字段源自被解析页面，且第一段 HTML 会被送给**远程** t2i 端点渲染，
-    裸插值等于把解析侧内容当 HTML 执行（可注入伪造卡片内容、外链、追踪
-    像素）。Theme API v1 起转义单点在**数据层**（build_theme_data 末尾
-    _escape_html 递归），模板裸插值 + Environment(autoescape=False)，
-    全树恰好一次转义——旧的「两模板逐字段判定有没有 ``| e``」转义矩阵
-    随 music 模板退役（卡片结构不被转义由下一条用例守护）。
+    """用户可控字段必须 HTML 转义：标题/作者名/评论作者等字段源自被解析
+    页面，且第一段 HTML 会被送给**远程** t2i 端点渲染，裸插值等于把解析侧
+    内容当 HTML 执行（可注入伪造卡片内容、外链、追踪像素）。转义单点在
+    **数据层**（build_theme_data 末尾 _escape_html 递归），模板裸插值 +
+    Environment(autoescape=False)，全树恰好一次转义——卡片结构不被转义由
+    下一条用例守护。
     """
     pconfig.plite_append_qrcode = False
     payload = '<img src=x onerror="alert(1)">'
@@ -141,8 +139,9 @@ async def test_stage_one_escapes_attacker_controlled_html() -> None:
 
 
 async def test_stage_one_escapes_comment_and_summary_fields() -> None:
-    """评论作者名/位置与 AI 摘要同样是解析侧内容（评审实证漏点：
-    ``{{ comment.author.name }}``、``{{ result.ai_summary }}`` 无 ``| e``）。"""
+    """评论作者名/位置与 AI 摘要同样是解析侧内容：模板里
+    ``{{ comment.author.name }}``、``{{ result.ai_summary }}`` 是裸插值，
+    转义完全依赖数据层单点。"""
     from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.data import (
         Comment,
     )
@@ -168,7 +167,7 @@ async def test_stage_one_escapes_comment_and_summary_fields() -> None:
 
 
 async def test_stage_one_does_not_mutate_parse_result() -> None:
-    """转义必须只作用于模板副本（2026-09-14 评审）：ParseResult 是 sender 与
+    """转义必须只作用于模板副本：ParseResult 是 sender 与
     render 共享的同一实例，原地改写会让发送到聊天平台的文本出现 ``&amp;``
     之类的转义残留。"""
     pconfig.plite_append_qrcode = False
@@ -208,12 +207,11 @@ async def test_stage_one_escapes_music_platform_fields() -> None:
 
 
 async def test_stage_one_escapes_title_exactly_once() -> None:
-    """标题恰好一次转义（旧「双模板过滤状态不一致」契约的换代留痕）。
+    """标题恰好一次转义。
 
-    旧契约：macros.jinja 的 ``| e`` 与 music 模板裸插值不一致，桥必须预转
-    title，代价是 default 卡 ``&amp;lt;`` 双转义字面量。Theme API v1 把转义
-    收进数据层单点，模板全裸插值 + autoescape=False——桥若恢复字段级预转义
-    （或误开 autoescape），本用例的 ``&amp;lt;`` 断言立即变红。
+    转义单点在数据层，模板全裸插值 + autoescape=False；桥若做字段级预转义
+    （或误开 autoescape），default 卡会落入 ``&amp;lt;`` 双转义字面量——
+    本用例的 ``&amp;lt;`` 断言对此立即变红。
     """
     pconfig.plite_append_qrcode = False
     payload = "<img src=x onerror=alert(1)>"
@@ -265,8 +263,7 @@ async def test_stage_one_keeps_structural_markup_intact(
 
 
 async def test_stage_one_carries_theme_canvas_background() -> None:
-    """桥面画布底色（2026-09-13 模板数据面活体对照）：上游模板无 body
-    底色规则（旧副本冻结的上游已删规则已随逐字节再生移除），远程 t2i
+    """桥面画布底色：上游模板无 body 底色规则，远程 t2i
     默认白底会让暗色卡的两侧留白条穿帮——底色规则按主题选择器留在桥侧
     视口补丁内，两种主题都可达。"""
     html = await render.build_html(_result(), "light")
@@ -277,10 +274,9 @@ async def test_stage_one_carries_theme_canvas_background() -> None:
 
 
 async def test_stage_one_renders_paired_stats_extra() -> None:
-    """stats.extra 二元组形状直供渲染（2026-09-13 P1 回归的换代形态）。
+    """stats.extra 二元组形状直供渲染。
 
-    旧 vendor standalone 的标量形状与桥内 ACL 翻译表（_EXTRA_LABELS）已随
-    Theme API v1 roll 退役：vendor 与 main 同源后 stats.extra 值就是
+    vendor 与 main 同源的现行形状：stats.extra 值就是
     （标签, 数值）二元组，_serialize_stats 逐项拆进 ``extra[]`` 列表、
     模板按 item.label/item.value 裸插值。标量直供在上游/桥镜像里会把
     字符串按字符切碎（"321" → "3","2"）——那是上游自身语义，桥不另设防线。
@@ -299,7 +295,7 @@ async def test_stage_one_renders_paired_stats_extra() -> None:
 async def test_serialize_stats_returns_new_dict_not_inplace() -> None:
     """数据层镜像不改写共享 ParseResult：stats.extra 保持 vendor 原对象。
 
-    sender 与 render 共享同一 ParseResult 实例；旧 ACL 的副本纪律由
+    sender 与 render 共享同一 ParseResult 实例；副本纪律由
     _serialize_stats 的「构建新 dict」天然承接——输出是形状翻译后的
     JSON-like 列表，原 Stats.extra 字典必须原封不动。"""
     stats = Stats(view_count="1.2万", like_count="500", extra={"danmaku": ("弹幕", "321")})
@@ -361,9 +357,8 @@ class _ShotRenderer:
 async def test_cache_or_render_image_reuses_cache(tmp_path: Path, monkeypatch: Any) -> None:
     """上游 cache_or_render_image 等价移植：命中渲染缓存不重渲、png 转 jpeg。
 
-    回归护栏（2026-09-12 生产日志）：桥内旧实现只写缓存不读，同 URL 十几
-    分钟内被完整重渲并覆写（11.4MB PNG 重复截图），上游「命中即复用、跨
-    重启复用」语义从未生效。
+    只写缓存不读会让同 URL 在缓存有效期内被完整重渲并覆写，上游「命中即
+    复用、跨重启复用」语义失效——本用例钉住读路径。
     """
     shot = tmp_path / "screenshot.png"
     shot.write_bytes(_MINIMAL_PNG)
@@ -390,7 +385,7 @@ async def test_cache_or_render_image_reuses_cache(tmp_path: Path, monkeypatch: A
     assert len(calls) == 1, "缓存命中仍触发 html_render——复用语义被破坏"
 
 
-# ---------------------------------------------------------------- 内联预算（M14）
+# ---------------------------------------------------------------- 内联预算
 
 
 def _result_with_images(tmp_path: Path, count: int) -> ParseResult:
@@ -490,7 +485,7 @@ async def test_placeholder_degraded_folds_across_objects() -> None:
 
 
 def test_inline_read_failure_does_not_consume_budget(tmp_path: Path, monkeypatch: Any) -> None:
-    """读文件失败不得记账（旧实现先记账后读，读失败会虚耗预算）。"""
+    """读文件失败不得记账——先记账后读会在读失败时虚耗预算，故先读后记账。"""
     img = tmp_path / "cover.png"
     img.write_bytes(_MINIMAL_PNG)
 
@@ -504,13 +499,13 @@ def test_inline_read_failure_does_not_consume_budget(tmp_path: Path, monkeypatch
     assert budget.degraded == 0, "读失败不应算作预算降级"
 
 
-# ---------------------------------------------------------------- 缓存键与产物（M7/L10）
+# ---------------------------------------------------------------- 缓存键与产物
 
 
 def test_render_cache_key_tracks_render_config(monkeypatch: Any) -> None:
-    """缓存键纳入影响渲染输出的配置态（M7）。
+    """缓存键纳入影响渲染输出的配置态。
 
-    二维码开关 / 评论条数 / 昵称都进模板输出却曾不在键内，改配置后最长
+    二维码开关 / 评论条数 / 昵称都进模板输出：不进键则改配置后最长
     vendor 清理周期（2h）内仍发旧图；theme 已在键内（日夜不串图）不重复。
     """
     result = _result()
@@ -537,7 +532,7 @@ def test_render_cache_key_tracks_render_config(monkeypatch: Any) -> None:
 
 
 async def test_cache_hit_rejects_empty_artifact(tmp_path: Path, monkeypatch: Any) -> None:
-    """0 字节缓存产物不算命中：必须重渲（L10）。"""
+    """0 字节缓存产物不算命中：必须重渲。"""
     shot = tmp_path / "screenshot.png"
     shot.write_bytes(_MINIMAL_PNG)
     jpeg_marker = b"\xff\xd8\xff\xe0-fake-jpeg"
@@ -563,7 +558,7 @@ async def test_cache_hit_rejects_empty_artifact(tmp_path: Path, monkeypatch: Any
 
 
 async def test_empty_render_artifact_is_not_cached(tmp_path: Path, monkeypatch: Any) -> None:
-    """PNG→JPEG 返回 0 字节或非 JPEG 时拒绝写缓存（L10 + 魔数校验）。"""
+    """PNG→JPEG 返回 0 字节或非 JPEG 时拒绝写缓存（魔数校验）。"""
     shot = tmp_path / "screenshot.png"
     shot.write_bytes(_MINIMAL_PNG)
 

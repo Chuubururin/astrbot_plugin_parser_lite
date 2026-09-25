@@ -135,8 +135,8 @@ def _named_frozenset_str_candidates(tree: ast.Module, name: str) -> list[tuple[s
 def _viewport_candidates(tree: ast.Module) -> list[tuple[dict[str, int], str]]:
     """``get_new_page(2, **{"viewport": {...}})`` 实参（t2i 视口基准）。
 
-    上游 2026-09-17 起把整页 ``template_to_pic`` 换成 ``get_new_page`` +
-    分段滚动截图拼接（绕开 full_page 大位图限制），视口改经 ``**{...}``
+    上游现行截图形态是 ``get_new_page`` +
+    分段滚动截图拼接（绕开 full_page 大位图限制），视口经 ``**{...}``
     解包传入——AST 上是 ``keyword.arg is None`` 的字面量字典。锚点只认
     当前形状：上游再次改写时零命中响亮失败交人工复核，不做新旧兼容兜底。
     """

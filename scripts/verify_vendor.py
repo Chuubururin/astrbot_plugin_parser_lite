@@ -104,10 +104,10 @@ def check_upstream_consistency(violations: list[str]) -> bool:
     """第 3 层：与上游克隆逐字节比对；返回是否真正执行。
 
     vendor/_upstream 是版本/依赖/元数据的**唯一真值源**（metadata.yaml 版本、
-    requirements.txt 派生、release tag 校验都依赖它），而此前第 3 层只遍历
-    VENDOR_PKG（原实现里的 `"_upstream" in py.parts` 是死代码：_upstream 本就
-    不在 rglob 范围内），该目录完全无校验——手改可静默传导到发布物
-    （2026-09-17 评审 M4）。无克隆时显式声明 SKIPPED，不打印「通过」。
+    requirements.txt 派生、release tag 校验都依赖它），故第 3 层对 VENDOR_PKG
+    与 vendor/_upstream **分开遍历**——_upstream 不在 VENDOR_PKG 的 rglob
+    范围内，混在一处遍历等于该目录完全无校验，手改可静默传导到发布物。
+    无克隆时显式声明 SKIPPED，不打印「通过」。
     """
     upstream_root = REPO_ROOT / ".sync-work" / "upstream"
     upstream_src = upstream_root / "src" / "nonebot_plugin_parser_lite"

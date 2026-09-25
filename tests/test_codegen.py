@@ -588,7 +588,7 @@ def test_display_texts_match_upstream_when_clone_present(extractor: ModuleType) 
     """按入库快照记录的 source_revision 现场复提比对（手改或漂移即红）。
 
     锚定快照自身的 source_revision——本地 origin/main ref 可能因镜像缓存
-    竞态滞后于真实上游（2026-09-14 实证）。
+    竞态滞后于真实上游。
     """
     clone = REPO_ROOT / ".sync-work" / "upstream"
     probe = subprocess.run(
@@ -740,15 +740,15 @@ def test_generator_rejects_bad_version_at_sink(
 # sync-upstream 在役契约：roll 序列单实现，工作流只做编排
 # ---------------------------------------------------------------------------
 #
-# 前身是 2026-09-19 的「退役墓碑」，其列出的学费已按新形态归位：
+# 本节判据各自对应一个真实故障模式：
 #
 #   · 提交清单漏项 ⇒ roll 带旧桥工件配新 vendor（上游文案/参数静默失效）：
-#     清单现在住在 roll_local.ROLL_ADD_PATHS，本文件钉它对生成工件的覆盖；
+#     清单住在 roll_local.ROLL_ADD_PATHS，本文件钉它对生成工件的覆盖；
 #   · state 缺尾换行 ⇒ end-of-file-fixer 在 sync PR 上判红 ⇒ automerge
 #     永不满足：_state_write 的字节公式由功能测试钉住；
-#   · 分层 automerge 排除清单（旧「触碰 vendor 之外转人工」设计）随
-#     「sync 只合并自己产出的 PR」的新轨道消亡——bot PR 的内容域就是
-#     ROLL_ADD_PATHS，无需排除清单这道二级防线。
+#   · automerge 不设「触碰 vendor 之外即转人工」式的排除清单——sync 只
+#     合并自己产出的 PR，bot PR 的内容域就是 ROLL_ADD_PATHS，
+#     无需这道二级防线。
 
 
 def _load_roll_local() -> ModuleType:

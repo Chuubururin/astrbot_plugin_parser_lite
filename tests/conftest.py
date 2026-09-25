@@ -25,10 +25,11 @@ def pytest_collection_modifyitems(config, items):
        夹具不存在会让 4 个快照用例报 ERROR（不是 skip）——契约由开发环境
        （装了 syrupy）守护，缺插件的环境应显式跳过而非伪装成失败。
     2. ``network`` marker 的语义（pyproject.toml 已声明「默认跳过；
-       RUN_NETWORK_TESTS=1 启用」）此前**无任何执行点**：只有
-       tests/test_parse_snapshot.py 用 ``skipif`` 自行实现，其余依赖真实
-       DNS 的用例靠 ``pytest.skip`` 静默降级，导致 CI 的 skip 数随环境浮动、
-       ``pytest -m network`` 只选中 1/369（2026-09-17 评审 L11）。
+       RUN_NETWORK_TESTS=1 启用」）必须有统一执行点：若只靠各用例自行
+       ``skipif`` / ``pytest.skip`` 静默降级，只有
+       tests/test_parse_snapshot.py 一家实现，其余依赖真实 DNS 的用例
+       会随环境漂移，导致 CI 的 skip 数不确定、
+       ``pytest -m network`` 也选不全。
        此处统一落地该语义，使 skip 数确定（ci.yml 的 skip 预算断言依赖此确定性）。
     """
     try:

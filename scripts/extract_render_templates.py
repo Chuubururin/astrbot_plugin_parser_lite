@@ -1,9 +1,9 @@
 """上游 main 分支渲染模板提取 → vendor/_upstream/render_templates.json。
 
 卡面模板数据面的最前端：桥内 ``templates/`` 目录（default/music 卡面模板、
-macros 宏、CSS 族）逐字节来自上游 main 分支 render/templates（2026-09-13
-活体核验：六个文件 sha256 与 origin/main 全等——桥对模板的适配面在
-render.py 的 safe_src 过滤器与数据翻译，模板本体零改动）。standalone 快照
+macros 宏、CSS 族）逐字节来自上游 main 分支 render/templates（活体核验：
+各文件 sha256 与 origin/main 全等——桥对模板的适配面收敛在 render.py 的
+数据层镜像，模板本体零改动）。standalone 快照
 剥离了渲染层，因此提取源是 main 分支本体。本脚本只在 sync-upstream 工作流
 中运行（那里已 fetch 上游 main）；产物 JSON **入库**（与 display_texts/
 render_params 同类的上游元数据快照），使两层注入在本地与 CI 均可离线再生。

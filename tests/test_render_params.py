@@ -334,7 +334,7 @@ def test_bridge_has_no_hardcoded_injected_values() -> None:
     assert "render_params.MAX_FORWARD_TEXT_LEN" in sender_src, "sender.py 未消费注入的转发文本上限"
     assert "render_params.TEXT_SPLIT_PUNCTUATION" in sender_src, "sender.py 未消费注入的标点集"
     # 卡面画布宽必须来自注入的 viewport 宽：硬编码副本会在上游调整视口宽时
-    # 静默产出错误缩放比（2026-09-14 评审发现的真实破口，此前无机械守护）
+    # 静默产出错误缩放比，由此断言机械守护
     assert "_T2I_CARD_WIDTH = 620" not in render_src, (
         "render.py 仍硬编码卡面画布宽，应消费 render_params 生成物"
     )
@@ -348,8 +348,7 @@ def test_render_params_match_upstream_when_clone_present(extractor: ModuleType) 
     """按入库快照记录的 source_revision 现场复提比对（手改或漂移即红）。
 
     锚定快照自身的 source_revision 而非本地 origin/main ref——后者可能因
-    镜像缓存竞态滞后于真实上游（2026-09-14 实证），入库件的源以快照记录
-    为准。
+    镜像缓存竞态滞后于真实上游，入库件的源以快照记录为准。
     """
     clone = REPO_ROOT / ".sync-work" / "upstream"
     probe = subprocess.run(

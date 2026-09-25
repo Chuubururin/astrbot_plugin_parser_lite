@@ -113,7 +113,7 @@ def _pconfig_attrs_in(
 ) -> set[str]:
     """表达式中对 pconfig 的属性访问名集合。
 
-    三种形态（2026-09-17 评审 M13 后加固）：``pconfig.attr``（含 ``as`` 别名）、
+    三种形态：``pconfig.attr``（含 ``as`` 别名）、
     ``config.pconfig.attr``（先绑模块再取属性）、``getattr(pconfig, "attr")``。
     """
     if expr is None:
@@ -204,7 +204,7 @@ def _src(*lines: str) -> str:
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        # 类体直写（原实现已覆盖）
+        # 类体直写
         (_src("class A:", "    X = pconfig.max_retries"), {"max_retries"}),
         # 盲区①：控制流包裹
         (_src("class A:", "    if True:", "        X = pconfig.brand_new"), {"brand_new"}),
@@ -236,10 +236,10 @@ def _src(*lines: str) -> str:
     ],
 )
 def test_snapshot_scanner_covers_nested_and_alias_forms(source: str, expected: set[str]) -> None:
-    """守护的守护（M13）：扫描器必须识别嵌套/别名等已知形态。
+    """守护的守护：扫描器必须识别嵌套/别名等已知形态。
 
     没有这条反向验证时，「上游新增导入期快照即红」只是一个声称——
-    2026-09-17 评审实测原实现对 `if` 包裹与 `as` 别名两种写法全绿。
+    `if` 包裹与 `as` 别名两种写法若未被识别，扫描会静默保持全绿。
     """
     assert _snapshot_offenders(ast.parse(source)) == expected
 

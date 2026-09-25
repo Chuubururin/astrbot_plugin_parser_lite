@@ -1,14 +1,14 @@
-"""ssrf.py 单元测试：四层校验全拒/放行清单 + 钉扎 + 幂等安装（工单 08/09）。
+"""ssrf.py 单元测试：四层校验全拒/放行清单 + 钉扎 + 幂等安装。
 
 放行样本用公网 IP 字面量（1.1.1.1 / 8.8.8.8）保持用例密闭；仅钉扎用例
 按「mock 只在系统边界」原则触真实 DNS（example.com），这两个用例打
 ``@pytest.mark.network`` 归入隔离区（默认跳过；RUN_NETWORK_TESTS=1 启用），
-避免 CI 的 skip 数随环境 DNS 可用性浮动（2026-09-17 评审 L11）。
-钉扎契约（规格 step 8）：连接钉在已验证 IP 上，URL/SNI 保留原 hostname。
+避免 CI 的 skip 数随环境 DNS 可用性浮动。
+钉扎契约：连接钉在已验证 IP 上，URL/SNI 保留原 hostname。
 
-curl 通道用例（H1/H2 回归）一律使用**真实 curl_cffi.AsyncSession**，不再用
-带 **kwargs 的假会话——正是那个 **kwargs 把「curl_options 被当作
-AsyncSession.request 关键字实参」的 TypeError 吞成了假绿，掩盖了 H1。
+curl 通道用例一律使用**真实 curl_cffi.AsyncSession**，不再用
+带 **kwargs 的假会话——**kwargs 会把「curl_options 被当作
+AsyncSession.request 关键字实参」的 TypeError 吞成假绿，掩盖缺陷。
 """
 
 from __future__ import annotations
@@ -332,7 +332,7 @@ def test_pinned_transport_proxy_rewrites_target(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# curl 通道回归（H1：curl_options 必须挂会话级 / H2：重定向必须逐跳校验）
+# curl 通道：curl_options 必须挂会话级 / 重定向必须逐跳校验
 #
 # 这些用例一律用真实 curl_cffi.AsyncSession + 真实（本地）HTTPServer。
 # ---------------------------------------------------------------------------
@@ -385,7 +385,7 @@ def _local_http_server(redirect_to: str | None = None):
 def _redirect_pair():
     """两跳场景：第一跳 /redir 302 → 第二跳（另一端口）的 /secret。
 
-    同时给出第二跳端口：H2 用例可对工作 URL 做**精确**断言（而非 startswith
+    同时给出第二跳端口：端到端用例可对工作 URL 做**精确**断言（而非 startswith
     近似——构造错误与放行缺陷必须能区分）。
     """
     with _local_http_server() as (secret_server, secret_hits):
@@ -430,10 +430,10 @@ def _pin_host_to_local(monkeypatch, host: str, port: int) -> list[str]:
 
 
 def test_curl_guard_injected_kwargs_are_legal_request_params(monkeypatch, clean_resolve_table):
-    """H1 冒烟：wrapper 注入的 kwargs 必须全是 AsyncSession.request 的合法形参。
+    """wrapper 注入的 kwargs 必须全是 AsyncSession.request 的合法形参。
 
-    修复前 wrapper 传 `curl_options=`；curl_cffi 0.16.3 的 AsyncSession.request
-    既无该形参也无 **kwargs → 本用例必红。
+    curl_cffi 0.16.3 的 AsyncSession.request 既无 ``curl_options`` 形参也无
+    **kwargs：把 curl_options 当关键字实参传，本用例必红。
     """
     request_params = set(inspect.signature(AsyncSession.request).parameters)
     assert "curl_options" not in request_params, "curl_cffi 语义已变，复核 H1 修复前提"
@@ -444,7 +444,7 @@ def test_curl_guard_injected_kwargs_are_legal_request_params(monkeypatch, clean_
 
     async def recording_original(method, url, **kwargs):
         injected.append(dict(kwargs))
-        # 用真实签名做绑定校验：非法形参在此抛 TypeError（修复前即 curl_options）
+        # 用真实签名做绑定校验：非法形参在此抛 TypeError
         inspect.signature(AsyncSession.request).bind(session, method, url, **kwargs)
         return "stub"
 
@@ -462,7 +462,7 @@ def test_curl_guard_injected_kwargs_are_legal_request_params(monkeypatch, clean_
 
 
 def test_curl_guard_pins_resolve_on_real_session(monkeypatch, clean_resolve_table):
-    """H1 修复后：RESOLVE 挂在 session 上，真实请求经钉扎 IP 抵达本地服务。"""
+    """RESOLVE 挂在 session 上，真实请求经钉扎 IP 抵达本地服务。"""
     with _local_http_server() as (server, hits):
         port = server.server_address[1]
         calls = _pin_host_to_local(monkeypatch, "hop.example.com", port)
@@ -557,7 +557,7 @@ def test_curl_guard_blocks_private_before_any_io():
 
 
 def test_curl_guard_blocks_redirect_to_internal(monkeypatch, clean_resolve_table):
-    """H2 端到端：第一跳真实抵达，第二跳重定向到内网由 Python 校验拒绝。
+    """端到端：第一跳真实抵达，第二跳重定向到内网由 Python 校验拒绝。
 
     本机没有公网可达的监听端口，无法构造「第一跳公网、第二跳内网」；这里用
     RESOLVE 把 host 钉到 127.0.0.1 让第一跳落地，重定向目标仍是字面量

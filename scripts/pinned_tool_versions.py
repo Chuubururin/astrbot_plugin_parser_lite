@@ -1,6 +1,6 @@
 """门禁工具版本的单一定义源：从 pre-commit 配置的 ``rev:`` 推导 pip 版本。
 
-为什么需要（2026-09-19 事故复盘）：pre-commit 的 ruff 钩子在**自己的隔离
+为什么需要：pre-commit 的 ruff 钩子在**自己的隔离
 环境**里跑，版本由 ``config/.pre-commit-config.yaml`` 的 ``rev:`` 决定；而
 ``promote-dev-to-main`` 与 ``ci.yml`` 的 typecheck job 是在 venv 里直接装
 ruff 与 mypy 来跑（后者经 ``scripts/typecheck.py`` 调用），装的是 pip 版本。

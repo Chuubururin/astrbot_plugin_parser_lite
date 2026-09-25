@@ -209,7 +209,7 @@ def _evaluate_dod(
             if not outcomes:
                 # UNKNOWN 而非 SKIPPED：过滤运行（--id X）下 DoD 无法求值，
                 # 若按 SKIPPED 静默通过，退出码 0 会被读成「全绿」—— 与模块
-                # docstring 的「0 = 全绿」契约冲突（2026-09-18 复核）
+                # docstring 的「0 = 全绿」契约冲突
                 state, detail = (
                     UNKNOWN,
                     "本次未运行 pytest，DoD 无法求值（过滤运行请加 --no-dod 显式声明）",
@@ -307,7 +307,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     评审」。若在工作流里硬失败，tripwire 连送达评审的 PR 都不存在，反而失效。
     """
     # 计数含 DoD：payload["summary"] 只统计 entries，若条目全绿而 DoD 变红，
-    # 摘要会印出「green 12」却同时列出红行，自相矛盾（2026-09-18 实跑所见）。
+    # 摘要会印出「green 12」却同时列出红行，自相矛盾。
     counts: dict[str, int] = dict.fromkeys((GREEN, RED, SKIPPED, EVENT, UNKNOWN), 0)
     for item in [*payload.get("entries", []), *payload.get("definition_of_done", [])]:
         state = item.get("state")

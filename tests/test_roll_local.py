@@ -201,7 +201,7 @@ def test_extract_archive_rejects_hardlink_member(roll: ModuleType, tmp_path: Pat
 
 
 def test_extract_archive_rejects_nonregular_member(roll: ModuleType, tmp_path: Path) -> None:
-    """非常规成员（fifo 等）响亮拒绝（原实现静默跳过=vendor 树缺文件）。"""
+    """非常规成员（fifo 等）必须响亮拒绝——静默跳过会造成 vendor 树缺文件。"""
     blob = _tar_blob([("src/fifo", "fifo", None)])
     with pytest.raises(SystemExit, match="非常规类型"):
         roll._extract_archive_blob(blob, tmp_path / "out")
@@ -215,10 +215,10 @@ def test_rebuild_vendor_uses_explicit_sha_not_fetch_head(
 ) -> None:
     """_rebuild_vendor 的检出/归档源必须是显式 standalone sha。
 
-    2026-09-15 实证竞态：_roll 在 _rebuild_vendor 前会 _fetch_main 覆写
-    FETCH_HEAD，且 main 根结构改版去掉 pyproject.toml 后沿用 FETCH_HEAD
-    误档 main 树直接 FileNotFoundError。本测试以「归档参数含目标 sha、
-    全程不出现 FETCH_HEAD」钉死该不变量。
+    这里钉死的是 FETCH_HEAD 竞态：_roll 在 _rebuild_vendor 前会 _fetch_main
+    覆写 FETCH_HEAD；且 main 根结构与 standalone 不同（根上无
+    pyproject.toml），沿用 FETCH_HEAD 误档 main 树会直接 FileNotFoundError。
+    本测试以「归档参数含目标 sha、全程不出现 FETCH_HEAD」钉死该不变量。
     """
     vendor_pkg = tmp_path / "vpkg"
     vendor_meta = tmp_path / "vmeta"
@@ -313,9 +313,10 @@ def test_roll_pytest_failure_does_not_advance_state_and_counts_failures(
 ) -> None:
     """H4：契约测试失败时不得推进 standalone_sha，且失败计数逐次递增（熔断有效）。
 
-    旧实现先推进 state 再跑 pytest：失败 roll 被永久记为已同步（下次 _detect 见
-    sha 相同直接幂等退出，vendor 滞留旧版且再无重试触发点）；且
-    consecutive_failures 被清零后由 main() +1，每次失败恒为 1、永达不到阈值。
+    推进时序是本断言的全部：若先推进 state 再跑 pytest，失败 roll 会被永久
+    记为已同步（下次 _detect 见 sha 相同直接幂等退出，vendor 滞留旧版且再无
+    重试触发点）；失败计数若被清零后仅由 main() +1，每次失败恒为 1、
+    永达不到熔断阈值。
     """
 
     def _fake_run(cmd, **kw):
@@ -380,7 +381,7 @@ def test_tree_version_reads_explicit_sha_not_fetch_head(
 def test_check_exit_code_nonzero_when_upstream_changed(
     roll: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--check 检测到更新时退出码 1（旧实现恒 0，无法作为「有更新」判据）。"""
+    """--check 检测到更新时退出码 1——退出码要能作「有更新」判据，恒 0 即失职。"""
     monkeypatch.setattr(roll.os, "chdir", lambda path: None)
     monkeypatch.setattr(roll, "_ensure_clone", lambda: None)
     monkeypatch.setattr(roll, "_detect", lambda: (_SHA_A, _SHA_B, _SHA_C))
@@ -459,7 +460,7 @@ def test_extract_archive_validates_all_members_before_writing(
 def test_plane_truth_disciplines_delegate_to_shared_base(roll: ModuleType) -> None:
     """M16：roll_local 的编排层真值纪律必须是共享底座的同一函数对象。
 
-    双轨各写一份曾在细节上漂移（远端真值兜底、祖先门退出码语义、主题解析
+    双轨各写一份时细节必然漂移（远端真值兜底、祖先门退出码语义、主题解析
     的 unknown 兜底）。以身份断言（is）钉死委托关系：任何一侧被就地重写、
     或日后又复制一份，都会让本测试变红。
     """
@@ -474,8 +475,7 @@ def test_roll_pytest_invocation_matches_gate_1() -> None:
     """roll 序列的 pytest 调用必须与门禁 1 完全同参（-c config + --rootdir）。
 
     裸 `-q` 拿不到仓库 pytest 配置（根目录无默认发现路径上的 ini），asyncio
-    用例整批假红（2026-09-25 票07 彩排实证 82 failed）——管线红必须只可
-    归因契约本身，不可归因调用形态漂移。
+    用例整批假红——管线红必须只可归因契约本身，不可归因调用形态漂移。
     """
     source = (REPO_ROOT / "scripts" / "roll_local.py").read_text(encoding="utf-8")
     invocation = '"python3", "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"'

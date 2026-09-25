@@ -177,9 +177,9 @@ def _inline_css_sync(html: str) -> str:
     """把 ``<link rel="stylesheet" href="*.css">`` 替换为内联 ``<style>``。
 
     远程 t2i 端点（AstrBot html_render 唯一路径）的浏览器解析不了模板目录
-    相对路径，外链 CSS 必然 404 → 全卡片渲染为无样式裸 HTML（2026-09-12
-    六张生产渲染图视觉取证），因此 CSS 与本地媒体一样必须自包含。样式表
-    缺失/越界直接抛错，交由调用方降级为纯文本路径。
+    相对路径，外链 CSS 必然 404 → 全卡片渲染为无样式裸 HTML，因此 CSS 与
+    本地媒体一样必须自包含。样式表缺失/越界直接抛错，交由调用方降级为纯
+    文本路径。
     """
 
     def _sub(m: re.Match[str]) -> str:
@@ -220,8 +220,8 @@ def _inline_image_sync(path_str: str, budget: InlineBudget) -> str | None:
     """本地文件 → base64 data URI；非图片/超预算返回 None 交给调用方降级。
 
     同步实现：由 _resolve_src 经 to_thread 调用，读文件+编码（单文件上限 8MB）
-    不占事件循环。记账口径为 base64 后的字节，且「读成功后才记账」——旧
-    实现先记账后读文件，读失败会漏账虚耗预算（2026-09-17 评审 M14）。
+    不占事件循环。记账口径为 base64 后的字节，且「读成功后才记账」——若先
+    记账后读文件，读失败会漏账虚耗预算。
     """
     path = SyncPath(path_str)
     mime = mimetypes.guess_type(path.name)[0]
@@ -260,7 +260,7 @@ async def _resolve_src(
     浏览器 base_url 可解），远端 t2i 读不到本地路径，必须换成本地内联的
     base64 data URI；失败回退形态与上游同构（PLACEHOLDER_IMAGE 或 None）。
 
-    桥侧记账纪律（沿用旧过滤器契约，非上游语义）：
+    桥侧记账纪律（桥自有约定，独立于上游语义）：
     - fail 为 PLACEHOLDER 时是**可见灰块**，必须计入整页降级判据——否则
       「方法缺失/异常/None src」的灰块卡会被当成功缓存（灰块永久卡）；
     - 去重键按 reason:type:method 折叠不同对象，是刻意取舍：占位图为 1×1
@@ -269,8 +269,8 @@ async def _resolve_src(
       降级按文件路径逐张计数（_inline_image），不受此折叠影响；结构性失败
       （vendor 改名等）同时命中多个不同 (type, method) 组合，折叠后仍能触发
       阈值；
-    - 上游同处有 logger.warning，桥此前一律静默——vendor 改名这类事故会表现
-      为「卡片上几张图变灰块」而日志里一个字都没有（2026-09-18 复核）。
+    - 异常就地 logger.warning（与上游同处一致）：「卡片上几张图变灰块」这类
+      事故需要在日志里有定位线索；结构性失败则靠计数超阈触发整页降级告警。
     """
     fail = None if return_none_on_fail else PLACEHOLDER_IMAGE
 
@@ -605,7 +605,7 @@ def _select_template(result: ParseResult) -> str:
 
     平台名在拼接前做白名单校验：模板名会进 ``FileSystemLoader``，含 ``/``
     或 ``..`` 的值能穿出 ``TEMPLATES_DIR``（``../../etc/passwd.html.jinja``
-    实测可解析，2026-09-14 评审 #10）。``ParseResult.platform`` 是桥对外
+    实测可解析）。``ParseResult.platform`` 是桥对外
     组装的字段，此处按「输入不可信」设防，白名单不匹配即回退 default
     而非抛错（选择模板失败不该让整次渲染失败）。
     """
@@ -645,7 +645,7 @@ async def build_html(result: ParseResult, theme: Theme) -> str:
     rendered = await template.render_async(data=data)
     if budget.degraded > INLINE_DEGRADE_THRESHOLD:
         # 缺图不再静默：超阈值的降级意味着卡片大面积缺图，整页降级为文本
-        # 比发一张「一半是灰块」的卡更诚实（2026-09-17 评审 M14）
+        # 比发一张「一半是灰块」的卡更诚实
         logger.warning(
             "内联降级媒体 %d 张（阈值 %d，预算 %d 字节，已用 %d）：整页降级为文本",
             budget.degraded,
@@ -724,8 +724,8 @@ def _render_config_rev() -> str:
     """影响渲染输出的配置态短摘要（纳入缓存键）。
 
     只纳入真正进模板输出的配置：二维码开关、评论条数、机器人昵称。theme
-    已在键内（日夜不串图），不重复。缓存键缺这些会让 WebUI 改配置后最长
-    vendor 清理周期（2h）内仍发旧图（2026-09-17 评审 M7）。
+    已在键内（日夜不串图），不重复。缓存键若缺这些，WebUI 改配置后最长
+    vendor 清理周期（2h）内仍会发旧图。
 
     评论条数取**钳制后**的值：若用裸配置，非法值（如 -1 与 -2）会算出不同的
     键却产出同一张图，白白多渲染一次；反之钳制后 -1 与 0 同键同图，语义正确。
@@ -772,8 +772,8 @@ async def _cache_artifact_usable(path: Path) -> bool:
     """缓存产物可用 = 存在且为合法 JPEG（SOI 魔数 + 非空）。
 
     只判存在会把 0 字节产物（PNG→JPEG 失败、上次写入被中断）当成命中缓存
-    到下次清理；vendor 每 2h 的清理任务也可能刚好删掉文件（2026-09-17
-    评审 L10）。魔数校验补上「非空但不是 JPEG」的第三类坏产物。
+    到下次清理；vendor 每 2h 的清理任务也可能刚好删掉文件。魔数校验补上
+    「非空但不是 JPEG」的第三类坏产物。
     """
     try:
         async with await path.open("rb") as fh:

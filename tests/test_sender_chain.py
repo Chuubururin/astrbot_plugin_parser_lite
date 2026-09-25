@@ -2,8 +2,8 @@
 
 sender 模块顶层依赖 astrbot 运行时（Comp 组件、session_waiter）。CI 与本地测试
 环境通过 ``python -m pip install --no-deps -r tests/requirements-test.txt``
-安装**真实** AstrBot（刻意不用手写替身：替身会接受真实库拒绝的参数，见
-tests/test_ssrf.py 的历史教训——那条假 session 掩盖了一个高危签名缺陷）。
+安装**真实** AstrBot（刻意不用手写替身：替身会接受真实库拒绝的参数，
+假 session 这类替身能把高危签名缺陷吞成假绿，见 tests/test_ssrf.py）。
 
 ``importorskip`` 仅作本地未装 astrbot 时的优雅降级；其静默退化由 ci.yml 的
 「skip 预算断言」（预算 = 1）兜底——整模块被跳过会直接让 CI 变红。
@@ -67,7 +67,7 @@ async def test_mediafile_translation_chain(tmp_path: Path) -> None:
     video_path = tmp_path / "v.mp4"
     video_path.write_bytes(b"video-bytes")
     # 缩略图必须真实存在且非空才会设封面（上游 helper.video_seg 的第三道闸，
-    # 2026-09-18 修复）。旧断言用的是从未创建的路径，钉的是缺陷行为。
+    # 桥同构此判据）；封面路径须真实写入磁盘，否则钉的是不可达行为。
     thumb_path = tmp_path / "t.jpg"
     thumb_path.write_bytes(b"thumb")
     video = sender.MediaFile("video", path=video_path, thumbnail=thumb_path)
@@ -89,7 +89,7 @@ async def test_mediafile_translation_chain(tmp_path: Path) -> None:
 async def test_video_cover_skipped_when_thumbnail_unreadable(tmp_path: Path) -> None:
     """零字节 / 不可读缩略图不设封面（上游 helper.video_seg 的第三道闸）。
 
-    桥此前无条件 ``as_uri()``，会把 cover 指向空文件或根本不存在的路径；
+    桥若无条件 ``as_uri()``，会把 cover 指向空文件或根本不存在的路径；
     不可读时按「无封面」处理而非抛错——封面是装饰，不该让整条视频发送失败。
     """
     configure(plite_use_base64=False)
@@ -115,7 +115,7 @@ async def test_video_cover_skipped_when_thumbnail_unreadable(tmp_path: Path) -> 
 async def test_lazy_download_tip_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """提示发送受 plite_lazy_download_tip 门控（上游 matchers/__init__.py:162-168）。
 
-    此前无条件发送，用户在 WebUI 关掉开关后行为完全不变——配置静默失效。
+    若无条件发送，用户在 WebUI 关掉开关后行为完全不变——配置静默失效。
     """
     sent: list[str] = []
 
@@ -233,7 +233,7 @@ async def test_card_chain_url_join_and_oversize_file(
     assert chain_big[0].file == str(oversize)
 
 
-# ---- M8：懒下载问询的会话并发隔离（2026-09-17 评审） ----
+# ---- 懒下载问询的会话并发隔离 ----
 
 
 class _FakeEvent:
@@ -260,7 +260,7 @@ def test_session_lock_is_per_session() -> None:
 
 
 async def test_lazy_download_same_session_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
-    """M8 回归：同一会话并发问询必须串行。
+    """同一会话并发问询必须串行。
 
     AstrBot 的 ``USER_SESSIONS`` 是单槽覆盖（``register_wait`` 直接赋值、
     ``_cleanup`` 无条件 ``pop``）：两个等待者并存时后者顶掉前者，先结束者的
@@ -312,14 +312,14 @@ async def test_lazy_download_different_sessions_run_concurrently(
     assert state["max_active"] == 2, "不同会话被不必要地串行化"
 
 
-# ---- M9：媒体文件不可读时的单媒体降级（2026-09-17 评审） ----
+# ---- 媒体文件不可读时的单媒体降级 ----
 
 
 async def test_missing_audio_file_degrades_to_text(tmp_path: Path) -> None:
-    """M9 回归：媒体文件缺失时降级为文本占位，不抛 OSError 中断整条发送链。
+    """媒体文件缺失时降级为文本占位，不抛 OSError 中断整条发送链。
 
     真实触发路径：``use_base64=true`` 下 ``_to_base64`` 的 ``read_bytes()``
-    抛 ``FileNotFoundError``（视频走 ``stat().st_size``）；此前该异常直穿到
+    抛 ``FileNotFoundError``（视频走 ``stat().st_size``）；该异常若直穿到
     main.py 的宽 ``except``，后续合并转发与失败计数全部丢失。
     """
     configure(plite_use_base64=True)
@@ -332,7 +332,7 @@ async def test_missing_audio_file_degrades_to_text(tmp_path: Path) -> None:
 
 
 async def test_missing_video_file_degrades_to_text(tmp_path: Path) -> None:
-    """M9：视频路径的 ``stat().st_size`` 缺失同样按单媒体降级。"""
+    """视频路径的 ``stat().st_size`` 缺失同样按单媒体降级。"""
     configure(plite_use_base64=False)
     missing = tmp_path / "gone.mp4"
 
@@ -345,7 +345,7 @@ async def test_missing_video_file_degrades_to_text(tmp_path: Path) -> None:
 async def test_audio_conversion_failure_falls_back_to_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """M9/工单 04：语音消息**构造**失败 → 文件消息兜底（此前是不可达分支）。
+    """语音消息**构造**失败 → 文件消息兜底（此分支必须可达）。
 
     文件存在但无法转为语音（如缺 ffmpeg）时文件消息仍可送达；这与「文件不可
     读」（降级文本）是两种不同失败，必须分开处置。
@@ -366,7 +366,7 @@ async def test_audio_conversion_failure_falls_back_to_file(
 
 
 async def test_missing_image_file_degrades_to_text(tmp_path: Path) -> None:
-    """M9 补全：非 base64 的 image 分支同样必须降级。
+    """非 base64 的 image 分支同样必须降级。
 
     ``Comp.Image.fromFileSystem`` 用 ``Path.resolve(strict=False)``，对缺失文件
     **不抛**，会产出指向不存在路径的 Image——到协议适配层发送时才失败，届时
@@ -383,7 +383,7 @@ async def test_missing_image_file_degrades_to_text(tmp_path: Path) -> None:
 
 
 async def test_missing_audio_file_degrades_to_text_without_base64(tmp_path: Path) -> None:
-    """M9 补全：非 base64 的 audio 分支（Record.fromFileSystem 同样不校验存在性）。"""
+    """非 base64 的 audio 分支同样必须降级（Record.fromFileSystem 不校验存在性）。"""
     configure(plite_use_base64=False)
     missing = tmp_path / "gone.mp3"
 

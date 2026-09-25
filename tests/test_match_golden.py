@@ -1,11 +1,11 @@
-"""行为轨：match() 离线黄金测试（工单 09 ④）。
+"""行为轨：match() 离线黄金测试。
 
-正负样本均经真实 vendor 正则逐一验证（2026-09 快照）；上游滚动后此处变红
-即平台正则行为漂移信号，人工评审后更新黄金表。
+正负样本均经当前 vendor 快照的正则逐一验证；上游滚动后此处变红即平台正则
+行为漂移信号，人工评审后更新黄金表。
 
-覆盖度（2026-09-17 评审 M12 补齐）：样本键集合 == ``parsers.load_all()`` 注册的
-全部可命中平台（当前 27 个），由文件末的元测试机械对齐——此前只覆盖 14/29，
-过半平台的正则漂移无信号。样本一律从各 parser 的 ``@handle(keyword, pattern,
+覆盖度：样本键集合 == ``parsers.load_all()`` 注册的全部可命中平台（当前
+27 个），由文件末的元测试机械对齐——覆盖不全时，未采样平台的正则漂移完全
+无信号。样本一律从各 parser 的 ``@handle(keyword, pattern,
 params)`` 反推并逐条经 ``Parser().match()`` 实测确认命中；params 型平台的必需
 query 在条目上方注明。
 """
@@ -65,7 +65,6 @@ GOLDEN_MATCHES: dict[str, tuple[str, ...]] = {
     ),
     "coolapk": ("https://www.coolapk.com/feed/12345678",),
     "linuxdo": ("https://linux.do/t/topic/123456",),
-    # --- 2026-09-17 评审 M12 补齐：此前只覆盖 14/29 平台 ---
     "kugou": (
         "https://t1.kugou.com/1abcDEF",
         "https://www.kugou.com/mixsong/abcdef.html",
@@ -208,11 +207,11 @@ def _schema_platform_options() -> set[str]:
 
 
 def test_golden_covers_every_matchable_platform() -> None:
-    """元测试（M12）：黄金样本键集合 == 实际可命中的平台集合。
+    """元测试：黄金样本键集合 == 实际可命中的平台集合。
 
     成本极低、收益极高：上游新增平台却未补样本时立即变红，平台覆盖随上游
     自动对齐。没有这条时「黄金样本守护平台正则漂移」只是一半真的——
-    2026-09-17 评审实测 14/29 平台有样本，其余 15 个平台的正则漂移完全无信号。
+    未采样平台的正则漂移完全无信号。
     """
     assert set(GOLDEN_MATCHES) == _matchable_platforms()
 

@@ -5,10 +5,10 @@ release.yml 的 cp 白名单与 zip 结构断言 required 清单必须覆盖 mai
 装载时 ModuleNotFoundError（CONTEXT.md 发布契约：桥接模块 + 生成工件 +
 vendor 按白名单注入发布 zip 并做结构断言）。
 
-2026-09-18 迁移后桥接模块位于 ``bridge/``，不再平铺于仓库根：闭包解析按
+桥接模块位于 ``bridge/``、不平铺于仓库根：闭包解析按
 **包内点分名**进行（``main`` → ``bridge.sender`` → …），比对前再换算成发布
-物内的相对路径（``bridge/sender.py``）。cp 侧现以整目录 ``bridge`` 入白名单，
-故目录级拷贝视为已覆盖；required 侧仍逐文件钉扎，是真正会拦住漂移的那一处。
+物内的相对路径（``bridge/sender.py``）。cp 侧以整目录 ``bridge`` 入白名单，
+目录级拷贝视为已覆盖；required 侧仍逐文件钉扎，是真正会拦住漂移的那一处。
 """
 
 from __future__ import annotations

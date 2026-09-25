@@ -79,17 +79,16 @@ _TEXT_ANCHORS: dict[str, tuple[str, str]] = {
     "lazy_download_prompt": ("contains", "秒内发送以下命令"),
     "video_zero_size": ("equals", "视频文件大小为 0"),
     # 下载失败计数整句（render.py send_content 尾段）：桥发送编排的计数
-    # 聚合语义与上游同构，整句直接收编（2026-09-13 候选扫描发现，
-    # 原「上游无对应整句」声明作废）
+    # 聚合语义与上游同构，整句直接收编
     "download_failed_count": ("contains", "项媒体下载失败"),
     # stats.extra 形状翻译表的标签（render.py _EXTRA_LABELS 消费）：上游在
     # 番剧/视频两条 stats 路径合法重复同值，用 equals_repeated 容忍重复。
     # 该规则同时断言「确实重复」（命中数 ≥ 2）：上游合并两条
-    # 路径后规则即失效，须降级为 equals（2026-09-17 评审 M10）
+    # 路径后规则即失效，须降级为 equals
     "extra_label_danmaku": ("equals_repeated", "弹幕"),
     "extra_label_coin": ("equals_repeated", "硬币"),
     # Theme API v1 数据层（render/context.py）的兜底与 alt 文案：桥镜像
-    # _display_size/_serialize_content 时逐字消费（2026-09-25 票07 适配）
+    # _display_size/_serialize_content 时逐字消费
     "unknown_size": ("equals", "未知大小"),
     "cover_alt": ("equals", "专辑封面"),
 }
@@ -223,9 +222,9 @@ def _select(found: list[tuple[str, str, int]], key: str, rule: tuple[str, str]) 
         # equals 的重复容忍变体：该文案在上游**多处**合法重复（如番剧/视频
         # 两条 stats 路径），故允许多于一个候选。
         #
-        # 2026-09-17 评审 M10：原实现在按值过滤后对值取集合判「不一致」，
-        # 集合恒为 {needle}，该分支是死代码——真正的语义分叉不会被检出。改为断言
-        # **重复本身**（命中数 ≥ 2），检查在下方共用区。
+        # 断言对象是**重复本身**（命中数 ≥ 2）：按值过滤后再判「值不一致」
+        # 的写法集合恒为 {needle}，是检不出真实语义分叉的死代码。检查在
+        # 下方共用区。
         matches = [c for c in found if c[0] == "const" and c[1] == needle]
     else:
         matches = [c for c in found if needle in c[1]]
@@ -335,7 +334,7 @@ def scan_candidates(sources: dict[str, str], known_values: set[str]) -> list[str
     """上游新增文案候选扫描（advisory：只提示，不阻塞管线）。
 
     收集桥消费面模块中含 CJK 的字符串常量/f-string 模板，剔除已被锚点
-    收编的值。上游迭代规律（2026-09-13 近 60 提交分析）显示用户可见文案
+    收编的值。上游迭代规律显示用户可见文案
     偶发新增于 render/matchers/exception/helper——候选清单把「人工重读
     上游 diff 找新文案」收敛为「看 sync 日志扩充锚点表」。
     """

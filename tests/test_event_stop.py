@@ -111,8 +111,8 @@ def _run_react(status: str) -> list[dict]:
 
 
 def test_react_cancel_clears_resolving_reaction() -> None:
-    """用户拒绝懒下载问询时必须撤销 resolving 表情（2026-09-14 评审）：
-    该分支此前直接 return，🔨 永久挂在消息上——既非成功也非失败，没有任何
+    """用户拒绝懒下载问询时必须撤销 resolving 表情：
+    该分支若直接 return，🔨 就永久挂在消息上——既非成功也非失败，没有任何
     后续状态会覆盖它。撤销用同一个 resolving 表情 + set=False。
     """
     calls = _run_react("cancel")
@@ -176,12 +176,12 @@ def _run_terminate(
 def test_terminate_is_not_idempotent_unsafe_across_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """第一次 terminate 失败后，第二次不得再关 runtime（2026-09-14 评审 #7）。
+    """第一次 terminate 失败后，第二次不得再关 runtime。
 
     这是标志存在的**真实**语义：shutdown_runtime 非幂等，二次 curl_multi_cleanup
     即崩。注意断言的是「跨调用的累计次数」而非单次返回值——单看一次调用时，
     置位在调用前还是调用后观察不到差别（调用后置位时标志照样已为 True），
-    只有连续两次 terminate 才能暴露旧实现在 aclose 失败路径上的重复关闭。
+    只有连续两次 terminate 才能暴露 aclose 失败路径上的重复关闭风险。
     """
     import asyncio
 
@@ -223,8 +223,9 @@ def test_terminate_aclose_failure_does_not_skip_runtime_shutdown(
 ) -> None:
     """aclose 抛 TypeError 不应吞掉 shutdown_runtime（两个清理阶段互不阻塞）。
 
-    原实现的单个 try 块让 aclose 的异常直接跳过 shutdown_runtime，令 runtime
-    泄漏（进程退出前 DOWNLOADER 线程池与 curl 句柄不释放）。
+    若把 aclose 与 shutdown_runtime 放进同一个 try 块，aclose 的异常会直接
+    跳过 shutdown_runtime，令 runtime 泄漏（进程退出前 DOWNLOADER 线程池与
+    curl 句柄不释放）。
     """
     n, flag = _run_terminate(monkeypatch, aclose_raises=True)
     assert n == 1, "aclose 异常后 shutdown_runtime 仍须执行"

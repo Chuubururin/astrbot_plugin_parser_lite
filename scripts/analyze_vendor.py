@@ -186,7 +186,7 @@ def validate_version(version: str) -> None:
 # autoescape=True（代码生成注入防线），它会把这四个字符改写为
 # HTML 实体（&→&amp; 等），使「数据层完全上游驱动」的逐字节直通
 # 承诺静默偏离；而第二层 --check 比的是「重新生成的结果」
-# 而非「上游原文」，无法发现（2026-09-17 评审 M15）。在第一层
+# 而非「上游原文」，无法发现。在第一层
 # 前置拒绝；第二层 build_metadata 另有汇点断言（纵深防御）。
 _YAML_SAFE_RE = re.compile(r"[^\r\n\"\\&<>']*\Z")
 

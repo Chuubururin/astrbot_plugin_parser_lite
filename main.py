@@ -58,7 +58,7 @@ _MAX_COMMENTS_HARD_CAP = 100
 # 分享文案常把链接与标点直接相连（"…（分享了视频）"、"链接。"、"(见)"），
 # 而排除集只列了独占性强的 CJK 标点，抽取结果可能带尾随字符。带脏字符的
 # URL 交给上游 match 会不匹配或把脏字符带进解析目标，用户侧表现为「发了
-# 链接没反应」（2026-09-14 双轴评审实测：尾随句点的链接完全解析失败）。
+# 链接没反应」——尾随句点会让链接完全解析失败。
 _URL_TRAILING_STRIP = ".,;:!?、，。；：！？\"'】》>"
 # 成对括号（含全角）：仅当 URL 内该符号未配对时才视为尾随标点——维基类
 # 路径 "/wiki/Foo_(bar)" 的右括号属路径本体，裁剪会破坏合法 URL；反过来
@@ -70,7 +70,7 @@ _URL_BRACKET_PAIRS = (("(", ")"), ("（", "）"), ("[", "]"), ("{", "}"))
 def _strip_url_trailing(url: str) -> str:
     """裁掉分享文案粘在链接尾部的标点（括号按配对判定，幂等）。
 
-    已知取舍（2026-09-17 评审 L9，**刻意保留**）：URL 本体无左括号却以右
+    已知取舍（**刻意保留**）：URL 本体无左括号却以右
     括号结尾时（如 ``http://x.com/a)``）会被裁成 ``http://x.com/a``。这与
     ``(见 https://b23.tv/AbCdEf)`` 这类「正文括号包住链接」的常见形态在
     URL 字符串层面**不可区分**（两者都是「无左括号 + 尾部右括号」），而后
@@ -122,9 +122,9 @@ def _urls_from_json(data: Any) -> list[str]:
     """抽取 JSON 卡片里的 URL：优先已知协议字段，其余字符串正则兜底。
 
     显式栈遍历（先序，与递归实现逐项同序），**无递归深度上限**：卡片嵌套
-    深度由远端消息决定，不可控。此前 `depth > 8` 的递归截断会静默丢弃第 9
-    层及更深的链接（QQ 卡片实测第 9 层返回 []），而直接放开上限又会把病态
-    深层输入变成 RecursionError（2026-09-17 评审 L8）。
+    深度由远端消息决定，不可控。深度上限会静默丢弃超限层的链接（QQ 卡片
+    实测第 9 层合法存在），而递归实现不设上限又会把病态深层输入变成
+    RecursionError——显式栈同时排除这两种失败模式。
 
     注意：与递归实现一致，字符串**仅在 dict 值位置**被抽取——list 里的裸
     字符串不是 URL 候选（上游卡片把链接放在具名协议字段里）。
@@ -258,9 +258,9 @@ class ParserLitePlugin(star.Star):
             await self._parser.aclose()
         except Exception as e:
             # 清理路径容错：curl_cffi aclose 非幂等（curl_multi_cleanup(None)），
-            # 任何残留的二次关闭在此降级告警。只捕 TypeError 与上方 docstring
-            # 承诺的「均不向宿主传播」不符 —— 非 TypeError 会穿透并跳过
-            # shutdown_runtime（scheduler / DOWNLOADER 泄漏），2026-09-18 复核
+            # 任何残留的二次关闭在此降级告警。宽捕 Exception（而非只捕
+            # TypeError）是为兑现「均不向宿主传播」：非 TypeError 一旦穿透
+            # 会跳过 shutdown_runtime（scheduler / DOWNLOADER 泄漏）
             self.logger.warning("parser_lite 运行时清理忽略关闭异常：%s", e)
         if not _runtime_shutdown_done:
             _runtime_shutdown_done = True
@@ -366,7 +366,7 @@ class ParserLitePlugin(star.Star):
                 try:
                     # 同步调用是有意为之：vendor match 是纯正则匹配（遍历
                     # 各 parser 的关键字 pattern，无 I/O），实测 ~39µs/次
-                    # （454 字符输入，2026-09-14），仅为一次网络请求的
+                    # （454 字符输入），仅为一次网络请求的
                     # 0.04%——投线程池的调度开销大于工作量本身。
                     self._parser.match(url)
                 except ParseException:

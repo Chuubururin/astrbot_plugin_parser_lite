@@ -230,8 +230,7 @@ def test_bridge_split_surface_matches_upstream_ast(extractor: ModuleType) -> Non
     触发误报。标点切分集本体由渲染参数注入层逐字承接（值级对照）。
 
     提取源锚定入库快照的 source_revision 而非本地 origin/main ref——后者可能
-    因镜像缓存竞态滞后于真实上游（2026-09-14 实证），上游侧的真相以快照记录
-    的 revision 为准。
+    因镜像缓存竞态滞后于真实上游，上游侧的真相以快照记录的 revision 为准。
     """
     clone = REPO_ROOT / ".sync-work" / "upstream"
     probe_run = subprocess.run(

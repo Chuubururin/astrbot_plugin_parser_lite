@@ -337,8 +337,7 @@ def _publish_resolve_entries(validated: ValidatedUrl) -> list[str]:
     """把本次校验结果并入模块级 RESOLVE 表，返回 libcurl 可用的条目列表。"""
     # libcurl 规定地址为 IPv6 字面量时必须写在 [] 内，否则冒号与
     # HOST:PORT:ADDRESS 的分隔符歧义，curl 直接报格式错误——IPv6 优先
-    # 环境下表现为 curl 后端整体下载失败（2026-09-14 评审发现，
-    # 原实现裸拼 "host:port:2606:4700::1111"）
+    # 环境下表现为 curl 后端整体下载失败
     fresh = {
         f"{validated.host}:{validated.port}": [
             (f"[{ip}]" if ":" in ip else ip) for ip in validated.ips[:4]
@@ -357,7 +356,7 @@ def _wrap_curl_session(session: Any) -> None:
 
     curl_options 只能挂**会话**：curl_cffi 0.16.3 的 AsyncSession.request
     签名里既没有 curl_options 也没有 **kwargs，把它当关键字实参传进去会抛
-    TypeError（curl 通道整体不可用，2026-09-16 评审实测确认）；真正被
+    TypeError（curl 通道整体不可用）；真正被
     _request_once 读取的是 self.curl_options。
 
     重定向在 Python 侧手动跟随（allow_redirects=False）：每跳先 validate_url

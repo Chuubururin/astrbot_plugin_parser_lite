@@ -102,8 +102,8 @@ def _clamp_forward_text_threshold(value: Any) -> int:
     判定，阈值 0/负数对任何非空文本恒为 True ⇒ **一定走转发**；而
     ``split_text_by_length_with_punct`` 与 ``_ForwardText.split`` 在
     ``max_len <= 0`` 时走快路径**整段不切**。两个判据在同一次调用里互相矛盾，
-    结果是超长文本（可达 30000 上限之上）被整体塞进单个转发节点（2026-09-20
-    审计缺陷 2）。钳到下界 1 后：要么按 1 字切分（退化但不越界），要么用户
+    结果是超长文本（可达 30000 上限之上）被整体塞进单个转发节点。钳到下界 1 后：
+    要么按 1 字切分（退化但不越界），要么用户
     走 `need_forward_contents=False` 这个语义正确的开关。
     """
     if isinstance(value, bool) or not isinstance(value, int):
@@ -135,8 +135,8 @@ class _SenderFilter(SessionFilter):
 
     键必须**仅由事件推导**（不能掺入本次解析的链接指纹）：AstrBot
     在注册侧与回复侧都会调用 ``filter(event)`` 来定位 ``USER_SESSIONS``，掺入
-    只有注册侧才知道的信息会让回复永远匹配不上。并发隔离改由下方的
-    会话锁实现（2026-09-17 评审 M8）。
+    只有注册侧才知道的信息会让回复永远匹配不上。并发隔离由下方的
+    会话锁承担。
     """
 
     def filter(self, event: AstrMessageEvent) -> str:
@@ -146,7 +146,7 @@ class _SenderFilter(SessionFilter):
 # 每个问询会话一把锁（WeakValueDictionary 自清理：无人持有时条目自动消失）。
 # AstrBot 的 USER_SESSIONS 是**单槽覆盖**（register_wait 直接赋值、_cleanup 无
 # 条件 pop），同一会话并发两次问询时后者会顶掉前者：用户回复只触发后者，
-# 前者静默等到超时——两条链接的媒体都可能不发送（2026-09-17 评审 M8）。
+# 前者静默等到超时——两条链接的媒体都可能不发送。
 # 串行化后同一会话同一时刻只有一个等待者，「一次回复确认一次问询」的语义得以保持。
 _lazy_session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
@@ -191,8 +191,8 @@ async def _ask_lazy_download(event: AstrMessageEvent) -> bool:
     timeout = lazy_download_timeout()
     if pconfig.lazy_download_tip:
         # 与上游 matchers/__init__.py:162-168 同构：提示受 plite_lazy_download_tip
-        # 门控（schema 默认 false）。此前无条件发送，用户在 WebUI 关掉开关后
-        # 行为完全不变——配置静默失效（2026-09-18 复核）
+        # 门控（schema 默认 false）——门控缺失会让用户在 WebUI 关掉开关后
+        # 行为完全不变（配置静默失效）
         commands = "、".join(f"『{cmd}』" for cmd in pconfig.download_command)
         await event.send(event.plain_result(texts.LAZY_DOWNLOAD_PROMPT.format(timeout, commands)))
     confirmed = False
@@ -236,7 +236,7 @@ async def mediafile_to_comp(mf: MediaFile) -> Comp.BaseMessageComponent:
     媒体文件在转换瞬间可能已被外部清理（vendor 缓存目录由每 2h 的清理任务
     接管）：``stat()`` / ``read_bytes()`` 的 ``OSError`` 一律按**单媒体降级**处理
     （文本占位），不向上传播——否则会中断整条发送链，后续合并转发与失败
-    计数全部丢失（2026-09-17 评审 M9）。
+    计数全部丢失。
     """
     try:
         return await _mediafile_to_comp_strict(mf)
@@ -280,8 +280,8 @@ async def _mediafile_to_comp_strict(mf: MediaFile) -> Comp.BaseMessageComponent:
             comp = Comp.Video.fromFileSystem(str(video_path))
         if mf.thumbnail is not None:
             # Video 组件有 cover 字段（适配器透传给 NapCat 作封面）。
-            # 零字节或不可读缩略图不设封面 —— 上游 helper.video_seg 的第三道闸
-            # （``if thumb_stat.st_size > 0``），桥此前漏了这道（2026-09-18 复核）。
+            # 零字节或不可读缩略图不设封面——对齐上游 helper.video_seg 的第三道闸
+            # （``if thumb_stat.st_size > 0``）。
             # 不可读按「无封面」处理而非抛错：封面是装饰，不该让整条视频发送失败
             thumb = _sync_path(mf.thumbnail)
             try:
@@ -346,7 +346,7 @@ async def _handle_immediate_media(
 
     path = await cont.get_path()
     # 语音构造失败的文件兜底已下沉到 _mediafile_to_comp_strict：UniHelper.record_seg
-    # 永不抛（helper.py 仅构造 MediaFile），在此处写 try/except 是死分支（2026-09-17 评审 M9）。
+    # 永不抛（helper.py 仅构造 MediaFile），在此处写 try/except 是死分支。
     seg = (
         await UniHelper.file_seg(path)
         if pconfig.need_upload_audio
@@ -644,7 +644,7 @@ async def send_result(
     ordered_segs = await _build_forward_segs(result)
     if ordered_segs:
         # 钳制后再判/再切：裸配置为 0/负数时 need_forward 恒 True 而切分函数
-        # 整段返回，超长文本会不经切分塞进单个转发节点（2026-09-20 审计缺陷 2）
+        # 整段返回，超长文本会不经切分塞进单个转发节点
         split_threshold = forward_text_threshold()
         processed_segs: list[str | MediaFile | _AltMedia] = []
         total_plain_len = 0
@@ -704,6 +704,6 @@ async def send_result(
                 yield [last]
 
     if failed_count > 0:
-        # 下载失败计数整句逐字来自上游 render send_content 尾段（texts.py，
-        # 2026-09-13 候选扫描收编，原「桥侧规则层残余」声明作废）
+        # 下载失败计数整句逐字来自上游 render send_content 尾段（经
+        # bridge/texts.py 锚点收编，随 roll 同步）
         yield [Comp.Plain(texts.DOWNLOAD_FAILED_COUNT.format(failed_count))]

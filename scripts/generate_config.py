@@ -74,7 +74,7 @@ STRING_OPTIONS: dict[str, list[str]] = {
 # `minimum`/`maximum` 不是宿主消费的键（写进 schema 是**假保护**），`slider`
 # 也只是额外渲染一个滑块，旁边仍有可自由输入的数字框（含负数）。既然面板
 # 无法拦住非法值，至少要让**描述**如实说明代码在运行期会钳制到什么区间，
-# 否则用户按描述以为自己受保护（2026-09-20 审计缺陷 1/2/7）。
+# 否则用户按描述以为自己受保护。
 #
 # 注意：这里只改描述，**真正的强制力在运行期钳制**：
 #   - bridge/render.py   max_comments_count()            → [0, MAX_COMMENTS_LIMIT]
@@ -372,7 +372,7 @@ def _assert_upstream_bytes_passthrough(rendered: str, upstream_meta: dict[str, s
     autoescape 会把 ``&``/``<``/``>``/``'`` 改写为 HTML 实体（``&amp;`` 等）
     ——上游元数据若含这些字符，生成物会与「数据层完全上游驱动」的
     承诺静默偏离，且 ``--check`` 自比对（比的是「重新生成的结果」而非
-    「上游原文」）不会发现（2026-09-17 评审 M15）。第一层
+    「上游原文」）不会发现。第一层
     ``analyze_vendor._YAML_SAFE_RE`` 已前置拒绝，此处是纵深防御：
     绕过第一层也在渲染汇点响亮失败。
     """

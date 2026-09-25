@@ -29,9 +29,9 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "maintenance_check.py"
 def test_filtered_run_reports_not_evaluated_instead_of_green() -> None:
     """过滤运行时 DoD 未求值必须非 0，而不是静默返回 0。
 
-    此前 ``_evaluate_dod`` 在未跑 pytest 时返回 SKIPPED，而 ``main()`` 只把
-    RED / UNKNOWN 当失败——退出码 0 会被 ``--json`` 的消费方读成「全绿」，
-    与模块 docstring 的「0 = 全绿」契约冲突（2026-09-18 修复）。
+    若 ``_evaluate_dod`` 在未跑 pytest 时返回 SKIPPED、而 ``main()`` 只把
+    RED / UNKNOWN 当失败，退出码 0 就会被 ``--json`` 的消费方读成「全绿」，
+    与模块 docstring 的「0 = 全绿」契约冲突——所以未求值必须显式非 0。
     """
     result = subprocess.run(
         [sys.executable, str(CHECKER_PATH), "--id", "MC-10"],
@@ -144,11 +144,11 @@ def test_scope_paths_exist(checklist: dict[str, Any]) -> None:
 def test_gh_runs_detectors_point_at_existing_workflows(checklist: dict[str, Any]) -> None:
     """detector.kind == gh_runs 指向的工作流必须真实存在于 ``.github/workflows/``。
 
-    这是 2026-09-20 审计缺陷 5 的防回归：MC-11 的 ``detector.workflow`` 指向的
-    ``sync-upstream`` 被删除后，``gh run list`` 永远查不到它，详情文案退化成
+    防的是这样一种静默腐烂：MC-11 的 ``detector.workflow`` 指向的工作流一旦
+    不复存在，``gh run list`` 永远查不到它，详情文案退化成
     「gh 不可用或查询失败」，把「工作流已删除」这个真实原因**掩盖成网络/权限
-    问题**，排障方向被带偏。原测试只校验 pytest 节点的存在性，gh_runs 这一类
-    完全没被守护——正是它让本次腐烂静默存活。
+    问题**，排障方向被带偏。pytest 类 detector 的节点存在性另有断言守护，
+    gh_runs 这一类没有本断言就会腐烂而全树无红——所以本断言专职守护它。
 
     退役条目（带 ``retired`` 字段）免检：它们的失效是**已记录**的，不应再红。
     """
@@ -172,7 +172,7 @@ def test_gh_runs_detectors_point_at_existing_workflows(checklist: dict[str, Any]
 def test_retired_entries_carry_reason_and_revive_path(checklist: dict[str, Any]) -> None:
     """退役条目必须写清「为什么退役」与「怎么复活」。
 
-    与被删除工作流的墓碑测试（tests/test_codegen.py）同源纪律：**删除要有墓碑，
+    与被删除工作流的墓碑测试（tests/test_supply_chain.py）同源纪律：**删除要有墓碑，
     墓碑要能指向原文**。没有 revive 字段，恢复上游同步时没人知道这条还要不要捡回来。
     """
     for entry in checklist["entries"]:
@@ -188,8 +188,8 @@ def test_retired_entries_carry_reason_and_revive_path(checklist: dict[str, Any])
 def test_doc_refs_point_at_existing_paths(checklist: dict[str, Any]) -> None:
     """``doc_ref`` 里的**仓库路径**必须存在（历史引用可写在 retired 里）。
 
-    原实现下 doc_ref 是自由文本，MC-10 指向被删除的
-    ``.github/workflows/sync-upstream.yml`` 也无人发现。这里只校验形如
+    doc_ref 若被当作自由文本而不校验，指向已删除的路径（如某个被移除的
+    工作流文件）也无人发现。这里只校验形如
     ``xxx/yyy.zzz`` 的路径前缀，纯文档标题（如 ``doc/CONTEXT.md「黄金样本」``）
     取「」之前的部分。
     """
@@ -331,7 +331,7 @@ def test_render_markdown_counts_definition_of_done_too(checker: ModuleType) -> N
     """计数必须含 DoD。
 
     ``payload["summary"]`` 只统计 entries；若条目全绿而 DoD 变红，摘要会印出
-    「green 2」却同时列出红行，自相矛盾（2026-09-18 实跑所见，已修）。
+    「green 2」却同时列出红行，自相矛盾。
     """
     payload = {
         "summary": {"green": 2, "red": 0, "skipped": 0, "event": 0, "unknown": 0},

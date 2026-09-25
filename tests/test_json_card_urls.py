@@ -1,9 +1,9 @@
 """JSON 卡片 URL 抽取（``main._urls_from_json``）的边界回归。
 
-2026-09-17 评审 L8：原实现是带 ``depth > 8`` 截断的递归——实测第 9 层容器内
-的 ``jump_url`` 返回 ``[]``（链接被静默丢弃，用户侧表现为「发了卡片没反应」）；
-而单纯抬高上限又会把病态深层输入变成 ``RecursionError``。现改为显式栈遍历
-（先序，与递归实现逐项同序，无深度上限）。
+任何嵌套深度的 ``jump_url`` 都必须被抽出——带深度上限的截断会让深层容器内
+的链接被静默丢弃（用户侧表现为「发了卡片没反应」）；而单纯抬高上限又会把
+病态深层输入变成 ``RecursionError``。因此实现为显式栈遍历
+（先序，与递归逐项同序，无深度上限）。
 
 main.py 依赖 astrbot.api（见 tests/requirements-test.txt，CI 装真实 AstrBot）。
 本模块只做纯函数行为断言，不触网络。
@@ -21,7 +21,7 @@ from astrbot_plugin_parser_lite import main as main_mod
 def _nested(depth: int, leaf: object) -> object:
     """把 leaf 包进 depth 层 ``{"child": ...}``；depth=0 时原样返回。
 
-    root 位于第 0 层，leaf 位于第 depth 层——旧实现在 leaf 层 depth>8 时截断。
+    root 位于第 0 层，leaf 位于第 depth 层。
     """
     node: object = leaf
     for _ in range(depth):
@@ -30,13 +30,13 @@ def _nested(depth: int, leaf: object) -> object:
 
 
 def test_deep_card_link_is_not_dropped() -> None:
-    """L8 回归：第 9 层容器内的链接此前被 ``depth > 8`` 静默丢弃。"""
+    """第 9 层容器内的链接不得被任何深度截断丢弃。"""
     data = _nested(9, {"jump_url": "https://b23.tv/AbCdEf"})
     assert main_mod._urls_from_json(data) == ["https://b23.tv/AbCdEf"]
 
 
 def test_pathological_depth_does_not_recurse() -> None:
-    """L8：病态深层嵌套不得触发 ``RecursionError``（显式栈无深度上限）。"""
+    """病态深层嵌套不得触发 ``RecursionError``（显式栈无深度上限）。"""
     data = _nested(3000, {"jump_url": "https://b23.tv/AbCdEf"})
     assert main_mod._urls_from_json(data) == ["https://b23.tv/AbCdEf"]
 

@@ -1,7 +1,7 @@
 """布局契约：目录分类 + 导入可落地（迁移类改动的机械守护）。
 
-2026-09-18 迁移（根目录只留入口文件，桥接模块移入 ``bridge/``）后共 24 处引用
-被静默漏改，全是 pytest/ruff/mypy 看不见的形态：
+根目录只留入口文件、桥接模块住 ``bridge/``——这类布局下引用极易被静默漏改，
+且全是 pytest/ruff/mypy 看不见的形态：
 
 - ``main.py`` 的 ``from .vendor_patches import ...`` 与
   ``bridge/vendor_patches.py`` 的 8 处 ``from .vendor.``——都在函数体或
@@ -29,7 +29,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_PACKAGE = PLUGIN_DIR.name
 BRIDGE_DIR = PLUGIN_DIR / "bridge"
 
-# 仓库根目录白名单（2026-09-18 约定：根目录只承载入口与元数据文件）。
+# 仓库根目录白名单（约定：根目录只承载入口与元数据文件）。
 # logo.png 是唯一的二进制例外：AstrBot 的 star_manager 把 logo 文件名硬编码
 # 为 ``logo.png`` 且只在插件根目录查找（找到后覆写 metadata.logo_path），
 # 位置不可改，故必须常驻根目录。

@@ -89,8 +89,7 @@ def _download_wrapper(url: str) -> Any:
     """桩下载包装器：await 后返回预置临时 PNG 的 anyio.Path（惰性，零网络）。
 
     必须是 anyio.Path——上游 main 默认 use_base64=True，img_seg 走
-    ``await file.read_bytes()``，pathlib.Path 会 TypeError（2026-09-14
-    对照器抓到的第一处运行栈差异，即由此修桩）。
+    ``await file.read_bytes()``，pathlib.Path 会 TypeError。
     """
     from anyio import Path as AnyioPath
 
