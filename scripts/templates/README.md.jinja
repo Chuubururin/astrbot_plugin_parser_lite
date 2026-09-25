@@ -26,10 +26,10 @@ B 站/抖音/小红书等平台的分享链接，并转发为内容卡片。
 
 ### 安全说明
 
-- **出站 SSRF 防护**：媒体下载出站经四层校验（scheme 白名单 → 端口规则 →
-  解析地址逐 IP 校验 → 「解析即连接」钉扎防 DNS rebinding）。唯一例外是
-  ffmpeg HLS 子进程出站：仅入口 URL 校验 + 启动后自毁监听，存在子进程无法
-  钉扎 IP 的 DNS TOCTOU 残窗（`bridge/vendor_patches.py` 头注如实声明）。
+- **出站 SSRF 防护**：媒体下载经四层校验（scheme 白名单 → 端口规则 →
+  逐 IP 校验 → 「解析即连接」钉扎防 DNS rebinding）；守卫挂载失败即**拒启**
+  （fail-closed）。唯一例外：ffmpeg HLS 子进程——仅入口 URL 校验 + 启动后
+  自毁监听，存在无法钉扎 IP 的 DNS TOCTOU 残窗（vendor_patches 头注声明）。
 - **TLS 校验姿态**：vendor 下载链继承上游 `verify=False`（CDN 证书链兼容的
   既定取舍）；风险敞口与缓解见「安全说明」一节。
 - **渲染数据外发**：渲染经宿主 `html_render` 远程 t2i 服务截图——卡面 HTML

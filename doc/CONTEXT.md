@@ -205,7 +205,10 @@ parse 快照前对 ParseResult 的规范化：剥离签名 URL、播放计数、
 `bridge/ssrf.py`（对齐 GitLab url_blocker）：① scheme 白名单 {http, https}；
 ② 端口规则（默认端口或 ≥1024）；③ getaddrinfo 全部结果逐 IP 校验
 （含 stdlib 判定不到的 CGNAT 100.64.0.0/10 等 EXTRA_FORBIDDEN_NETWORKS）；
-④ 解析即连接钉扎。全拒/放行清单见 `tests/test_ssrf.py`。
+④ 解析即连接钉扎。全拒/放行清单见 `tests/test_ssrf.py`。守卫安装失败
+按 fail-closed 处理：`main.py` 抛出让宿主把插件标为初始化失败，不静默
+无保护启动（vendor 补丁挂载失败不在此列——正确性缺陷降级为 error 日志，
+不对称是刻意的，语义由 `tests/test_plugin_init.py` 钉住）。
 
 **覆盖面边界（勿误读为全局防护）**
 本防护只挂载 **vendor 的两条出站面**：下载器 `DOWNLOADER.client` 的

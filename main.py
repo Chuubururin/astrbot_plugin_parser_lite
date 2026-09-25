@@ -220,11 +220,17 @@ class ParserLitePlugin(star.Star):
         try:
             install_ssrf_guard()
         except Exception as e:
-            # UrlBlockedError 是 BaseException，不会落到这里；普通安装失败
-            # 降级告警——插件仍可运行，但出站请求缺钉扎/校验
-            self.logger.error("SSRF 守卫安装失败，出站请求可能不受保护: %r", e)
+            # fail-closed：守卫未挂载时全部出站面（下载器 httpx/curl、28 个
+            # parser、辅助客户端）无钉扎无校验，静默启动与 ssrf.py「任何校验
+            # 失败一律拒绝」姿态矛盾——抛出让宿主把插件标为初始化失败
+            # （AstrBot 拒注册处理器）。安装可重入（全部成功才置 _ssrf_guarded），
+            # 修复后重载即恢复（tests/test_plugin_init.py 钉两条失败语义）。
+            self.logger.error("SSRF 守卫安装失败，拒绝启动（出站保护不可用）: %r", e)
+            raise
         # vendor 运行态缺陷的桥内注入补丁（kuwo 参数名 / buff、hupu 视频块
-        # decompose 截断迭代），幂等；详见 bridge/vendor_patches.py 模块文档
+        # decompose 截断迭代），幂等；详见 bridge/vendor_patches.py 模块文档。
+        # 与上方刻意不对称：补丁修复的是正确性缺陷（特定平台静默丢媒体），
+        # 挂载失败降级为 error 日志而非全域拒启。
         try:
             apply_vendor_patches()
         except Exception as e:

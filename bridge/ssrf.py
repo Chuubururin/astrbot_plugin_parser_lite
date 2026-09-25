@@ -524,7 +524,8 @@ def install_ssrf_guard() -> None:
     """替换 vendor 下载器客户端为带防护的实例（vendor 文件零修改，幂等）。
 
     依赖 vendor 内部结构 `DOWNLOADER.client._httpx/_curl`——契约测试守护该
-    缝合点；若上游改名，测试红、本函数抛 AttributeError，插件按降级路径运行。
+    缝合点；若上游改名，测试红、本函数抛 AttributeError——main.py 按
+    fail-closed 拒绝启动（不静默裸奔），修复后重载即重试。
 
     顺序：锁内先完成全部包装（下载器 + parser + 辅助客户端），**全部成功后**
     才置 ``_ssrf_guarded``——中途失败时下次 install 仍可重试，不产生
