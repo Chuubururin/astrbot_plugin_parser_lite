@@ -519,6 +519,31 @@
       "escalate_if": "总是（本条 class 即 escalate）",
       "note": "这是分支模型的核心不变量：main 必须恒为 dev 的祖先，否则 promote 无法快进，且「main 上每个提交都等于某个已过 CI 的 dev 提交」这一可比性失效。本仓库 remote 无分支保护（private 且无 GitHub Pro），此条目是唯一的机械信号",
       "doc_ref": "CONTRIBUTING.md 第 8.2/8.4 节"
+    },
+    {
+      "id": "MC-15",
+      "title": "注释/文档含回执标记（日期戳/评审号/票号/版本前后），违反当前态理想模型",
+      "family": "contract",
+      "class": "auto",
+      "severity": "advisory",
+      "detector": {
+        "kind": "cmd",
+        "cmd": "{py} scripts/audit_receipts.py",
+        "expect_exit": 0
+      },
+      "scope": [
+        "scripts/audit_receipts.py",
+        "doc/AGENTS.md"
+      ],
+      "diagnosis": "扫描器按 file:line [标记] 输出命中清单；只扫注释与 docstring，不碰字符串字面量与断言",
+      "action": [
+        "把命中注释/文档改写为纯当前态：删日期戳、评审/票号、「当年如何、后来改成如何」式过程叙述",
+        "保留注释里长期职责与原因（约束/不变量/边界/非目标），不改行为本身",
+        "过程事实确有价值则移入 doc/CHANGELOG.md 或 ADR；必须保留的事实日期在行尾加 audit-receipts:ignore"
+      ],
+      "escalate_if": "同一文件命中经多次改写仍不清、且判定为标记规则误伤合法当前态描述时，停手交人工判断是否调整标记集",
+      "note": "非阻断：维护清单整体是 advisory 通道，命中显红但不 fail CI。本条守 AGENTS「当前态、不记回执」理想模型，防纠正被当新增记录累积",
+      "doc_ref": "doc/AGENTS.md「理想模型：当前态，不记回执」"
     }
   ]
 }

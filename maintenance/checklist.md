@@ -12,8 +12,8 @@
 
 ## 1. 它解决什么问题
 
-本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`，2026-09-25
-以「PR 轨道」形态恢复在役）：cron 检测 → 供应链判据门 → `scripts/roll_local.py`
+本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`，「PR 轨道」
+形态）：cron 检测 → 供应链判据门 → `scripts/roll_local.py`
 完整 roll（两轨共用的唯一实现）→ PR（base=`dev`，标题 `[merge]` 前缀）→
 required checks 全绿后 squash-merge → promote → tag → release。绝大多数上游演进
 （新增配置字段、新增依赖、schema 选项变化）零人工；维护契约下人只在
@@ -265,5 +265,10 @@ MC-02 红往往是 MC-07/MC-08 的症状，直接修 MC-02 是治标。
   未 `git fetch` 时结论可能过时；且远端**没有**分支保护（private 且无 GitHub Pro），
   所以它是信号而非阻断——绕过 promote 直推 main 在服务端不会失败，只会在下一次
   跑清单时被 MC-14 抓到。
+- **回执扫描器（MC-15）只守高置信模式。** `scripts/audit_receipts.py` 扫注释与
+  docstring（不碰字符串字面量/断言，避免误伤行为），标记日期戳、评审/票号、
+  「上一版/原实现/曾是」等过程叙事；泛化词（试错、作废、撤销）不入常驻判据，<!-- audit-receipts:ignore -->
+  否则会误伤法则文本自身与被测试保护的「非目标如实声明」。它是 advisory：命中
+  显红但不 fail CI，价值在让纠正不被当新增记录累积（理想模型见 doc/AGENTS.md）。
 - **清单不代替判断。** `auto` 类条目可以无人值守执行；`escalate` 类**永远**要人。
   把 `escalate` 改成 `auto` 来让流水线变绿，是比 P-03 更隐蔽的作弊——不要做。
