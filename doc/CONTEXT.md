@@ -231,3 +231,48 @@ rebinding 失效。
 `bridge/render.py`：本地 Jinja 先产出自包含 HTML（媒体内联为 base64 data URI，
 24MB 总预算 / 8MB 单文件上限），再经 AstrBot 远程 t2i（`html_render`）
 出 PNG。
+
+## 结构边界（架构非目标）
+
+**状态收敛点**
+进程级状态只有两类真值源：vendor 自有全局（`pconfig` / `DOWNLOADER` /
+`_nickname`，上游所有、桥不接管）与桥模块级状态（钉扎表 / 会话锁 / 阈值 /
+守卫标志）。重载一致性的单点重建入口是 `rearm_runtime()`（重建 DOWNLOADER
+出站客户端）+ 守卫与补丁的幂等 install；生命周期风险由
+`tests/test_workchains_lifecycle.py` / `tests/test_plugin_init.py` /
+`tests/test_ssrf.py` 钉住。桥侧不自建 runtime 容器——容器与 vendor 单例
+并立即成为第二个状态源，重载时序只能靠两处同步，风险高于现状。
+
+**安全拒绝的穿透语义**
+`UrlBlockedError` 继承 `BaseException`：守卫挂载点全部位于 vendor 的 `@retry`
+与 `except Exception` 链内部（vendor 零修改），异常层级是唯一能表达「安全
+终态、不可恢复、不得重试」的载体；桥在解析/发送两个入口面显式 except 收口。
+返回值式（PolicyResult 类）封装不成立——封装层触不到 vendor 内的吞异常链，
+且拒绝一旦变成可被忽略的返回值，漏处理就从缺陷变成默认。
+
+**拒发降级边界**
+fail-closed 的形态是「守卫安装失败 → raise，宿主标插件初始化失败」。
+「仅禁用下载 / 仅禁用某平台」这类中间降级态不引入——那是让安全面以
+更细粒度 fail-open，与「任何校验失败一律拒绝」姿态矛盾。唯一的非拒发
+降级点是 vendor 补丁挂载失败（正确性缺陷、非安全面），不对称是刻意的，
+由 `tests/test_plugin_init.py` 钉住两种失败语义。
+
+**缓存键输入面**
+渲染缓存键 = 模板族版本（上游注入，随 roll 自动整体失效）+ 桥渲染行为
+版本（`RENDER_CACHE_REV`，渲染行为变更时手动 bump）+ 主题 + 真正进入
+卡面的配置态摘要 + URL。platform 由 URL 唯一决定，不重复列。内容指纹
+不引入——指纹需要先完成解析，而解析与渲染正是缓存要省掉的大头；上游
+内容随时间漂移的窗口由清理周期（2h）有界兜底。
+
+**发送编排同构**
+转发/切分/节点数判定以上游配置语义与 QQ 协议约束为准（单消息组件数
+上限使节点过多时必转，属协议事实而非缺陷）。桥不自建第二层发送模式
+模型——第二层分类在每次 roll 时都要求与上游语义重新对表，等价性
+由消息结构对照器逐消息钉住，分层模型只会把对照面变成两套。
+
+**消费面与观察面**
+桥的唯一消费者是 AstrBot 宿主（handler 协议 + `_conf_schema.json` 配置面）。
+系统级观察面 = 结构化日志（降级/拒绝/失败计数）+ 维护清单 advisory 通道。
+不建 metrics 埋点、不抽对外稳定 API 层——二者都没有消费者；测试直接引用
+桥内部函数是刻意的缝选择（钉真实风险面，见 `doc/AGENTS.md` 改动纪律 5），
+为「接口稳定」新增一层反而给每次 roll 制造待同步的契约。
