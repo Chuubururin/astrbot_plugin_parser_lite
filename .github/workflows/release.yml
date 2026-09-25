@@ -229,20 +229,32 @@ jobs:
           fi
           # 预发布标记由版本号机械派生（人不判内容）：PEP440 前奏形态
           # （a/b/rc/dev、alpha/beta/preview，含上游「1.3.7-pre-release.4」
-          # 变体）一律 prerelease——台账如实反映版本语义，正式版零误伤
-          # （2026-09-25 v1.3.8rc6 实测曾以稳定形态发布，本次补上判定）。
+          # 变体）一律 prerelease——台账如实反映版本语义，正式版零误伤。
           release_flags=()
           if printf '%s' "${TAG_NAME#v}" | grep -qE '([0-9]+(a|b|rc)[0-9]+$|\.dev[0-9]*$|(alpha|beta|preview|pre-release|rev))'; then
             release_flags+=(--prerelease)
             echo "::notice::PEP440 前奏版本 → 标记 prerelease"
           fi
-          gh release create "${TAG_NAME}" --verify-tag --generate-notes \
-            "${release_flags[@]}" \
-            "$ZIP" \
-            "${ZIP}.sha256" \
-            "${ZIP}.intoto.jsonl" \
-            "sbom.spdx.json" \
-            "sbom.spdx.json.intoto.jsonl"
+          # Release 正文的「上游 release 信息」承接：本次版本区间跨越的
+          # 上游 stable release notes 由 scripts/release_advisory.py 渲染
+          # （判据与 sync 管线同一实现）逐字写入，并给出上游 releases 入口
+          # 供核对正式 tag 与版本号。--generate-notes 不使用——它按本仓库
+          # commit diff 组装，同步型仓库里只是噪声。
+          notes_file="release-notes.md"
+          {
+            echo "AstrBot 桥接插件发布：版本承自上游 nonebot-plugin-parser-lite 的 standalone 轨构建快照（当前构建 ${TAG_NAME#v}，与 metadata.yaml 随 roll 再生锁步）。上游正式 release 轨（stable tag 及其版本号）见 https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases ；其 stable 发布节奏慢于本轨，前奏版本以 prerelease 如实标注。"
+            echo
+          } > "${notes_file}"
+          prev_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" -q '[.[]|select(.draft==false)|.tag_name]|map(select(. != env.TAG_NAME))|.[0] // ""' 2>/dev/null || true)"
+          if [ -n "${prev_tag}" ]; then
+            if advisory="$(python3 scripts/release_advisory.py --old "${prev_tag#v}" --new "${TAG_NAME#v}" 2>/dev/null)"; then
+              if [ -n "${advisory}" ]; then
+                printf '%s\n\n' "${advisory}" >> "${notes_file}"
+              fi
+            else
+              echo "::warning::上游 release 信息抓取失败，正文略去上游节（不影响发布）"
+            fi
+          fi
           {
             echo "### 发布物"
             echo ""
@@ -265,4 +277,11 @@ jobs:
             echo "注：public 仓库的 attestation 由 Sigstore public good instance 签发；"
             echo "private 仓库用的是 GitHub 自己的 Sigstore 实例。"
             echo "\`gh attestation trusted-root\` 一条命令同时取得两者。"
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          } >> "${notes_file}"
+          gh release create "${TAG_NAME}" --verify-tag --notes-file "${notes_file}" \
+            "${release_flags[@]}" \
+            "$ZIP" \
+            "${ZIP}.sha256" \
+            "${ZIP}.intoto.jsonl" \
+            "sbom.spdx.json" \
+            "sbom.spdx.json.intoto.jsonl"

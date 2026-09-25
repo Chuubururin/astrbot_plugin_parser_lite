@@ -171,7 +171,10 @@ promote 在 `main` 上撞 `git cherry` 判红。
 ——构建源不在 origin/main 祖先内时跳过 vendor roll（平面照常跟进、
 state 留痕 last_skipped_build），防止未合入代码进入生产。release
 通道（10 版全稳定、周~双周节奏）作为 breaking 项的阅读锚点：版本段
-变更时 roll 日志提示查阅对应 release notes。
+变更时 roll 日志提示查阅对应 release notes；Release 正文逐字承接跨越区间
+的上游 notes（同一 `release_advisory` 实现）并给出上游 releases 入口供核对
+正式 tag 与版本号——插件版本跟随 standalone 轨的滚动快照版本，与上游 stable
+tag 不同属双轨设计的常态，前奏形态由 PEP440 如实标注 prerelease。
 
 **消息结构对照（message-structure probe）**
 最终发送消息的两侧活体对照工装：`scripts/message_structure_probe.py`

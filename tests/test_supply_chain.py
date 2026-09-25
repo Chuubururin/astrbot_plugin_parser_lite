@@ -535,6 +535,25 @@ def test_release_attaches_provenance_bundle_to_the_release() -> None:
         assert asset in upload, f"release.yml 归档了 {asset} 但没传给 gh release create"
 
 
+def test_release_body_carries_upstream_release_notes() -> None:
+    """Release 正文必须是装配产物（上游 release 信息承接），不是 GitHub diff 组装。
+
+    依据：同步型仓库里 --generate-notes 只罗列本仓库 commit diff（无信息量）；
+    真正的变更叙事在上游 release notes，且 scripts/release_advisory.py 已有
+    同一判据的单实现（(old, new] 区间跨越的 stable、💥 节警示）。发布面钉三
+    点：正文经 --notes-file 注入、advisory 复用单实现、抓取失败降级不阻断
+    发布（略一节优于不发版）。
+    """
+    release = _code_lines((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
+    assert "--notes-file" in release, "Release 正文不是装配内容"
+    assert "--generate-notes" not in release, "--generate-notes 噪声通道必须封死"
+    assert "release_advisory.py" in release, "上游 release 信息未复用单实现"
+    assert "上游 release 信息抓取失败" in release, "advisory 失败须降级告警而非阻断发布"
+    assert "sokoko-org/nonebot-plugin-parser-lite/releases" in release, (
+        "正文缺上游正式 releases 入口（stable tag 与版本号的核对锚点）"
+    )
+
+
 def test_release_keeps_least_privilege_without_approval_gate() -> None:
     """发布 job 的权限必须是「顶层只读 + job 级按需」，且不带人工放行环境。
 
