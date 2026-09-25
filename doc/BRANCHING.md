@@ -230,6 +230,8 @@ promote job（仅当 decide 说跑）
   └─ 自动打发布 tag：metadata.yaml 版本 ≠ 已发布 tag
        → 在 main 尖端打 v* + 显式 dispatch release.yml
        （同名 tag 已存在则跳过——tag 是不可变锚，不顺指不重发）
+       Release 的 prerelease 标记由版本号机械派生（PEP440 前奏形态
+       rc/alpha/beta/dev/pre-release → 预发布；人不判内容，台账如实）
 ```
 
 ### 5.2 `main` 有独有提交时必须**响亮失败**

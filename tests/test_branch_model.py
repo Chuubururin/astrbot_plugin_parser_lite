@@ -517,6 +517,17 @@ def test_release_accepts_dispatch_and_verifies_main_lineage() -> None:
     assert "gh release view" in text, "缺双通道重复触发的存在性消化"
 
 
+def test_release_marks_pep440_prerelease_by_derivation() -> None:
+    """预发布标记由版本号机械派生：rc/alpha/beta/dev/pre-release 形态 →
+    ``--prerelease``，人不判内容、台账如实反映版本语义（v1.3.8rc6 曾以
+    稳定形态发布，2026-09-25 补判定）。"""
+    text = RELEASE_PATH.read_text(encoding="utf-8")
+    assert "--prerelease" in text, "缺 PEP440 前奏形态的 prerelease 派生"
+    assert "(alpha|beta|preview|pre-release|rev)" in text, (
+        "prerelease 判定应覆盖上游 pre-release 变体"
+    )
+
+
 def test_release_triggers_on_version_tags_only() -> None:
     """发布只在 ``v*`` tag 上触发。"""
     triggers = _workflow_triggers(_load(RELEASE_PATH))
