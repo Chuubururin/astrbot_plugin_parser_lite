@@ -383,11 +383,16 @@ def _local_http_server(redirect_to: str | None = None):
 
 @contextlib.contextmanager
 def _redirect_pair():
-    """两跳场景：第一跳 /redir 302 → 第二跳（另一端口）的 /secret。"""
+    """两跳场景：第一跳 /redir 302 → 第二跳（另一端口）的 /secret。
+
+    同时给出第二跳端口：H2 用例可对工作 URL 做**精确**断言（而非 startswith
+    近似——构造错误与放行缺陷必须能区分）。
+    """
     with _local_http_server() as (secret_server, secret_hits):
-        location = f"http://127.0.0.1:{secret_server.server_address[1]}/secret"
+        secret_port = secret_server.server_address[1]
+        location = f"http://127.0.0.1:{secret_port}/secret"
         with _local_http_server(redirect_to=location) as (hop_server, hop_hits):
-            yield hop_server.server_address[1], hop_hits, secret_hits
+            yield hop_server.server_address[1], secret_port, hop_hits, secret_hits
 
 
 def _stub_request_once(session, sink: dict) -> None:
@@ -559,8 +564,7 @@ def test_curl_guard_blocks_redirect_to_internal(monkeypatch, clean_resolve_table
     127.0.0.1——wrapper 强制 allow_redirects=False 并在 Python 侧逐跳
     validate_url，第二跳由真实校验拦下（与 httpx 同口径，不依赖 libcurl SAFE）。
     """
-    with _redirect_pair() as (port, hop_hits, secret_hits):
-        location = f"http://127.0.0.1:{secret_hits_port_from_location(port)}/secret"
+    with _redirect_pair() as (port, secret_port, hop_hits, secret_hits):
         calls = _pin_host_to_local(monkeypatch, "hop.example.com", port)
         session: Any = AsyncSession(impersonate="chrome146", verify=False, allow_redirects=True)
         ssrf._wrap_curl_session(session)
@@ -574,21 +578,14 @@ def test_curl_guard_blocks_redirect_to_internal(monkeypatch, clean_resolve_table
         finally:
             _run(session.close())
 
-        # _redirect_pair 的 Location 在 _local_http_server 内部生成，
-        # 这里从 hop 服务拿不到——改为断言第二跳已被调用且被真实校验拒。
-        _ = location
-
     assert hop_hits == ["/redir"], "第一跳必须真实抵达，否则本用例是假绿"
     assert secret_hits == [], "重定向到内网被放行（H2 回归）"
     assert isinstance(error, UrlBlockedError), f"未由 Python 校验拦截：{error!r}"
     assert len(calls) == 2, f"第二跳未走 validate_url：{calls!r}"
     assert calls[0] == f"http://hop.example.com:{port}/redir"
-    assert calls[1].startswith("http://127.0.0.1:"), f"第二跳应是内网字面量：{calls[1]!r}"
-
-
-def secret_hits_port_from_location(port: int) -> int:
-    """占位：_redirect_pair 的 secret 端口在 context 内才可知；测试改用 calls 断言。"""
-    return 0
+    assert calls[1] == f"http://127.0.0.1:{secret_port}/secret", (
+        "第二跳未对重定向目标字面量做校验（或 _redirect_pair 构造漂移）"
+    )
 
 
 def test_curl_guard_manual_redirect_follows_and_validates(monkeypatch, clean_resolve_table):
