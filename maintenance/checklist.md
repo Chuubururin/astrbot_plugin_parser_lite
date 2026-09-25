@@ -2,7 +2,7 @@
 
 | 角色 | 文件 |
 |---|---|
-| 机器可读事实源 | [`maintenance-checklist.json`](./maintenance-checklist.json) |
+| 机器可读事实源 | [`checklist.json`](./checklist.json) |
 | 检测器 / 编排入口 | [`scripts/maintenance_check.py`](../../scripts/maintenance_check.py) |
 | 活性守护 | [`tests/test_maintenance_checklist.py`](../tests/test_maintenance_checklist.py) |
 
@@ -12,13 +12,12 @@
 
 ## 1. 它解决什么问题
 
-> ⚠️ **本段描述的上游自动同步已移除**（见 doc/BRANCHING.md §10）。
-> 现在 roll 由本地 `scripts/roll_local.py` 驱动，不开 sync PR、无 automerge。
-> 维护清单中 MC-10 / MC-11 两条因此带 `retired` 标记（保留以备恢复）。
->
-（原文保留，供恢复时参考）本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`）：roll → 两层注入 →
-契约测试 → PR（base=`dev`）→ 分层 automerge。绝大多数上游演进（新增配置字段、新增依赖、
-schema 选项变化）零人工。
+本仓库的上游同步是全自动的（`.github/workflows/sync-upstream.yml`，2026-09-25
+以「PR 轨道」形态恢复在役）：cron 检测 → 供应链判据门 → `scripts/roll_local.py`
+完整 roll（两轨共用的唯一实现）→ PR（base=`dev`，标题 `[merge]` 前缀）→
+required checks 全绿后 squash-merge → promote → tag → release。绝大多数上游演进
+（新增配置字段、新增依赖、schema 选项变化）零人工；维护契约下人只在
+**管道红**时介入（见 doc/BRANCHING.md §1.1）。
 
 但有一类变化**故意**被设计成红的：新增可命中平台、平台正则漂移、vendor 公开 API 变化、
 破坏性变更跨越。这些关卡不是缺陷，而是刻意的 tripwire——它们要求有人读 diff 后做判断。
@@ -120,7 +119,7 @@ schema 选项变化）零人工。
 | `pytest` | `nodes[]` | 任一节点失败即红；节点不存在 = 清单过时（退出码 2） |
 | `cmd` | `cmd`, `expect_exit` | 退出码不符即红 |
 | `gh_runs` | `workflow`, `limit`, `red_when_failures_at_least` | 查 workflow 最近 N 次结论；可带 `fallback` |
-| `event` | `source`, `match` | 工作树中不可求值（如 sync PR 正文的 advisory），只提示上下文 |
+| `event` | `source`, `match` | 工作树中不可求值（如 sync 运行日志的 release advisory），只提示上下文 |
 
 ### 全局节
 
@@ -255,8 +254,9 @@ MC-02 红往往是 MC-07/MC-08 的症状，直接修 MC-02 是治标。
 
 ## 9. 已知边界（如实声明）
 
-- **`event` 类条目不可本地求值。** MC-10（破坏性变更跨越）只在 sync PR 正文里可判，
-  检测器只能提示上下文。agent 必须在 PR 场景下处理它，不能依赖本地跑绿。
+- **`event` 类条目不可本地求值。** MC-10（破坏性变更跨越）只在 sync 运行
+  日志（roll 步骤的 release advisory 输出）与 PR 上下文里可判，检测器只能
+  提示上下文。agent 必须在 sync 运行/PR 场景下处理它，不能依赖本地跑绿。
 - **`gh_runs` 依赖 gh 与鉴权。** 不可用时回退本地 `sync-state.json` 的 `consecutive_failures`；
   注意权威判据是 `gh run list`，state 字段只是降级近似。
 - **动态导入无法静态守护。** P-01 的机械防线是 `verify_vendor.py` 的逐字节比对，

@@ -397,7 +397,7 @@
       "severity": "advisory",
       "detector": {
         "kind": "event",
-        "source": "sync PR 正文的 advisory 段",
+        "source": "sync 运行日志 roll 步骤输出（release advisory 段）",
         "match": "💥"
       },
       "scope": [],
@@ -407,13 +407,8 @@
         "必要时用 {py} scripts/release_advisory.py --old <旧版本> --new <新版本> 重算"
       ],
       "escalate_if": "总是（本条 class 即 escalate）",
-      "note": "工作树中无法判定，必须在 PR 上下文评估；属 roll-time 事件型条目",
-            "retired": {
-        "at": "2026-09-20",
-        "why": "本条的触发源是 sync-upstream 工作流开的同步 PR 正文 advisory 段。该工作流已随「只留 4 个工作流」精简移除（见 doc/BRANCHING.md 退役说明），本条在恢复上游自动同步前没有触发渠道。",
-        "revive": "恢复上游自动同步时一并复活；原 doc_ref 为 .github/workflows/sync-upstream.yml「分层 automerge」"
-      },
-      "doc_ref": "doc/BRANCHING.md §10「明确不做的项」"
+      "note": "工作树中无法判定，必须在 sync 运行/PR 上下文评估；属 roll-time 事件型条目",
+      "doc_ref": "doc/BRANCHING.md「1.1 上游同步轨道」"
     },
     {
       "id": "MC-11",
@@ -437,7 +432,7 @@
       "action": [
         "定位根因：gh run view --log-failed 看最近一次失败的真实原因",
         "按根因对应的其他条目（如 MC-07）完成修复",
-        "解除熔断：gh workflow run sync-upstream -f force=true"
+        "修复后复跑：gh workflow run sync-upstream.yml --ref dev -f dry_run=false（cron 亦会自动重试）；被供应链判据拦下且确认为误伤时，人工以 -f confirm=<standalone_sha> 单次放行"
       ],
       "acceptance": [
         {
@@ -447,12 +442,7 @@
         }
       ],
       "escalate_if": "熔断原因为上游失联 >24h 或上游仓库不可达 → 人工介入并通知上游",
-      "note": "连续 3 天未处理会导致同步整体停摆，连无关的上游更新也一起卡住",
-      "retired": {
-        "at": "2026-09-20",
-        "why": "detector.workflow 指向的 sync-upstream 已移除，gh run list 永远查不到该工作流 → 详情文案会退化成「gh 不可用或查询失败」，把「工作流已删除」这个真实原因掩盖成网络/权限问题。fallback 仍读 .github/sync-state.json，故条目不会彻底坏，但诊断信息误导。",
-        "revive": "恢复上游自动同步时一并复活；届时 detector.workflow 与 sync-state.json 需同时校准"
-      }
+      "note": "连续 3 天未处理会导致同步整体停摆，连无关的上游更新也一起卡住"
     },
     {
       "id": "MC-12",
