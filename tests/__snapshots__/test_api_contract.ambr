@@ -12,6 +12,11 @@
         'default': 'False',
         'required': False,
       }),
+      'plite_bili_audio_quality': dict({
+        'annotation': "<enum 'BiliAudioQuality'>",
+        'default': '<BiliAudioQuality._192K: 30280>',
+        'required': False,
+      }),
       'plite_bili_cdn_domain': dict({
         'annotation': 'str | None',
         'default': 'None',
