@@ -10,6 +10,10 @@ name: sync-upstream
 #        → release.yml 构建发布物。
 # 人工闸只有两处：PR 的 CI 红了不合并（管道停在 dev 之前）；供应链判据命中
 # 或 roll 失败时开 Issue。confirm=<新上游 sha> 手动触发是判据的人工放行通道。
+# 失败 Issue 携带红类型与诊断包（roll 日志尾段/判据报告/上游构建 diffstat/
+# 本地复现命令），第 3 次连续失败起追加升级提示；类别语义见 doc/CONTEXT.md
+# 的「红类型」「诊断包」词条，step summary 呈现结果分类（no_change /
+# dry_run、detected / rolled / skipped_preview / red）。
 #
 # 为什么必须走 PR 轨道而不是直推 dev：dev 开着 required_pull_request_reviews
 # （0 批准），GITHUB_TOKEN 的 Actions bot 无直推权；且 GITHUB_TOKEN 的 push
@@ -74,11 +78,17 @@ jobs:
           CONFIRM: ${{ github.event.inputs.confirm }}
         run: |
           set -euo pipefail
+          gate_red() {
+            echo "kind=$1" >> "$GITHUB_OUTPUT"
+            echo "roll result: red —— 判据步失败（$1）" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
           NEW="$(git ls-remote "$UPSTREAM_URL" refs/heads/standalone | cut -f1)"
-          [ -n "$NEW" ] || { echo "::error::ls-remote standalone 为空"; exit 1; }
+          [ -n "$NEW" ] || { echo "::error::ls-remote standalone 为空"; gate_red gate_network; }
           OLD="$(python -c "import json; print(json.load(open('.github/sync-state.json'))['standalone_sha'])")"
           if [ "$NEW" = "$OLD" ]; then
             echo "上游无变化：standalone 停在 ${NEW:0:12}"
+            echo "roll result: no_change —— 上游无变化，幂等退出" >> "$GITHUB_STEP_SUMMARY"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -97,12 +107,20 @@ jobs:
             fi
             echo "fetch 失败（第 $attempt 次），重试…"; sleep $((attempt * 10))
           done
-          $ok || { echo "::error::上游 sha 对象取不到（旧构建可能已被 GC），无法判定"; exit 1; }
+          $ok || { echo "::error::上游 sha 对象取不到（旧构建可能已被 GC），无法判定"; gate_red gate_network; }
+
+          # 诊断包面：上游构建 diffstat——失败 Issue 随附，人类可读的「上游改了什么」
+          git -C .sync-work/upstream diff --stat "$OLD" "$NEW" | head -50 > /tmp/upstream-diffstat.txt || true
 
           if python scripts/upstream_sync.py classify \
                --repo .sync-work/upstream --old "$OLD" --new "$NEW" \
                --json /tmp/sync-report.json; then
             sed 's/^/  /' /tmp/sync-report.json
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              echo "roll result: dry_run —— 检测到 ${OLD:0:12} → ${NEW:0:12}，按输入只检测与判定" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "roll result: detected —— 判据通过，进入 roll 序列" >> "$GITHUB_STEP_SUMMARY"
+            fi
             exit 0
           fi
           # classify 约定：1=判据命中；其余（2 用法/目标失败）也按红处理——
@@ -114,19 +132,31 @@ jobs:
           fi
           echo "::error::供应链判据命中（异常即红），详见通知 Issue"
           cat /tmp/sync-report.json >&2 || true
-          exit 1
+          gate_red gate_criteria
 
       - name: 执行 roll 序列（vendor 整树重建 + 注入 + 校验 + 契约测试）
         if: steps.gate.outputs.changed == 'true' && github.event.inputs.dry_run != 'true'
         run: |
           set -euo pipefail
-          python3 scripts/roll_local.py
+          rc=0
+          python3 scripts/roll_local.py 2>&1 | tee /tmp/roll.log || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            # 红类型由 roll_local 的标记行单点承载（工作流不复述类别表）；
+            # 未带标记的未预料异常按 unknown 兜底（fail-closed 分类）
+            KIND="$(grep -oE 'roll-fail-kind=[a-z_]+' /tmp/roll.log | tail -n 1 | cut -d= -f2 || true)"
+            KIND="${KIND:-unknown}"
+            echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+            echo "roll result: red —— kind=$KIND（退出码 $rc）" >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           # 后续步骤的门闩：roll 是否真的产生了提交（PR 预览跳过 / 竞态无变化
           # 两条路径都零提交）
           if git log -1 --format=%s | grep -q '^sync: roll'; then
             echo "committed=true" >> "$GITHUB_OUTPUT"
+            echo "roll result: rolled —— sync 分支已提交，进入 PR 步骤" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::notice::roll 未产生提交（PR 预览构建跳过 / 无变化），流程停于本地"
+            echo "roll result: skipped_preview —— 构建源不在远端 main 祖先内，state 留痕 last_skipped_build" >> "$GITHUB_STEP_SUMMARY"
           fi
         id: roll
 
@@ -161,18 +191,93 @@ jobs:
           gh pr merge --squash --auto "$BRANCH" || \
             echo "::warning::auto-merge 挂载失败，需人工检查 PR 状态"
 
-      - name: 失败通知（去重开 Issue）
+      - name: 失败通知（去重开 Issue + 诊断包）
         if: failure() && github.event.inputs.dry_run != 'true'
         run: |
           set -euo pipefail
+          KIND="${{ steps.roll.outputs.kind || steps.gate.outputs.kind || 'unknown' }}"
           # gh 不会随 issue create 自动建 label——先幂等确保存在，
           # 否则失败通知自己先红。
           gh label create "$SYNC_LABEL" --color "0E8A16" \
             --description "上游同步管道失败（异常即红）" >/dev/null 2>&1 || true
+
+          # 诊断包：类别提示 + roll 日志尾段 + 判据报告 + 上游 diffstat + 本地复现；
+          # 新 Issue 与重复失败评论共用同一主体
+          {
+            echo "## 上游同步失败诊断包"
+            echo ""
+            echo "- 失败类别：\`$KIND\`（类别语义见 doc/CONTEXT.md「红类型」）"
+            echo "- 失败运行：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo ""
+            case "$KIND" in
+              gate_criteria)
+                echo "供应链判据命中（异常即红）。人工放行通道：手动运行 sync-upstream 并填 confirm=<本次命中的新上游 sha>。" ;;
+              contract_red)
+                echo "契约测试红：vendor 公开 API/黄金样本/生成物契约出现变更——快照 diff 人工评审后再生，禁止「失败即重建」；桥适配缺失则修桥。" ;;
+              injection_anchor)
+                echo "注入锚点零命中/歧义：按 scripts/extract_* 的锚点规则表核对上游对应模块改动。" ;;
+              vendor_verify)
+                echo "vendor 三层校验失败：本地复现查看 scripts/verify_vendor.py 输出定位。" ;;
+              network|gate_network)
+                echo "上游网络抖动：判据步已重试 3 次。可等待下次 cron 或手动重跑工作流。" ;;
+              upstream_structure)
+                echo "上游树/构建形态异常：本地复现定位（sha/提交主题形态、归档成员、pyproject 解析）。" ;;
+              git_state)
+                echo "state/提交失败：检查工作树与 .github/sync-state.json 状态。" ;;
+              *)
+                echo "未归类失败：查看运行日志定位。" ;;
+            esac
+            echo ""
+            if [ -f /tmp/roll.log ]; then
+              echo "### roll 日志尾段"
+              echo ""
+              echo '```text'
+              tail -n 40 /tmp/roll.log
+              echo '```'
+              echo ""
+            fi
+            if [ -f /tmp/sync-report.json ]; then
+              echo "### 供应链判据报告"
+              echo ""
+              echo '```json'
+              cat /tmp/sync-report.json
+              echo '```'
+              echo ""
+            fi
+            if [ -f /tmp/upstream-diffstat.txt ]; then
+              echo "### 上游构建 diff（旧 → 新 standalone，截断 50 行）"
+              echo ""
+              echo '```text'
+              cat /tmp/upstream-diffstat.txt
+              echo '```'
+              echo ""
+            fi
+            echo "### 本地复现"
+            echo ""
+            echo '```bash'
+            echo "python3 scripts/roll_local.py   # 与 CI 同一实现；--check 只检测不执行"
+            echo "```"
+          } > /tmp/failure-diagnostics.md
+
           if EXISTING="$(gh issue list --state open --label "$SYNC_LABEL" --json number --jq '.[0].number // empty')" && [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --body "再次失败：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            ATTEMPT=$(( $(gh issue view "$EXISTING" --json comments --jq '.comments | length') + 1 ))
+            {
+              echo "**第 ${ATTEMPT} 次失败**"
+              echo ""
+              if [ "$ATTEMPT" -ge 3 ]; then
+                echo "**已连续失败 ${ATTEMPT} 次，达到维护清单的熔断阈值（maintenance/checklist.json：red_when_failures_at_least=3，读 .github/sync-state.json 的 consecutive_failures——该计数在本地连续尝试时累积，CI 侧由本 Issue 的失败次数承载）。**"
+                echo ""
+                echo "处置路径："
+                echo "1. 本地复现下方命令，按失败类别修复；contract_red 的快照 diff 人工评审后再生，禁止失败即重建。"
+                echo "2. 若判定为上游构建缺陷：出口是向上游报障——管道没有跳过机制是刻意的（sync-state 是「已成功同步」的凭据，引入跳过会让失败构建滞留或永久卡死）。"
+                echo "3. 供应链判据命中的放行：手动运行 sync-upstream 并填 confirm=<本次新 sha>。"
+                echo ""
+              fi
+              cat /tmp/failure-diagnostics.md
+            } > /tmp/issue-comment.md
+            gh issue comment "$EXISTING" --body-file /tmp/issue-comment.md
           else
             gh issue create --label "$SYNC_LABEL" \
               --title "上游同步管道失败（${GITHUB_WORKFLOW}）" \
-              --body "失败运行：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}；前因详见该运行日志，管道语义见 doc/BRANCHING.md 的同步轨道一节。"
+              --body-file /tmp/failure-diagnostics.md
           fi

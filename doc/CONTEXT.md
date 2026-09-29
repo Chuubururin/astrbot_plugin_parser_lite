@@ -57,6 +57,25 @@ vendor 快照的升级 PR。内容域 = `roll_local.ROLL_ADD_PATHS`（vendor +
 （vendor 零修改铁律的延伸）。安全闸全部机器化：供应链判据 →
 tag 必在 main 历史线 → 确定性测试门禁；不存在人工放行环节。
 
+**红类型（failure kind）**
+同步管道失败出口的类别标注。roll 序列的全部失败出口经 `scripts/roll_local.py`
+的 `_fail` 收口：先向 stderr 输出结构化标记行 `roll-fail-kind=<kind>`
+（network / upstream_structure / vendor_verify / injection_anchor /
+contract_red / git_state），再以原消息作为 SystemExit 载荷响亮退出（退出码
+恒 1，`--check` 的「有更新」信号不受影响）。sync-upstream 工作流从 roll 日志
+提取标记行归类失败 Issue；判据步自身的失败类别为 gate_network /
+gate_criteria；未预料的异常不带标记，按 unknown 兜底（fail-closed 分类）。
+类别只描述失败位置，不改变失败语义——所有类别同样红。词表单点在
+`scripts/roll_local.py`，工作流不复述；钉扎见 `tests/test_roll_local.py`。
+
+**诊断包（failure diagnostics）**
+失败 Issue 正文随附的定位材料：失败类别与处置提示、roll 日志尾段、供应链
+判据报告、上游构建 diffstat、本地复现命令。目标：管道红的处置从「进运行页
+翻日志」收敛为「读 Issue」。同一 open Issue 的重复失败以「第 N 次失败」评论
+延续（CI 侧连续失败次数由评论链承载），第 3 次起追加升级提示：熔断阈值口径
+（`maintenance/checklist.json` 的 red_when_failures_at_least=3）、上游报障
+出口、confirm 放行通道。
+
 **两层注入（two-layer injection）**
 发布物上游一致性的两层自动化，roll 序列内单命令完成（工作流与本地同轨）。
 第一层注入=从上游自动生成代码注入模板：sync 轨道（roll 序列，单实现

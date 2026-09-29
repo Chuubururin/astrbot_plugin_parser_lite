@@ -27,8 +27,17 @@ standalone 分支由其 CI 随 main 每次 push 自动发布，本脚本把 vend
 
 用法::
 
-     python3 scripts/roll_local.py --check    # 只检测；有更新退出码 1，无更新 0
-     python3 scripts/roll_local.py            # 检测到变化即执行完整 roll
+     python scripts/roll_local.py --check    # 只检测；有更新退出码 1，无更新 0
+     python scripts/roll_local.py            # 检测到变化即执行完整 roll
+
+失败口径：全部失败出口经 ``_fail`` 收口——先向 stderr 输出结构化标记行
+``roll-fail-kind=<kind>``（network / upstream_structure / vendor_verify /
+injection_anchor / contract_red / git_state），再以原消息作为 SystemExit 载荷
+响亮退出（退出码恒 1，与 ``--check`` 的「有更新」信号共用；类别差异只由标记行
+承载，避免退出码表在脚本与工作流两处各写一份而漂移）。sync-upstream 工作流
+从 roll 日志提取标记行归类失败 Issue；未预料的异常不带标记，由工作流按
+unknown 兜底归类。子进程解释器统一取 ``sys.executable``——与驱动本脚本的
+解释器同轨，不依赖平台别名（python3/python）在 PATH 中存在。
 """
 
 from __future__ import annotations
@@ -47,6 +56,7 @@ import tempfile
 import time
 import tomllib
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = REPO_ROOT / ".github" / "sync-state.json"
@@ -87,6 +97,28 @@ from pipeline_common import (  # noqa: E402
 
 _SHA_RE = re.compile(r"[0-9a-f]{7,40}\Z")
 
+# 失败出口的类别词表（红类型）：标记行随 stderr 进 roll 日志，由 sync-upstream
+# 工作流提取归类失败 Issue；类别只描述失败位置，不改变「异常即红」语义。
+_FAILURE_KINDS = frozenset(
+    {
+        "network",
+        "upstream_structure",
+        "vendor_verify",
+        "injection_anchor",
+        "contract_red",
+        "git_state",
+    }
+)
+
+
+def _fail(kind: str, message: str) -> NoReturn:
+    """按红类型响亮失败：stderr 先落 ``roll-fail-kind=`` 标记行，消息经
+    SystemExit 载荷继续直达调用方。"""
+    if kind not in _FAILURE_KINDS:
+        raise AssertionError(f"未登记的失败类别：{kind!r}")
+    print(f"roll-fail-kind={kind}", file=sys.stderr)
+    raise SystemExit(message)
+
 
 def _git(args: list[str]) -> tuple[int, str]:
     """git 子命令（在 .sync-work/upstream 内执行）；返回 (退出码, stderr)。"""
@@ -105,7 +137,7 @@ def _git_bytes(args: list[str]) -> tuple[int, bytes]:
 def _git_or_die(args: list[str]) -> str:
     code, out = _git(args)
     if code != 0:
-        raise SystemExit(f"git {args[0]} 失败：{out}")
+        _fail("network", f"git {args[0]} 失败：{out}")
     return out
 
 
@@ -118,7 +150,7 @@ def _fetch_standalone(attempts: int = 3) -> None:
             return
         last = err
         time.sleep(1)
-    raise SystemExit(f"fetch origin standalone 连续 {attempts} 次失败：{last}")
+    _fail("network", f"fetch origin standalone 连续 {attempts} 次失败：{last}")
 
 
 def _fetch_main(attempts: int = 3) -> None:
@@ -130,7 +162,7 @@ def _fetch_main(attempts: int = 3) -> None:
             return
         last = err
         time.sleep(1)
-    raise SystemExit(f"fetch origin main 连续 {attempts} 次失败：{last}")
+    _fail("network", f"fetch origin main 连续 {attempts} 次失败：{last}")
 
 
 def _ensure_clone() -> None:
@@ -143,7 +175,7 @@ def _ensure_clone() -> None:
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(f"上游克隆失败：{result.stderr.strip()}")
+        _fail("network", f"上游克隆失败：{result.stderr.strip()}")
 
 
 def _detect() -> tuple[str, str, str]:
@@ -151,13 +183,16 @@ def _detect() -> tuple[str, str, str]:
     _fetch_standalone()
     new_standalone = _git_or_die(["rev-parse", "FETCH_HEAD"]).strip()
     if not _SHA_RE.fullmatch(new_standalone):
-        raise SystemExit(f"standalone sha 形态异常：{new_standalone!r}")
+        _fail("upstream_structure", f"standalone sha 形态异常：{new_standalone!r}")
     subject = _git_or_die(["log", "-1", "--format=%s", "FETCH_HEAD"]).strip()
     # 上游自动发布提交形如 "auto: publish standalone for <main_sha>"。解析规则
     # 与 sync-upstream 工作流共用 scripts/pipeline_common.py 的同一实现：双轨
     # 各写一份正则曾在细节上漂移（M16）；解析失败响亮退出——兜底值会被祖先
     # 校验门误判为 PR 预览构建，未合入代码反而滞留 vendor。
-    new_main = parse_build_source_sha(subject)
+    try:
+        new_main = parse_build_source_sha(subject)
+    except SystemExit as exc:
+        _fail("upstream_structure", str(exc))
     state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     return new_standalone, new_main, state["standalone_sha"]
 
@@ -180,16 +215,16 @@ def _extract_archive_blob(blob: bytes, src: Path) -> None:
         for member in tar.getmembers():
             name = PurePosixPath(member.name)
             if name.is_absolute():
-                raise SystemExit(f"归档成员名为绝对路径，拒绝解包：{member.name!r}")
+                _fail("upstream_structure", f"归档成员名为绝对路径，拒绝解包：{member.name!r}")
             if ".." in name.parts:
-                raise SystemExit(f"归档成员名含上跳分量，拒绝解包：{member.name!r}")
+                _fail("upstream_structure", f"归档成员名含上跳分量，拒绝解包：{member.name!r}")
             if member.issym() or member.islnk():
-                raise SystemExit(f"归档成员为符号/硬链接，拒绝解包：{member.name!r}")
+                _fail("upstream_structure", f"归档成员为符号/硬链接，拒绝解包：{member.name!r}")
             if not (member.isdir() or member.isfile()):
-                raise SystemExit(f"归档成员为非常规类型，拒绝解包：{member.name!r}")
+                _fail("upstream_structure", f"归档成员为非常规类型，拒绝解包：{member.name!r}")
             dest = (src / member.name).resolve()
             if not dest.is_relative_to(src_real):
-                raise SystemExit(f"归档成员路径越界，拒绝解包：{member.name!r}")
+                _fail("upstream_structure", f"归档成员路径越界，拒绝解包：{member.name!r}")
             plan.append((member, dest))
         for member, dest in plan:
             if member.isdir():
@@ -198,7 +233,8 @@ def _extract_archive_blob(blob: bytes, src: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             src_file = tar.extractfile(member)
             if src_file is None:
-                raise SystemExit(
+                _fail(
+                    "upstream_structure",
                     f"归档文件成员无法读取内容（非常规归档），拒绝解包：{member.name!r}",
                 )
             dest.write_bytes(src_file.read())
@@ -222,13 +258,13 @@ def _rebuild_vendor(standalone_sha: str) -> None:
     # 必然误报不一致）；checkout 到显式 sha 为分离头，不动任何本地分支
     code, err = _git(["checkout", standalone_sha])
     if code != 0:
-        raise SystemExit(f"standalone 检出失败：{err}")
+        _fail("network", f"standalone 检出失败：{err}")
     with tempfile.TemporaryDirectory(prefix="roll-standalone-") as tmp:
         src = Path(tmp) / "sa"
         src.mkdir()
         code, blob = _git_bytes(["archive", standalone_sha])
         if code != 0:
-            raise SystemExit("standalone archive 失败")
+            _fail("network", "standalone archive 失败")
         _extract_archive_blob(blob, src)
         shutil.copytree(src / VENDOR_PKG_REL, VENDOR_PKG, dirs_exist_ok=True)
         for name in PLITES:
@@ -273,7 +309,7 @@ def _release_advisory(old_version: str, new_version: str) -> None:
         return
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             "scripts/release_advisory.py",
             "--old",
             old_version,
@@ -295,7 +331,7 @@ def _release_advisory(old_version: str, new_version: str) -> None:
 def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     for value in (new_standalone, new_main):
         if not _SHA_RE.fullmatch(value):
-            raise SystemExit(f"引用 sha 形态异常：{value!r}")
+            _fail("upstream_structure", f"引用 sha 形态异常：{value!r}")
     old_short, new_short = old_standalone[:12], new_standalone[:12]
 
     _fetch_standalone()
@@ -325,18 +361,18 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
         # 工作区回退到当前 vendor 基线，保证 verify_vendor 的比对语义成立
         code, err = _git(["checkout", old_standalone])
         if code != 0:
-            raise SystemExit(f"基线检出失败（本地缺 {old_short} 对象）：{err}")
+            _fail("network", f"基线检出失败（本地缺 {old_short} 对象）：{err}")
         result = subprocess.run(
-            ["python3", "scripts/run_injection.py"], capture_output=True, text=True
+            [sys.executable, "scripts/run_injection.py"], capture_output=True, text=True
         )
         if result.returncode != 0:
-            raise SystemExit(f"两层注入失败：{result.stderr.strip()}")
+            _fail("injection_anchor", f"两层注入失败：{result.stderr.strip()}")
         print(result.stdout.strip())
         result = subprocess.run(
-            ["python3", "scripts/verify_vendor.py"], capture_output=True, text=True
+            [sys.executable, "scripts/verify_vendor.py"], capture_output=True, text=True
         )
         if result.returncode != 0:
-            raise SystemExit(f"vendor 三层校验失败：{result.stderr.strip()}")
+            _fail("vendor_verify", f"vendor 三层校验失败：{result.stderr.strip()}")
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         state["last_skipped_build"] = {
             "sha": new_standalone,
@@ -360,20 +396,24 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     _rebuild_vendor(new_standalone)
 
     result = subprocess.run(
-        ["python3", "scripts/derive_requirements.py"], capture_output=True, text=True
+        [sys.executable, "scripts/derive_requirements.py"], capture_output=True, text=True
     )
     if result.returncode != 0:
-        raise SystemExit(f"派生 requirements 失败：{result.stderr.strip()}")
+        _fail("upstream_structure", f"派生 requirements 失败：{result.stderr.strip()}")
     print(result.stdout.strip())
 
-    result = subprocess.run(["python3", "scripts/run_injection.py"], capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, "scripts/run_injection.py"], capture_output=True, text=True
+    )
     if result.returncode != 0:
-        raise SystemExit(f"两层注入失败：{result.stderr.strip()}")
+        _fail("injection_anchor", f"两层注入失败：{result.stderr.strip()}")
     print(result.stdout.strip())
 
-    result = subprocess.run(["python3", "scripts/verify_vendor.py"], capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_vendor.py"], capture_output=True, text=True
+    )
     if result.returncode != 0:
-        raise SystemExit(f"vendor 三层校验失败：{result.stderr.strip()}")
+        _fail("vendor_verify", f"vendor 三层校验失败：{result.stderr.strip()}")
     print(result.stdout.strip())
 
     version = tomllib.loads(
@@ -385,13 +425,16 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     # 整批假红，管线红必须只反映
     # 契约本身。
     result = subprocess.run(
-        ["python3", "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"],
+        [sys.executable, "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"],
         capture_output=True,
         text=True,
     )
     print(result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "")
     if result.returncode != 0:
-        raise SystemExit(f"roll 后契约测试失败：\n{result.stdout[-2000:]}{result.stderr[-500:]}")
+        _fail(
+            "contract_red",
+            f"roll 后契约测试失败：\n{result.stdout[-2000:]}{result.stderr[-500:]}",
+        )
 
     # state 是「已成功同步」的凭据而非「已尝试」的日志，故推进严格晚于契约测试绿：
     # 先推进会让失败 roll 被永久记为已同步（下次 _detect 见 standalone_sha 相同
@@ -413,7 +456,7 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     result = subprocess.run(["git", "add", *ROLL_ADD_PATHS], capture_output=True, text=True)
     if result.returncode != 0:
         STATE_PATH.write_text(previous_state, encoding="utf-8")
-        raise SystemExit(f"git add 失败：{result.stderr.strip()}")
+        _fail("git_state", f"git add 失败：{result.stderr.strip()}")
     result = subprocess.run(
         [
             "git",
@@ -430,7 +473,7 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     )
     if result.returncode != 0:
         STATE_PATH.write_text(previous_state, encoding="utf-8")
-        raise SystemExit(f"roll 提交失败：{result.stderr.strip()}")
+        _fail("git_state", f"roll 提交失败：{result.stderr.strip()}")
     print(f"roll 完成：{old_short}..{new_short}（v{version}），已提交")
 
 
@@ -452,15 +495,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"检测到上游滚动：{old_standalone[:12]} → {new_standalone[:12]}（main {new_main[:12]}）")
     if args.check:
         return 1
-    try:
-        _roll(new_standalone, new_main, old_standalone)
-    except (SystemExit, Exception):
-        # 覆盖 SystemExit 之外的类型：_roll 里 copytree / tomllib 在上游树结构
-        # 变化时会抛 OSError / TOMLDecodeError，若任其冒泡则失败计数不增长
-        # → 本地熔断低估失败次数。刻意不含 KeyboardInterrupt
+    def _count_failure() -> None:
+        # 每次失败恰好 +1（本地熔断口径），覆盖 SystemExit 与裸异常两条路径；
+        # 刻意不含 KeyboardInterrupt（中断不是 roll 的失败）
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
         _state_write(state)
+
+    try:
+        _roll(new_standalone, new_main, old_standalone)
+    except SystemExit:
+        _count_failure()
+        raise
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # 上游树结构变化时 copytree / tomllib 的已知失败形态：归 upstream_structure
+        # 而非落工作流的 unknown 兜底
+        _count_failure()
+        _fail("upstream_structure", f"上游树结构读取失败：{exc}")
+    except Exception:
+        _count_failure()
         raise
     return 0
 

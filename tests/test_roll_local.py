@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import sys
 import tarfile
 from pathlib import Path
@@ -309,7 +310,10 @@ def _roll_harness(
 
 
 def test_roll_pytest_failure_does_not_advance_state_and_counts_failures(
-    roll: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    roll: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """H4：契约测试失败时不得推进 standalone_sha，且失败计数逐次递增（熔断有效）。
 
@@ -328,6 +332,8 @@ def test_roll_pytest_failure_does_not_advance_state_and_counts_failures(
     for _ in range(2):
         with pytest.raises(SystemExit, match="契约测试失败"):
             roll.main([])
+    # 工作流的归类契约：失败出口带 contract_red 标记行（stderr）
+    assert "roll-fail-kind=contract_red" in capsys.readouterr().err
     recorded = json.loads(state_path.read_text(encoding="utf-8"))
     assert recorded["standalone_sha"] == _SHA_C
     assert recorded["main_sha"] == _SHA_D
@@ -476,7 +482,40 @@ def test_roll_pytest_invocation_matches_gate_1() -> None:
 
     裸 `-q` 拿不到仓库 pytest 配置（根目录无默认发现路径上的 ini），asyncio
     用例整批假红——管线红必须只可归因契约本身，不可归因调用形态漂移。
+    解释器名不在同参面内（子进程经 ``sys.executable`` 与驱动本脚本的解释器
+    同轨，不依赖平台别名），只钉参数序列与解释器取值方式。
     """
     source = (REPO_ROOT / "scripts" / "roll_local.py").read_text(encoding="utf-8")
-    invocation = '"python3", "-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"'
+    invocation = '"-m", "pytest", "-c", "config/pyproject.toml", "--rootdir=.", "-q"'
     assert invocation in source
+    assert "sys.executable" in source
+
+
+# ---- 红类型：标记行与类别词表（sync-upstream 工作流的归类契约）----
+
+
+def test_fail_emits_kind_marker_and_keeps_message_payload(
+    roll: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """_fail 先落 ``roll-fail-kind=`` 标记行，消息仍以 SystemExit 载荷直达。
+
+    标记行是工作流归类的唯一类别真值源（退出码不承载类别，避免类别表在
+    脚本与工作流两处漂移）；消息继续走 SystemExit 载荷，保持「消息即载荷」
+    的既有失败语义。
+    """
+    with pytest.raises(SystemExit, match="契约测试失败"):
+        roll._fail("contract_red", "契约测试失败")
+    captured = capsys.readouterr()
+    assert "roll-fail-kind=contract_red" in captured.err
+
+
+def test_fail_call_sites_use_registered_kinds(roll: ModuleType) -> None:
+    """源内全部 _fail 调用的类别字面量都必须登记在 _FAILURE_KINDS。
+
+    词表是工作流归类的事实源；未登记类别会被 _fail 的运行期断言拦下，
+    本测试把拦截提前到 CI（覆盖从未走到失败路径的出口）。
+    """
+    source = (REPO_ROOT / "scripts" / "roll_local.py").read_text(encoding="utf-8")
+    call_kinds = set(re.findall(r'_fail\(\s*"([a-z_]+)"', source))
+    assert call_kinds, "正则未匹配到任何 _fail 调用——匹配模式失配时必须响亮失败"
+    assert call_kinds <= set(roll._FAILURE_KINDS)
