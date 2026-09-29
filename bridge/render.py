@@ -638,6 +638,9 @@ async def build_html(result: ParseResult, theme: Theme) -> str:
 
     budget = InlineBudget()
     data = await build_theme_data(result, color_scheme=theme, budget=budget)
+    # autoescape=False 是数据层单点转义设计的组成部分而非缺口：正文已在
+    # _escape_html 转义恰好一次，此处再开会双转义（守护见 test_render_smoke
+    # 的 escapes_attacker_controlled_html / escapes_title_exactly_once）
     env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), enable_async=True, autoescape=False)
     template = env.get_template(_select_template(result))
     rendered = await template.render_async(data=data)

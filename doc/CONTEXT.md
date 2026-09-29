@@ -70,7 +70,9 @@ gate_criteria；未预料的异常不带标记，按 unknown 兜底（fail-close
 
 **诊断包（failure diagnostics）**
 失败 Issue 正文随附的定位材料：失败类别与处置提示、roll 日志尾段、供应链
-判据报告、上游构建 diffstat、本地复现命令。目标：管道红的处置从「进运行页
+判据报告、上游构建 diffstat、契约红时的 pytest 失败明细
+（`roll_local` 把完整 pytest 输出落盘 `.sync-work/pytest-fail.log`，快照
+diff 因此随 Issue 直达）、本地复现命令。目标：管道红的处置从「进运行页
 翻日志」收敛为「读 Issue」。同一 open Issue 的重复失败以「第 N 次失败」评论
 延续（CI 侧连续失败次数由评论链承载），第 3 次起追加升级提示：熔断阈值口径
 （`maintenance/checklist.json` 的 red_when_failures_at_least=3）、上游报障

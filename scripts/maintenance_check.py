@@ -64,9 +64,13 @@ def _run(cmd: str, *, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
 
     清单里的 ``{py}`` 占位符替换为当前解释器 ``sys.executable``：CI 与开发机的
     解释器名不一致（``python`` vs ``python3``），硬编码任一个都会在另一侧响亮失败。
+    替换发生在切分之后、按 token 精确匹配——Windows 解释器路径的反斜杠若先代入
+    再切分，会被 posix 切分规则当转义符吞掉（``C:\\x\\python.exe`` 收缩为
+    ``C:xxpython.exe``，命令整体 FileNotFoundError）。
     """
+    argv = shlex.split(cmd)
     return subprocess.run(
-        shlex.split(cmd.replace("{py}", sys.executable)),
+        [sys.executable if token == "{py}" else token for token in argv],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

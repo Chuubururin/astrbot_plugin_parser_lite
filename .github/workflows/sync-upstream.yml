@@ -217,7 +217,7 @@ jobs:
               injection_anchor)
                 echo "注入锚点零命中/歧义：按 scripts/extract_* 的锚点规则表核对上游对应模块改动。" ;;
               vendor_verify)
-                echo "vendor 三层校验失败：本地复现查看 scripts/verify_vendor.py 输出定位。" ;;
+                echo "vendor 三层校验失败：本地复现查看校验脚本输出定位。" ;;
               network|gate_network)
                 echo "上游网络抖动：判据步已重试 3 次。可等待下次 cron 或手动重跑工作流。" ;;
               upstream_structure)
@@ -234,6 +234,18 @@ jobs:
               echo '```text'
               tail -n 40 /tmp/roll.log
               echo '```'
+              echo ""
+            fi
+            if [ "$KIND" = "contract_red" ] && [ -f .sync-work/pytest-fail.log ]; then
+              echo "### pytest 失败明细（含快照 diff，最近 200 行）"
+              echo ""
+              echo '<details><summary>展开</summary>'
+              echo ""
+              echo '```text'
+              tail -n 200 .sync-work/pytest-fail.log
+              echo '```'
+              echo ""
+              echo '</details>'
               echo ""
             fi
             if [ -f /tmp/sync-report.json ]; then

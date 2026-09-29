@@ -431,6 +431,15 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     )
     print(result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "")
     if result.returncode != 0:
+        # 完整输出落盘供 sync-upstream 诊断包取用（.sync-work 不入库）：
+        # SystemExit 消息只携带 2000 字符尾段，快照 diff——contract_red 的
+        # 常见评审材料——经常被截断
+        fail_log = REPO_ROOT / ".sync-work" / "pytest-fail.log"
+        fail_log.parent.mkdir(parents=True, exist_ok=True)
+        fail_log.write_text(
+            result.stdout[-50000:] + "\n----- stderr -----\n" + result.stderr[-4000:],
+            encoding="utf-8",
+        )
         _fail(
             "contract_red",
             f"roll 后契约测试失败：\n{result.stdout[-2000:]}{result.stderr[-500:]}",

@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import re
 import sys
 import tarfile
@@ -434,6 +435,12 @@ def test_is_ancestor_distinguishes_git_error_from_not_ancestor(
 # ---- M17：归档解包恢复 mode 位；安全门先于任何落盘 ----
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX 权限位是文件系统语义：Windows 的 os.chmod 只切只读位，"
+    "0o755 落盘即 0o666；mode 恢复守护的目标是 CI 侧 cp -a 的可执行位保留"
+    "（ubuntu），Windows 跳过不损失守护力",
+)
 def test_extract_archive_preserves_file_mode(roll: ModuleType, tmp_path: Path) -> None:
     """成员 mode 位落盘后恢复（CI 侧 cp -a 保留）：只写内容会让双轨树 mode 分叉。
 

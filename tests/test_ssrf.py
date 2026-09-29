@@ -33,6 +33,30 @@ from astrbot_plugin_parser_lite.bridge.ssrf import (
 from curl_cffi import AsyncSession
 from curl_cffi.const import CurlOpt
 
+
+@pytest.fixture(autouse=True)
+def _no_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """守护用例在「无环境代理」前提下运行。
+
+    HTTP(S)_PROXY 会让 libcurl 把钉扎请求转交系统代理——RESOLVE 对代理请求
+    不生效，实测流量脱离本地服务与钉扎路径（表现为 curl 52 空回复）；httpx
+    的 trust_env 则把环境代理挂载注入 ``_mounts``，污染对挂载结构的直读
+    断言。测试自建的代理挂载（test_pin_existing_httpx_rebuilds_proxy_mounts）
+    经显式参数构造，不依赖环境变量，不受本 fixture 影响。
+    """
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 BLOCKED_URLS = (
     "ftp://example.com/file",  # scheme 白名单外
     "javascript:alert(1)",
