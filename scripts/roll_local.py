@@ -505,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"检测到上游滚动：{old_standalone[:12]} → {new_standalone[:12]}（main {new_main[:12]}）")
     if args.check:
         return 1
+
     def _count_failure() -> None:
         # 每次失败恰好 +1（本地熔断口径），覆盖 SystemExit 与裸异常两条路径；
         # 刻意不含 KeyboardInterrupt（中断不是 roll 的失败）

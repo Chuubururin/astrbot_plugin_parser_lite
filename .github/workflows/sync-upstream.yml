@@ -76,6 +76,7 @@ jobs:
         id: gate
         env:
           CONFIRM: ${{ github.event.inputs.confirm }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
           gate_red() {
@@ -116,7 +117,7 @@ jobs:
                --repo .sync-work/upstream --old "$OLD" --new "$NEW" \
                --json /tmp/sync-report.json; then
             sed 's/^/  /' /tmp/sync-report.json
-            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
               echo "roll result: dry_run —— 检测到 ${OLD:0:12} → ${NEW:0:12}，按输入只检测与判定" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "roll result: detected —— 判据通过，进入 roll 序列" >> "$GITHUB_STEP_SUMMARY"
@@ -193,9 +194,11 @@ jobs:
 
       - name: 失败通知（去重开 Issue + 诊断包）
         if: failure() && github.event.inputs.dry_run != 'true'
+        env:
+          ROLL_KIND: ${{ steps.roll.outputs.kind || steps.gate.outputs.kind || 'unknown' }}
         run: |
           set -euo pipefail
-          KIND="${{ steps.roll.outputs.kind || steps.gate.outputs.kind || 'unknown' }}"
+          KIND="${ROLL_KIND}"
           # gh 不会随 issue create 自动建 label——先幂等确保存在，
           # 否则失败通知自己先红。
           gh label create "$SYNC_LABEL" --color "0E8A16" \
@@ -206,7 +209,7 @@ jobs:
           {
             echo "## 上游同步失败诊断包"
             echo ""
-            echo "- 失败类别：\`$KIND\`（类别语义见 doc/CONTEXT.md「红类型」）"
+            echo "- 失败类别：**$KIND**（类别语义见 doc/CONTEXT.md「红类型」）"
             echo "- 失败运行：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo ""
             case "$KIND" in

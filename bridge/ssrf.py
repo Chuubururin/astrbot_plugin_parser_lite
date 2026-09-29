@@ -29,9 +29,10 @@ libcurl，口径弱于 _ip_forbidden（CGNAT/TEST-NET/224/4/0.0.0.0/NAT64
 漏拦），不作为重定向依据。
 
 代理：配置代理时连接目标是代理而非对端，httpx 侧退回「请求目标改写为已
-验证 IP 字面量」路径（本地校验语义 fail-closed 不变）；curl_cffi 侧显式禁用环境代理（``CurlOpt.PROXY=""``）——libcurl 原生读
-HTTP(S)_PROXY，代理请求由代理解析目标 hostname，RESOLVE 对代理请求不生效，
-透传代理等于钉扎静默失效；钉扎语义的前提是直连，代理出网为 curl 通道非目标。
+验证 IP 字面量」路径（本地校验语义 fail-closed 不变）；curl_cffi 侧显式
+禁用环境代理（``CurlOpt.PROXY=""``）——libcurl 原生读 HTTP(S)_PROXY，代理
+请求由代理解析目标 hostname，RESOLVE 对代理请求不生效，透传代理等于钉扎
+静默失效；钉扎语义的前提是直连，代理出网为 curl 通道非目标。
 任何校验失败一律拒绝（fail-closed）。
 
 安装：整装锁 + 全部成功后才置 _ssrf_guarded——中途失败时下次 install

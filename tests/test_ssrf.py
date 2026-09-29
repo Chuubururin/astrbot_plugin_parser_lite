@@ -504,9 +504,7 @@ def test_curl_guard_pins_resolve_on_real_session(monkeypatch, clean_resolve_tabl
     assert calls == [f"http://hop.example.com:{port}/ok"]
 
 
-def test_curl_guard_never_hands_pinned_request_to_env_proxy(
-    monkeypatch, clean_resolve_table
-):
+def test_curl_guard_never_hands_pinned_request_to_env_proxy(monkeypatch, clean_resolve_table):
     """环境代理不得劫持钉扎请求：通道显式禁代理，RESOLVE 钉扎照常生效。
 
     libcurl 原生读取 ``HTTP(S)_PROXY`` 环境变量，代理请求由代理解析目标
