@@ -295,6 +295,8 @@ def _roll_harness(
     (vmeta / "pyproject.toml").write_text('[project]\nversion = "1.3.7"\n', encoding="utf-8")
     monkeypatch.setattr(roll, "STATE_PATH", state_path)
     monkeypatch.setattr(roll, "VENDOR_META", vmeta)
+    # 契约红时 pytest-fail.log 必须落在沙箱而非真实 .sync-work 评审证据路径
+    monkeypatch.setattr(roll, "PYTEST_FAIL_LOG", tmp_path / "pytest-fail.log")
     monkeypatch.setattr(roll.os, "chdir", lambda path: None)
     monkeypatch.setattr(roll, "_ensure_clone", lambda: None)
     monkeypatch.setattr(roll, "_detect", lambda: (_SHA_A, _SHA_B, _SHA_C))
@@ -335,6 +337,9 @@ def test_roll_pytest_failure_does_not_advance_state_and_counts_failures(
             roll.main([])
     # 工作流的归类契约：失败出口带 contract_red 标记行（stderr）
     assert "roll-fail-kind=contract_red" in capsys.readouterr().err
+    # 诊断包契约：完整 pytest 输出落盘（快照 diff 的评审材料）
+    fail_log = tmp_path / "pytest-fail.log"
+    assert fail_log.read_text(encoding="utf-8").startswith("1 failed")
     recorded = json.loads(state_path.read_text(encoding="utf-8"))
     assert recorded["standalone_sha"] == _SHA_C
     assert recorded["main_sha"] == _SHA_D

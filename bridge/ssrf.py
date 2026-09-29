@@ -29,7 +29,9 @@ libcurl，口径弱于 _ip_forbidden（CGNAT/TEST-NET/224/4/0.0.0.0/NAT64
 漏拦），不作为重定向依据。
 
 代理：配置代理时连接目标是代理而非对端，httpx 侧退回「请求目标改写为已
-验证 IP 字面量」路径（本地校验语义 fail-closed 不变）；curl_cffi 语义同前。
+验证 IP 字面量」路径（本地校验语义 fail-closed 不变）；curl_cffi 侧显式禁用环境代理（``CurlOpt.PROXY=""``）——libcurl 原生读
+HTTP(S)_PROXY，代理请求由代理解析目标 hostname，RESOLVE 对代理请求不生效，
+透传代理等于钉扎静默失效；钉扎语义的前提是直连，代理出网为 curl 通道非目标。
 任何校验失败一律拒绝（fail-closed）。
 
 安装：整装锁 + 全部成功后才置 _ssrf_guarded——中途失败时下次 install
@@ -361,7 +363,8 @@ def _wrap_curl_session(session: Any) -> None:
 
     重定向在 Python 侧手动跟随（allow_redirects=False）：每跳先 validate_url
     再发请求，与 httpx _PinnedTransport 同口径；CurlFollow.SAFE 判定弱于
-    _ip_forbidden（见模块 docstring），不作为重定向依据。
+    _ip_forbidden（见模块 docstring），不作为重定向依据。每跳同时显式禁用
+    环境代理——理由与 httpx 侧的代理姿态对照见模块 docstring 代理段。
     """
     if getattr(session, "_ssrf_guarded", False):
         return
@@ -376,6 +379,12 @@ def _wrap_curl_session(session: Any) -> None:
             validated = await _offload(validate_url, current_url)
             options = dict(getattr(session, "curl_options", None) or {})
             options[CurlOpt.RESOLVE] = _publish_resolve_entries(validated)
+            # 显式禁用环境代理（libcurl 语义：空串 = 即使环境有代理变量也禁用）：
+            # libcurl 原生读 HTTP(S)_PROXY，代理请求由代理解析目标 hostname，
+            # RESOLVE 对代理请求不生效——透传代理等于第 4 层钉扎静默失效
+            # （校验 IP ≠ 连接 IP，rebinding 复活）。钉扎语义的前提是直连；
+            # 代理出网场景由 httpx 通道的 IP 改写降级承担，curl 通道为非目标
+            options[CurlOpt.PROXY] = ""
             session.curl_options = options
             response = await original(current_method, current_url, **kwargs)
             status = int(getattr(response, "status_code", 0) or 0)

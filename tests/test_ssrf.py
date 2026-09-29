@@ -504,6 +504,36 @@ def test_curl_guard_pins_resolve_on_real_session(monkeypatch, clean_resolve_tabl
     assert calls == [f"http://hop.example.com:{port}/ok"]
 
 
+def test_curl_guard_never_hands_pinned_request_to_env_proxy(
+    monkeypatch, clean_resolve_table
+):
+    """环境代理不得劫持钉扎请求：通道显式禁代理，RESOLVE 钉扎照常生效。
+
+    libcurl 原生读取 ``HTTP(S)_PROXY`` 环境变量，代理请求由代理解析目标
+    hostname——RESOLVE 对代理请求不生效，「校验 IP = 连接 IP」的第 4 层
+    钉扎被静默绕过。通道因此显式禁代理（``CurlOpt.PROXY=""``）：假代理
+    端口不可达时，绕过路径的表现是请求连去代理而非钉扎目标——本用例以
+    不可达假代理作哨兵，钉扎目标必须真实抵达。目标为纯 http（无 TLS），
+    不涉证书校验面。
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    with _local_http_server() as (server, hits):
+        port = server.server_address[1]
+        calls = _pin_host_to_local(monkeypatch, "hop.example.com", port)
+        session: Any = AsyncSession(impersonate="chrome146", allow_redirects=True)
+        ssrf._wrap_curl_session(session)
+        try:
+            resp = _run(session.get(f"http://hop.example.com:{port}/ok"))
+        finally:
+            _run(session.close())
+
+    assert resp.status_code == 200
+    assert resp.content == b"OK-FROM-SERVER"
+    assert hits == ["/ok"], "请求被环境代理劫持，未抵达钉扎目标"
+    assert calls == [f"http://hop.example.com:{port}/ok"]
+
+
 def test_curl_guard_brackets_ipv6_resolve(monkeypatch, clean_resolve_table):
     """RESOLVE 的 ADDRESS 为 IPv6 字面量时必须带 []：libcurl 按冒号切分
     HOST:PORT:ADDRESS，裸 IPv6 会产生歧义而解析失败（curl 后端整体不可用）。"""

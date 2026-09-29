@@ -257,8 +257,11 @@ httpx/curl_cffi 会话，与 28 个平台 parser 共用的 `BaseParser.httpx`。
 第 4 层机制：校验通过的 IP 直接成为连接目标。httpx 侧在 httpcore network
 backend 层拨号已验证 IP（URL/SNI 保留原 hostname，连接池与 TLS 语义不变；
 多 IP 按校验顺序故障转移），代理场景退回「请求目标改写为已验证 IP 字面量」
-（fail-closed）；curl_cffi 侧注入 `CurlOpt.RESOLVE`。DNS 二次解析被绕开，
-rebinding 失效。
+（fail-closed）；curl_cffi 侧注入 `CurlOpt.RESOLVE` 并显式禁用环境代理
+（`CurlOpt.PROXY=""`——libcurl 原生读 HTTP(S)_PROXY，代理请求由代理解析
+目标 hostname，RESOLVE 对代理请求不生效，透传代理等于钉扎静默失效；代理
+出网场景由 httpx 通道的改写降级承担，curl 通道为非目标）。DNS 二次解析被
+绕开，rebinding 失效。
 
 **`_INHERIT_VENDOR_VERIFY`**
 `bridge/ssrf.py` 命名常量（False）：显式继承上游 vendor 关闭 TLS 证书校验的

@@ -60,6 +60,9 @@ from typing import NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = REPO_ROOT / ".github" / "sync-state.json"
+# contract_red 时 pytest 完整输出落盘点（sync-upstream 诊断包取用）；
+# .sync-work 不入库
+PYTEST_FAIL_LOG = REPO_ROOT / ".sync-work" / "pytest-fail.log"
 UPSTREAM_DIR = REPO_ROOT / ".sync-work" / "upstream"
 UPSTREAM_REPO = "https://github.com/sokoko-org/nonebot-plugin-parser-lite.git"
 VENDOR_PKG = REPO_ROOT / "vendor" / "nonebot_plugin_parser_lite"
@@ -431,12 +434,10 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     )
     print(result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "")
     if result.returncode != 0:
-        # 完整输出落盘供 sync-upstream 诊断包取用（.sync-work 不入库）：
-        # SystemExit 消息只携带 2000 字符尾段，快照 diff——contract_red 的
-        # 常见评审材料——经常被截断
-        fail_log = REPO_ROOT / ".sync-work" / "pytest-fail.log"
-        fail_log.parent.mkdir(parents=True, exist_ok=True)
-        fail_log.write_text(
+        # 完整输出落盘供 sync-upstream 诊断包取用：SystemExit 消息只携带 2000
+        # 字符尾段，快照 diff——contract_red 的常见评审材料——经常被截断
+        PYTEST_FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        PYTEST_FAIL_LOG.write_text(
             result.stdout[-50000:] + "\n----- stderr -----\n" + result.stderr[-4000:],
             encoding="utf-8",
         )
