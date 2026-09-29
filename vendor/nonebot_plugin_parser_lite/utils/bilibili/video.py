@@ -53,6 +53,11 @@ class BiliVideoQuality(IntEnum):
     DOLBY = 126
     _8K = 127
 
+    @property
+    def selection_rank(self) -> int:
+        """视频清晰度的选择权重"""
+        return self.value
+
 
 class BiliVideoCodecs(StrEnum):
     """
@@ -92,9 +97,14 @@ class BiliAudioQuality(IntEnum):
 
     _64K = 30216
     _132K = 30232
-    DOLBY = 30250
-    HI_RES = 30251
     _192K = 30280
+    HI_RES = 30251
+    DOLBY = 30250
+
+    @property
+    def selection_rank(self) -> int:
+        """音频档位的选择权重，声明顺序即优先级"""
+        return tuple(type(self)).index(self)
 
 
 class Video:
@@ -431,7 +441,11 @@ class VideoDownloadURLDataDetecter:
             quality = BiliAudioQuality(quality_id)
         except ValueError:
             return
-        if not (min_quality.value <= quality.value <= max_quality.value):
+        if not (
+            min_quality.selection_rank
+            <= quality.selection_rank
+            <= max_quality.selection_rank
+        ):
             return
         if quality not in accepted_qualities:
             return
@@ -446,7 +460,7 @@ class VideoDownloadURLDataDetecter:
     def detect_best_streams(
         self,
         video_max_quality: BiliVideoQuality = BiliVideoQuality._8K,
-        audio_max_quality: BiliAudioQuality = BiliAudioQuality._192K,
+        audio_max_quality: BiliAudioQuality = BiliAudioQuality.DOLBY,
         video_min_quality: BiliVideoQuality = BiliVideoQuality._360P,
         audio_min_quality: BiliAudioQuality = BiliAudioQuality._64K,
         video_accepted_qualities: list[BiliVideoQuality] | None = None,
@@ -538,7 +552,11 @@ class VideoDownloadURLDataDetecter:
 
             # 非 HDR / 杜比的视频质量范围过滤
             if vq not in (BiliVideoQuality.DOLBY, BiliVideoQuality.HDR):
-                if not (video_min_quality.value <= vq.value <= video_max_quality.value):
+                if not (
+                    video_min_quality.selection_rank
+                    <= vq.selection_rank
+                    <= video_max_quality.selection_rank
+                ):
                     continue
                 if vq not in video_accepted_qualities:
                     continue
@@ -606,7 +624,7 @@ class VideoDownloadURLDataDetecter:
                 dolby_hdr_priority = 1
 
             # 清晰度（越高越好）
-            quality_weight = s.video_quality.value
+            quality_weight = s.video_quality.selection_rank
 
             # 编码优先级（codecs 列表越靠前越优先）
             try:
@@ -617,18 +635,9 @@ class VideoDownloadURLDataDetecter:
             return dolby_hdr_priority, quality_weight, codec_priority
 
         # 选择最优音频流：基于评分的 key 函数
-        def audio_score(s: AudioStreamDownloadURL) -> tuple[int, int]:
-            """
-            :return: (杜比/Hi-Res 优先级, 清晰度权重)
-            """
-            dolby_hires_priority = 0
-            if not no_dolby_audio and s.audio_quality == BiliAudioQuality.DOLBY:
-                dolby_hires_priority = 2
-            elif not no_hires and s.audio_quality == BiliAudioQuality.HI_RES:
-                dolby_hires_priority = 1
-
-            quality_weight = s.audio_quality.value
-            return dolby_hires_priority, quality_weight
+        def audio_score(s: AudioStreamDownloadURL) -> int:
+            """按音频档位的选择优先级排序。"""
+            return s.audio_quality.selection_rank
 
         # 取最优（线性扫描）
         best_video: (

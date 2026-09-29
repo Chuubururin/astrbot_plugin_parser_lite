@@ -4,7 +4,7 @@
 
 # astrbot_plugin_parser_lite
 
-![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.8rc6-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
+![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.8rc7-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
 
 [nonebot-plugin-parser-lite](https://github.com/sokoko-org/nonebot-plugin-parser-lite) 的
 AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接与 JSON 卡片，并转发为内容卡片。
@@ -12,8 +12,8 @@ AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平
 ## 桥接说明（AstrBot 用户只需看本节）
 
 - **安装与更新**：AstrBot 插件市场安装，或 WebUI「插件」页上传发布 zip；手动部署的覆盖后重启
-- **配置**：WebUI 插件页共 34 个配置项（3 桥接 + 31 上游），保存后自动重载
-- **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.8rc6），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
+- **配置**：WebUI 插件页共 35 个配置项（3 桥接 + 32 上游），保存后自动重载
+- **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.8rc7），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
 - **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
 - **问题反馈**：[仓库 Issues](https://github.com/Chuubururin/astrbot_plugin_parser_lite/issues)，请附可复现的分享链接与 WebUI 日志
 
@@ -207,6 +207,11 @@ plite_bili_video_codes=["avc", "av01", "hev", "unknown"]
 # DOLBY(126), 8K(127)
 plite_bili_video_quality=80
 
+# [可选] B 站音频流音质上限，按选择优先级从低到高：
+# 64K(30216)、132K(30232)、192K(30280)、Hi-Res 无损(30251)、杜比全景声(30250)
+# 默认 30280，限制的是下载源流；单独请求音频时仍会转码为 MP3
+plite_bili_audio_quality=30280
+
 # [可选] B 站下载 CDN 地区；仅支持内置线路 zh、en、ja、proxy(网宿全网多线)
 plite_bili_cdn_region="zh"
 
@@ -260,6 +265,10 @@ plite_summary_in_forward=False
 # 需要协议端支持在合并转发节点中发送 Video / File
 # 开启后仍保留视频封面，并在包含视频时强制使用合并转发
 plite_video_in_forward=False
+
+# 合并转发遇到明确的媒体上传错误时，只重发失败的分包：先省略视频并保留其他内容；
+# 若再次上传失败或没有视频，则将媒体替换为文字，仍以合并转发发送。
+# 降级消息会补上缺失的标题、作者和原链接，不受 plite_append_url 影响。
 
 # [可选] 是否开启懒下载模式，仅在用户请求时才下载视频
 plite_lazy_download=False

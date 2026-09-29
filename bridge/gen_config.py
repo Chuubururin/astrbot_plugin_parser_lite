@@ -1,6 +1,6 @@
 """生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
 
-数据源：vendor nonebot_plugin_parser_lite 1.3.8rc6（第一层
+数据源：vendor nonebot_plugin_parser_lite 1.3.8rc7（第一层
 分析数据 vendor_analysis.json，scripts/analyze_vendor.py 从上游快照现场
 再生，不入库）。
 消费方：main.py —— 区分上游字段与桥自有字段，并在启动时告警陈旧配置键。
@@ -13,6 +13,7 @@ VENDOR_FIELDS: frozenset[str] = frozenset(
     {
         "plite_append_qrcode",
         "plite_append_url",
+        "plite_bili_audio_quality",
         "plite_bili_cdn_domain",
         "plite_bili_cdn_region",
         "plite_bili_video_codes",

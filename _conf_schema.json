@@ -147,6 +147,18 @@
       127
     ]
   },
+  "plite_bili_audio_quality": {
+    "description": "B站音频流音质上限",
+    "type": "int",
+    "default": 30280,
+    "options": [
+      30216,
+      30232,
+      30280,
+      30251,
+      30250
+    ]
+  },
   "plite_need_forward_contents": {
     "description": "是否需要合并转发内容(大于四项时始终转发)",
     "type": "bool",
