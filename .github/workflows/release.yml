@@ -218,6 +218,7 @@ jobs:
       - name: 创建 Release（附 zip、校验和、证明与 SBOM）
         run: |
           set -euo pipefail
+          FENCE='```'
           ZIP="astrbot_plugin_parser_lite-${TAG_NAME}.zip"
           sha256sum "$ZIP" > "${ZIP}.sha256"
           # tag push 与 dispatch 双通道 + 重放都收敛到这里：已有 Release 就
@@ -273,11 +274,11 @@ jobs:
             echo ""
             echo "离线验证（先取可信根：\`gh attestation trusted-root > trusted_root.jsonl\`）："
             echo ""
-            echo '```bash'
+            echo "${FENCE}bash"
             echo "gh attestation verify ${ZIP} -R ${GITHUB_REPOSITORY} \\"
             echo "  --bundle ${ZIP}.intoto.jsonl \\"
             echo "  --custom-trusted-root trusted_root.jsonl"
-            echo '```'
+            echo "$FENCE"
             echo ""
             echo "注：public 仓库的 attestation 由 Sigstore public good instance 签发；"
             echo "private 仓库用的是 GitHub 自己的 Sigstore 实例。"

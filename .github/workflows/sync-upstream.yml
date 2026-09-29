@@ -165,6 +165,7 @@ jobs:
         if: steps.roll.outputs.committed == 'true' && github.event.inputs.dry_run != 'true'
         run: |
           set -euo pipefail
+          FENCE='```'
           VERSION="$(python -c "import tomllib; print(tomllib.load(open('vendor/_upstream/pyproject.toml','rb'))['project']['version'])")"
           BRANCH="sync/upstream-v${VERSION}"
           git checkout -q -b "$BRANCH"
@@ -180,9 +181,9 @@ jobs:
               echo ""
               echo "由 sync-upstream 工作流生成（scripts/roll_local.py 完整序列）。"
               echo ""
-              echo '```json'
+              echo "${FENCE}json"
               cat /tmp/sync-report.json 2>/dev/null || echo "（无供应链判据报告）"
-              echo '```'
+              echo "$FENCE"
             } > /tmp/pr-body.md
             gh pr create --base dev --head "$BRANCH" \
               --title "[merge] sync: v${VERSION}" \
@@ -198,6 +199,7 @@ jobs:
           ROLL_KIND: ${{ steps.roll.outputs.kind || steps.gate.outputs.kind || 'unknown' }}
         run: |
           set -euo pipefail
+          FENCE='```'
           KIND="${ROLL_KIND}"
           # gh 不会随 issue create 自动建 label——先幂等确保存在，
           # 否则失败通知自己先红。
@@ -234,9 +236,9 @@ jobs:
             if [ -f /tmp/roll.log ]; then
               echo "### roll 日志尾段"
               echo ""
-              echo '```text'
+              echo "${FENCE}text"
               tail -n 40 /tmp/roll.log
-              echo '```'
+              echo "$FENCE"
               echo ""
             fi
             if [ "$KIND" = "contract_red" ] && [ -f .sync-work/pytest-fail.log ]; then
@@ -244,9 +246,9 @@ jobs:
               echo ""
               echo '<details><summary>展开</summary>'
               echo ""
-              echo '```text'
+              echo "${FENCE}text"
               tail -n 200 .sync-work/pytest-fail.log
-              echo '```'
+              echo "$FENCE"
               echo ""
               echo '</details>'
               echo ""
@@ -254,24 +256,24 @@ jobs:
             if [ -f /tmp/sync-report.json ]; then
               echo "### 供应链判据报告"
               echo ""
-              echo '```json'
+              echo "${FENCE}json"
               cat /tmp/sync-report.json
-              echo '```'
+              echo "$FENCE"
               echo ""
             fi
             if [ -f /tmp/upstream-diffstat.txt ]; then
               echo "### 上游构建 diff（旧 → 新 standalone，截断 50 行）"
               echo ""
-              echo '```text'
+              echo "${FENCE}text"
               cat /tmp/upstream-diffstat.txt
-              echo '```'
+              echo "$FENCE"
               echo ""
             fi
             echo "### 本地复现"
             echo ""
-            echo '```bash'
+            echo "${FENCE}bash"
             echo "python3 scripts/roll_local.py   # 与 CI 同一实现；--check 只检测不执行"
-            echo "```"
+            echo "$FENCE"
           } > /tmp/failure-diagnostics.md
 
           if EXISTING="$(gh issue list --state open --label "$SYNC_LABEL" --json number --jq '.[0].number // empty')" && [ -n "$EXISTING" ]; then
