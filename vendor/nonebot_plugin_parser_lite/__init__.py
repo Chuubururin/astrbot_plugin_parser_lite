@@ -7,7 +7,7 @@ platform module directly, or use ``Parser`` for lazy discovery.
 from importlib import import_module
 from typing import Any
 
-__version__ = "1.3.8rc7"
+__version__ = "1.3.8"
 
 __all__ = [
     "Config",

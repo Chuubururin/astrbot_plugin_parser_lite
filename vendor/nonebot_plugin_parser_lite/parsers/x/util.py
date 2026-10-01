@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 
 from msgspec import DecodeError
 from msgspec.json import decode
@@ -13,6 +14,20 @@ class LinkCardData:
     site_name: str | None = None
     description: str | None = None
     preview_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PollChoiceData:
+    label: str
+    votes: int = 0
+    image_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PollCardData:
+    choices: list[PollChoiceData]
+    closed: bool = False
+    close_at: str | None = None
 
 
 def _binding_values(card: TweetCard) -> dict[str, CardValue]:
@@ -121,8 +136,74 @@ def _legacy_data(card: TweetCard) -> LinkCardData | None:
     )
 
 
+def _to_int(value: str | None) -> int:
+    try:
+        return int(value) if value else 0
+    except ValueError:
+        return 0
+
+
+def _local_time(value: str | None) -> str | None:
+    """将 X 的 UTC ISO 时间转换为本地时间字符串"""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def parse_poll_card(card: TweetCard | None) -> PollCardData | None:
+    """解析 X 投票卡片，兼容纯文字投票和图片投票"""
+    if card is None or card.legacy is None:
+        return None
+    values = _binding_values(card)
+    if "poll" not in card.legacy.name and "choice1_label" not in values:
+        return None
+
+    def value(key: str) -> CardValue | None:
+        return values.get(key)
+
+    def string_value(key: str) -> str | None:
+        item = value(key)
+        return item.string_value if item and item.string_value else None
+
+    def image_url(index: int) -> str | None:
+        for suffix in ("original", "x_large", "large", ""):
+            key = f"choice{index}_image_{suffix}" if suffix else f"choice{index}_image"
+            item = value(key)
+            if item and item.image_value and item.image_value.url:
+                return item.image_value.url
+        return None
+
+    count = _to_int(string_value("choice_count"))
+    if count <= 0:
+        count = 0
+        while f"choice{count + 1}_label" in values:
+            count += 1
+    choices = [
+        PollChoiceData(
+            label=label,
+            votes=_to_int(string_value(f"choice{index}_count")),
+            image_url=image_url(index),
+        )
+        for index in range(1, count + 1)
+        if (label := string_value(f"choice{index}_label"))
+    ]
+    if not choices:
+        return None
+
+    final = value("counts_are_final")
+    return PollCardData(
+        choices=choices,
+        closed=bool(final and final.boolean_value),
+        close_at=_local_time(string_value("end_datetime_utc")),
+    )
+
+
 def parse_link_card(card: TweetCard | None) -> LinkCardData | None:
-    if card is None:
+    if card is None or parse_poll_card(card) is not None:
         return None
     unified = _decode_unified(card)
     return _unified_data(unified) if unified is not None else _legacy_data(card)
