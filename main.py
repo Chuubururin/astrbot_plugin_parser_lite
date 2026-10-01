@@ -227,8 +227,9 @@ class ParserLitePlugin(star.Star):
             # 修复后重载即恢复（tests/test_plugin_init.py 钉两条失败语义）。
             self.logger.error("SSRF 守卫安装失败，拒绝启动（出站保护不可用）: %r", e)
             raise
-        # vendor 运行态缺陷的桥内注入补丁（kuwo 参数名 / buff、hupu 视频块
-        # decompose 截断迭代），幂等；详见 bridge/vendor_patches.py 模块文档。
+        # vendor 运行态缺陷的桥内注入补丁（hupu video 缺 src/poster 的
+        # str(None) 补偿；buff 同源截断补丁已随上游修复撤销），幂等；
+        # 详见 bridge/vendor_patches.py 模块文档。
         # 与上方刻意不对称：补丁修复的是正确性缺陷（特定平台静默丢媒体），
         # 挂载失败降级为 error 日志而非全域拒启。
         try:

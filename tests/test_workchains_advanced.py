@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import tempfile
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -380,7 +382,10 @@ def _content(url: str, **kwargs: Any) -> VideoContent | ImageContent:
     return cls(path_task=wrapper, **kwargs)
 
 
-_DUMMY_FILE = Path("/tmp/parser-lite-dummy")  # 仅验链路优先级，不真实读写
+# 上游 get_path 新增 stat()：占位路径必须是真实存在的文件（仅占位，不参与断言内容）
+_DUMMY_FD, _DUMMY_NAME = tempfile.mkstemp(prefix="parser-lite-dummy")
+os.close(_DUMMY_FD)
+_DUMMY_FILE = Path(_DUMMY_NAME)
 
 
 async def _fake_download() -> Any:

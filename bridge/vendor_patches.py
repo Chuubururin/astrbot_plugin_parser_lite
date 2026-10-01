@@ -1,21 +1,22 @@
 """vendor 运行态缺陷的桥内注入补丁（vendor 零修改铁律下的唯一修法）。
 
-上游 main 分支两处运行态缺陷未修复：
+上游 main 分支一处运行态缺陷未修复：
 
-- parsers/buff/news.py：News.content 在 descendants 迭代中对视频块调
-  decompose()，销毁子树断链导致迭代终止，视频块之后的正文静默丢失；
-- parsers/hupu/util.py：_iter_media_and_text 同病（视频块含子节点时迭代
-  断链截断，含文本子节点时 bs4 甚至抛 AttributeError），且 video 缺 src /
-  poster 属性时 str(None) 产出字面 "None" URL。
+- parsers/hupu/util.py：``_iter_media_and_text`` 的 video 处理以
+  ``str(element.get(...))`` 取值，src 缺失产出字面 "None" 视频 URL、
+  poster 缺失产出字面 "None" 封面 URL。截断缺陷（视频块含子节点时
+  descendants 迭代断链）上游已随 5b3d107 修复——上游改用 skip_parent
+  跳过已处理子树，不再 decompose；复刻实现与上游新版逐行同源，
+  仅保留上述两处 str(None) 补偿。
+
+parsers/buff/news.py 的同源截断缺陷亦已随上游修复（5b3d107），且行为
+语义与补丁版逐项等价（截断修复 / 视频内部节点不当普通图），补丁按哨兵
+约定撤销，桥侧回归测试随补丁一并移除——vendor 内部行为回归上游测试管。
 
 kuwo ``music_id`` 参数尾随空格缺陷已由上游修复（#307 / 740e6c7），无对应
 补丁；tests/test_vendor_patches.py 冒烟钉住「参数无空格」防上游回退。
 
-修法遵循 bs4 官方惯例（Launchpad #2091118 的社区共识：先快照后修改）：
-descendants 先 list 化，配 destroyed id 集合跳过已销毁子树成员，保留
-上游「视频内部节点不再当作普通图处理」的语义而不截断后续内容。
-
-另有桥内安全加固（超出上游姿态，与 ssrf.py 四层钉扎同策略）：HLS 视频
+桥内安全加固（超出上游姿态，与 ssrf.py 四层钉扎同策略）：HLS 视频
 由 ffmpeg 子进程直连 URL 出站，不经过任何 Python HTTP 客户端，绕过
 _PinnedTransport/_PinnedNetworkBackend——对 FFmpeg.download_hls_to_mp4
 入口前置 ssrf.validate_url 校验（复用既有接口，拒绝经 vendor 调用点的
@@ -27,9 +28,9 @@ except Exception 包装为 DownloadException，走 sender 下载失败降级）�
 形态时补丁会静默失效而源码字符串哨兵（字符串仍在）测不出——每次挂载前经
 _mount 断言锚点存在且形态符合预期，否则响亮失败（RuntimeError）；实际
 挂载点由 mounted_points() 记录，测试断言其承载函数 __module__ 指向本模块。
-被复刻函数的「上游原件」在挂载前留存（VENDOR_BUFF_CONTENT /
-VENDOR_HUPU_ITER / VENDOR_HLS_PARAMS），测试直接调用它们验证缺陷仍在
-——上游修复后行为哨兵翻红，提醒按约定撤销补丁；上游改名则挂载即响亮失败。
+被复刻函数的「上游原件」在挂载前留存（VENDOR_HUPU_ITER / VENDOR_HLS_PARAMS），
+测试直接调用原件验证缺陷仍在——上游修复后行为哨兵翻红，提醒按约定撤销
+补丁；上游改名则挂载即响亮失败。
 """
 
 from __future__ import annotations
@@ -57,11 +58,9 @@ _APPLIED: set[str] = set()
 的上游原件覆盖为桥实现，行为哨兵随之失真。
 """
 
-VENDOR_BUFF_CONTENT: property | None = None
-"""挂载前留存的上游 ``News.content``；行为哨兵直接调用其 fget 验证缺陷仍在。"""
-
 VENDOR_HUPU_ITER: Callable[[BeautifulSoup], Iterator[Any]] | None = None
-"""挂载前留存的上游 ``_iter_media_and_text``；行为哨兵直接调用它。"""
+"""挂载前留存的上游 ``_iter_media_and_text``；行为哨兵直接调用它，
+验证 str(None) 缺陷仍在（缺 src / 缺 poster 形状）。"""
 
 VENDOR_HLS_PARAMS: tuple[str, ...] = ()
 """挂载前留存的上游 ``FFmpeg.download_hls_to_mp4`` 形参名（签名契约）。"""
@@ -137,7 +136,6 @@ def apply_vendor_patches() -> None:
     已成功的补丁下次调用跳过，失败项可重试。
     """
     for name, patcher in (
-        ("buff_news_content", _patch_buff_news_content),
         ("hupu_iter_media_and_text", _patch_hupu_iter_media_and_text),
         ("ffmpeg_hls", _patch_ffmpeg_hls_ssrf),
     ):
@@ -145,88 +143,6 @@ def apply_vendor_patches() -> None:
             continue
         patcher()
         _APPLIED.add(name)
-
-
-# ---------------------------------------------------------------- buff
-
-
-def _patch_buff_news_content() -> None:
-    from bs4 import BeautifulSoup
-    from bs4.element import NavigableString, Tag
-
-    from ..vendor.nonebot_plugin_parser_lite.creator import Creator
-    from ..vendor.nonebot_plugin_parser_lite.parsers.buff import news as buff_news
-    from ..vendor.nonebot_plugin_parser_lite.utils.format import (
-        HTML_NEWLINE_TAGS,
-        append_html_text,
-        clean_blank,
-        replace_anchor_hrefs,
-    )
-
-    def _content(self: buff_news.News) -> list[ContentItem]:
-        """复刻 News.content（上游 buff/news.py:30-83）。
-
-        差异：descendants 先快照再迭代 + destroyed 集合跳过已销毁子树；
-        上游在迭代中 decompose() 会截断迭代，视频块后正文静默丢失。
-        """
-        data: list[ContentItem] = []
-        soup = BeautifulSoup(self.body, "html.parser")
-        replace_anchor_hrefs(soup, "https://buff.163.com/")
-
-        text_buffer: list[str] = []
-
-        def flush_text() -> None:
-            append_html_text(data, text_buffer)
-            text_buffer.clear()
-
-        destroyed: set[int] = set()
-        for element in list(soup.descendants):
-            if id(element) in destroyed:
-                continue
-            # 标签节点
-            if isinstance(element, Tag):
-                if element.name in HTML_NEWLINE_TAGS:
-                    text_buffer.append("\n")
-                    continue
-                if element.name == "div" and "video-content" in (element.get("class") or []):
-                    # data-src 一定存在
-                    video = str(element["data-src"])
-                    # div 下面必含一个 img 封面（第一个 img 即封面）
-                    imgs = element.find_all("img")
-                    if not imgs:
-                        continue
-                    flush_text()
-                    cover_img = imgs[0]
-                    thumb = str(cover_img["src"])
-
-                    data.append(
-                        Creator.video(
-                            url_or_task=video,
-                            cover_url=thumb,
-                        )
-                    )
-                    # 与上游语义一致：视频内部节点不再当作普通图/文本处理；
-                    # 差异：decompose 前先快照子树成员，迭代得以继续
-                    destroyed.update(id(node) for node in element.descendants)
-                    element.decompose()
-                    continue
-
-                # 普通图片（保持与上游逐行同源）
-                if element.name == "img":  # noqa: SIM102
-                    if src_attr := element.get("data-original"):
-                        flush_text()
-                        data.append(Creator.graphic(url=str(src_attr)))
-
-            elif isinstance(element, NavigableString):
-                if text := clean_blank(str(element)):
-                    text_buffer.append(text)
-
-        flush_text()
-
-        return data
-
-    global VENDOR_BUFF_CONTENT
-    VENDOR_BUFF_CONTENT = _mount(buff_news, "News.content", property(_content), expect="property")
 
 
 # ---------------------------------------------------------------- hupu
@@ -241,22 +157,27 @@ def _patch_hupu_iter_media_and_text() -> None:
         HTML_NEWLINE_TAGS,
         anchor_text,
         clean_blank,
+        is_inside,
     )
 
     def _iter_media_and_text(
         soup: BeautifulSoup,
     ) -> Iterator[ContentItem | str]:
-        """复刻 _iter_media_and_text（上游 hupu/util.py:37-77）。
+        """复刻 _iter_media_and_text（上游 hupu/util.py，随 5b3d107 修复对齐）。
 
-        差异：①descendants 快照迭代 + destroyed 集合，视频后内容不再截断；
-        ②video 缺 src 时跳过（上游产出字面 "None" URL）；③poster 缺失传
-        None（上游 str(None) 产出 "None" 封面 URL）。
+        上游截断缺陷已修复（skip_parent 跳过已处理子树，不再 decompose），
+        复刻与上游新版逐行同源；差异仅两处 str(None) 补偿：
+        ①video 缺 src 时跳过（上游产出字面 "None" 视频 URL）；
+        ②poster 缺失传 None（上游 str(None) 产出 "None" 封面 URL）。
         """
         seen_anchors: set[int] = set()
-        destroyed: set[int] = set()
-        for element in list(soup.descendants):
-            if id(element) in destroyed:
-                continue
+        skip_parent: Tag | None = None
+        for element in soup.descendants:
+            # 遍历中跳过已处理子树（与上游同款：is_inside 判定后整体复位）
+            if skip_parent is not None:
+                if is_inside(element, skip_parent):
+                    continue
+                skip_parent = None
             if isinstance(element, Tag):
                 if element.name in HTML_NEWLINE_TAGS:
                     yield "\n"
@@ -264,17 +185,17 @@ def _patch_hupu_iter_media_and_text() -> None:
 
                 if element.name == "video":
                     video_url = element.get("src")
+                    # 补偿①：缺 src 跳过（上游产出字面 "None" URL）
                     if not isinstance(video_url, str) or not video_url:
                         continue
                     stable_url = urlparse(video_url)._replace(query="", fragment="").geturl()
                     yield Creator.video(
                         url_or_task=video_url,
+                        # 补偿②：poster 缺失传 None（上游产出字面 "None" 封面 URL）
                         cover_url=element.get("poster"),
                         cache_key=f"hupu:{stable_url}",
                     )
-                    # decompose 前先快照子树成员，迭代得以继续
-                    destroyed.update(id(node) for node in element.descendants)
-                    element.decompose()
+                    skip_parent = element
                     continue
 
                 # 保持与上游逐行同源

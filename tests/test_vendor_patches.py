@@ -1,18 +1,18 @@
 """vendor_patches 桥内补丁：挂载契约 + 行为哨兵 + 行为回归。
 
-四类测试：
+三类测试：
 1. 挂载契约：每个挂载点承载的函数 __module__ 必须指向 vendor_patches
    （而不是上游模块）；锚点缺失/形态不符必须响亮失败（RuntimeError）——
    模块属性 setattr 永远成功，上游改名时补丁会静默失效，本类用例先红；
-2. 行为哨兵：直接调用挂载前留存的上游原件，用构造的 HTML 验证缺陷仍在
-   （视频块之后的正文仍丢失）——上游修复后本类用例翻红，提醒按哨兵约定
-   撤销补丁；哨兵必须是行为形态，「源码里还有某字符串」的文本形态在上游
-   改名后字符串仍在，测不出补丁失效；
-3. 行为回归：调用补丁后的函数，验证视频块之后的正文未丢失（buff/hupu
-   各一条）、video 缺属性不再产出字面 "None" URL、music_id 无空格；
-4. 幂等与绑定：apply_vendor_patches 可重复调用；hupu bbs/comment 的
-   from .util import 绑定自动走到修复版。
+2. 行为哨兵：直接调用挂载前留存的上游原件，验证 str(None) 缺陷仍在
+   （video 缺 src / poster 缺失产出字面 "None" URL）——上游修复后本用例
+   翻红，提醒按哨兵约定撤销补丁；哨兵必须是行为形态，「源码里还有某
+   字符串」的文本形态在上游改名后字符串仍在，测不出补丁失效；
+3. 行为回归：调用补丁后的函数，验证视频块之后的正文未丢失、video 缺
+   属性不再产出字面 "None" URL、bbs/comment 绑定自动走到修复版。
 
+buff：同源截断缺陷已随上游修复（5b3d107），补丁与回归测试按哨兵约定
+撤销——vendor 内部行为回归上游测试管。
 kuwo：上游 #307（740e6c7）已修复 ``music_id`` 尾随空格（端点路径同版
 修正），桥侧无需补丁；``music_id`` 无空格与请求行为以 vendor 冒烟钉住，
 防上游回退。
@@ -31,12 +31,6 @@ from astrbot_plugin_parser_lite.bridge import ssrf, vendor_patches
 from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.data import (
     GraphicContent,
     VideoContent,
-)
-from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.parsers.buff import (
-    news as buff_news,
-)
-from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.parsers.buff.share import (
-    ShareData,
 )
 from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.parsers.hupu import (
     util as hupu_util,
@@ -83,7 +77,6 @@ def test_mount_points_are_bridge_owned() -> None:
     """
     points = vendor_patches.mounted_points()
     assert {qualname for _, qualname in points} == {
-        "News.content",
         "_iter_media_and_text",
         "FFmpeg.download_hls_to_mp4",
     }
@@ -118,17 +111,8 @@ def test_mount_raises_loudly_when_shape_mismatches() -> None:
 
 # ---------------------------------------------------------------- 行为哨兵
 
-_BUFF_VIDEO_BODY = (
-    "<p>前文</p>"
-    '<div class="video-content" data-src="https://example.com/v.mp4">'
-    '<img src="https://example.com/c.jpg"/></div>'
-    "<p>后文</p>"
-    '<img data-original="https://example.com/i.jpg"/>'
-    "<p>尾文</p>"
-)
-
-# 视频块带子节点（source + 内部 img）才是上游缺陷的触发形状：空 <video>
-# 下 decompose 不破坏迭代，用空样本做哨兵只会得出假绿
+# 视频块带子节点（source + 内部 img）是上游截断缺陷的触发形状：空 <video>
+# 下迭代不断链，用空样本做哨兵只会得出假绿
 _HUPU_VIDEO_HTML = (
     "<p>前文</p>"
     '<video src="https://example.com/v.mp4?token=x" poster="https://example.com/p.jpg">'
@@ -140,26 +124,25 @@ _HUPU_VIDEO_HTML = (
 )
 
 
-def test_sentinel_buff_upstream_still_loses_text_after_video() -> None:
-    """行为哨兵（buff）：上游原件仍在视频块处截断迭代。
+def test_sentinel_hupu_upstream_still_yields_none_urls() -> None:
+    """行为哨兵（hupu）：上游原件的 str(None) 缺陷仍在。
 
     断言的是上游缺陷本身——上游修复后本用例翻红，提示按约定撤销补丁。
+    （截断缺陷已随 5b3d107 修复，上游原件不再截断，不属于本哨兵守护面。）
     """
-    upstream = vendor_patches.VENDOR_BUFF_CONTENT
-    assert isinstance(upstream, property) and upstream.fget is not None
-    items = upstream.fget(_make_news(_BUFF_VIDEO_BODY))
-    assert _strs(items) == ["前文"], "上游 buff 截断行为已变：请复检补丁必要性"
-    assert not [i for i in items if isinstance(i, GraphicContent)]
-
-
-def test_sentinel_hupu_upstream_still_truncates_after_video() -> None:
-    """行为哨兵（hupu）：上游原件在视频块含子节点时截断后续内容。"""
     upstream = vendor_patches.VENDOR_HUPU_ITER
     assert upstream is not None
-    raw = list(upstream(BeautifulSoup(_HUPU_VIDEO_HTML, "html.parser")))
-    texts = _strs(raw)
-    assert "后文" not in texts and "尾文" not in texts, "上游 hupu 截断行为已变：请复检补丁必要性"
-    assert not [i for i in raw if isinstance(i, GraphicContent)]
+    no_src = list(
+        upstream(BeautifulSoup('<video poster="https://example.com/p.jpg"></video>', "html.parser"))
+    )
+    assert [i.path_task.url for i in no_src if isinstance(i, VideoContent)] == ["None"], (
+        "上游已跳过缺 src 的 video：str(None) 补偿①可撤销"
+    )
+    no_poster = list(
+        upstream(BeautifulSoup('<video src="https://example.com/v.mp4"></video>', "html.parser"))
+    )
+    covers = [v.cover.url for v in no_poster if isinstance(v, VideoContent) and v.cover is not None]
+    assert covers == ["None"], '上游已修复缺 poster 的字面 "None" URL：str(None) 补偿②可撤销'
 
 
 # ---------------------------------------------------------------- kuwo
@@ -210,50 +193,6 @@ async def test_kuwo_request_uses_clean_music_id(
 
     assert captured["params"] == {"music_id": "51685512", "quality": "320k"}
     assert result.title == "歌名"
-
-
-# ---------------------------------------------------------------- buff
-
-
-def _make_news(body: str) -> buff_news.News:
-    return buff_news.News(
-        author="作者",
-        user_id="1",
-        avatar="",
-        body=body,
-        ip_location="",
-        publish_time=0,
-        replies=0,
-        title="标题",
-        ups_num=0,
-        views=0,
-        share_data=ShareData(title="分享", url="https://buff.163.com/x"),
-    )
-
-
-def test_buff_news_content_keeps_content_after_video() -> None:
-    news = _make_news(_BUFF_VIDEO_BODY)
-
-    items = news.content
-    videos = [i for i in items if isinstance(i, VideoContent)]
-    graphics = [i for i in items if isinstance(i, GraphicContent)]
-
-    # 视频块之后的「后文 / 尾文」不再静默丢失
-    assert _strs(items) == ["前文", "后文", "尾文"]
-    assert len(videos) == 1
-    assert videos[0].path_task.url == "https://example.com/v.mp4"
-    assert videos[0].cover is not None
-    assert videos[0].cover.url == "https://example.com/c.jpg"
-    assert len(graphics) == 1
-    assert graphics[0].path_task.url == "https://example.com/i.jpg"
-
-
-def test_buff_news_content_without_video_unchanged() -> None:
-    news = _make_news("<p>纯文本</p><img data-original='https://example.com/i.jpg'/>")
-    items = news.content
-    assert _strs(items) == ["纯文本"]
-    graphics = [i for i in items if isinstance(i, GraphicContent)]
-    assert len(graphics) == 1
 
 
 # ---------------------------------------------------------------- hupu
@@ -318,12 +257,10 @@ def test_hupu_bbs_and_comment_bindings_reach_patched_iter() -> None:
 def test_apply_vendor_patches_is_idempotent() -> None:
     vendor_patches.apply_vendor_patches()
     after_first = vendor_patches.mounted_points()
-    content = buff_news.News.content
     it = hupu_util._iter_media_and_text
     vendor_patches.apply_vendor_patches()
     # 挂载点清单不得因二次调用重复追加；承载对象引用不变（不得被二次挂载覆盖）
     assert vendor_patches.mounted_points() == after_first
-    assert buff_news.News.content is content
     assert hupu_util._iter_media_and_text is it
 
 
