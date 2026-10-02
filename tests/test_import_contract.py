@@ -96,7 +96,7 @@ VENDOR_IMPORT_WHITELIST: dict[str, frozenset[str]] = {
             "nonebot_plugin_parser_lite.utils.cookie",
         },
     ),
-    # vendor 运行态缺陷的桥内注入补丁（vendor 零修改铁律下的唯一修法）；
+    # vendor 运行态补丁与日志面重绑（vendor 零修改铁律下的唯一修法）；
     # 被复刻函数见 vendor_patches.py，上游修复后应移除对应补丁
     "vendor_patches": frozenset(
         {
@@ -104,9 +104,12 @@ VENDOR_IMPORT_WHITELIST: dict[str, frozenset[str]] = {
             "nonebot_plugin_parser_lite.data",
             "nonebot_plugin_parser_lite.parsers",
             "nonebot_plugin_parser_lite.parsers.base",
-            "nonebot_plugin_parser_lite.parsers.buff",
             "nonebot_plugin_parser_lite.parsers.hupu",
             "nonebot_plugin_parser_lite.parsers.kuwo",
+            # tieba/types 的模块级 LOG：日志面重绑到 astrbot.api logger
+            "nonebot_plugin_parser_lite.parsers.tieba",
+            # utils/log 模块属性重绑（vendor 全部模块的日志出口）
+            "nonebot_plugin_parser_lite.utils",
             "nonebot_plugin_parser_lite.utils.ffmpeg",
             "nonebot_plugin_parser_lite.utils.format",
         },

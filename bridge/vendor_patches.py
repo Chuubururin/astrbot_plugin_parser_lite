@@ -62,6 +62,27 @@ VENDOR_HUPU_ITER: Callable[[BeautifulSoup], Iterator[Any]] | None = None
 """挂载前留存的上游 ``_iter_media_and_text``；行为哨兵直接调用它，
 验证 str(None) 缺陷仍在（缺 src / 缺 poster 形状）。"""
 
+
+class _VendorLoggerBridge:
+    """vendor 日志面 → astrbot.api logger 的透传桥。
+
+    astrbot.api.logger 是按调用方模块帧路由的 proxy（_PluginContextLogger）：
+    本包装的 ``__getattr__`` 落在本桥模块内——桥与 vendor 同属插件包根
+    ``astrbot_plugin_parser_lite.*``，路由结果同为插件专属 logger。
+    ``success`` 是 vendor 调用面的 info 别名（上游 ParserLogger 语义），
+    宿主 logger 无此方法，在此折叠。
+    """
+
+    def __init__(self, astrbot_logger: Any) -> None:
+        self._astrbot_logger = astrbot_logger
+
+    def success(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._astrbot_logger.info(message, *args, **kwargs)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._astrbot_logger, item)
+
+
 VENDOR_HLS_PARAMS: tuple[str, ...] = ()
 """挂载前留存的上游 ``FFmpeg.download_hls_to_mp4`` 形参名（签名契约）。"""
 
@@ -136,6 +157,7 @@ def apply_vendor_patches() -> None:
     已成功的补丁下次调用跳过，失败项可重试。
     """
     for name, patcher in (
+        ("vendor_logging", _patch_vendor_logging),
         ("hupu_iter_media_and_text", _patch_hupu_iter_media_and_text),
         ("ffmpeg_hls", _patch_ffmpeg_hls_ssrf),
     ):
@@ -143,6 +165,26 @@ def apply_vendor_patches() -> None:
             continue
         patcher()
         _APPLIED.add(name)
+
+
+# ---------------------------------------------------------------- vendor 日志面
+
+
+def _patch_vendor_logging() -> None:
+    """vendor 日志面统一重绑到 astrbot.api logger。
+
+    上架规范要求插件日志必须且只能来自 astrbot.api logger（禁止内置
+    logging 模块）——vendor 的 ``utils/log.logger``（ParserLogger，携带
+    ``.success`` 别名，全部 vendor 模块经它输出）与 tieba 的模块级 ``LOG``
+    在桥内替换为透传包装，vendor 零修改约束下的日志面合规。重复赋值幂等。
+    """
+    from astrbot.api import logger as astrbot_logger
+
+    from ..vendor.nonebot_plugin_parser_lite.parsers.tieba import types as tieba_types
+    from ..vendor.nonebot_plugin_parser_lite.utils import log as vendor_log
+
+    vendor_log.logger = _VendorLoggerBridge(astrbot_logger)
+    tieba_types.LOG = _VendorLoggerBridge(astrbot_logger)
 
 
 # ---------------------------------------------------------------- hupu

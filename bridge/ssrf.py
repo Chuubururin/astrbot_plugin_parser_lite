@@ -47,7 +47,6 @@ import contextvars
 import functools
 import inspect
 import ipaddress
-import logging
 import socket
 import threading
 from dataclasses import dataclass
@@ -57,12 +56,11 @@ from urllib.parse import urljoin, urlsplit
 import anyio
 import httpcore
 import httpx
+from astrbot.api import logger
 from curl_cffi.const import CurlOpt
 
 # anyio 为 vendor 运行链硬依赖（nonebot2 与 render.py 均直接导入），无回退路径
 _offload = anyio.to_thread.run_sync
-
-logger = logging.getLogger(__name__)
 
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})

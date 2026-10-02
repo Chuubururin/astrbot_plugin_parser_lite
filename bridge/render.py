@@ -19,7 +19,6 @@ import base64
 import contextlib
 import hashlib
 import json
-import logging
 import mimetypes
 import re
 import uuid
@@ -32,6 +31,7 @@ from typing import Any, Literal, cast
 
 import qrcode
 from anyio import Path, to_thread
+from astrbot.api import logger
 from PIL import Image
 
 from ..vendor.nonebot_plugin_parser_lite.config import _nickname, pconfig
@@ -70,8 +70,6 @@ INLINE_DEGRADE_THRESHOLD = 2
 预算按 base64 后字节计，预算用尽等于剩余媒体全部缺图；缺 1~2 张图卡片仍
 可读，缺 3 张以上应整体降级，而不是发一张「一半是灰块」且毫无提示的卡。
 """
-
-logger = logging.getLogger(__name__)
 
 
 class InlineBudgetExceeded(RuntimeError):
