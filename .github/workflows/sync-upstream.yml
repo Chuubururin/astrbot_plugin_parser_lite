@@ -172,6 +172,9 @@ jobs:
         if: steps.roll.outputs.committed == 'true' && github.event.inputs.dry_run != 'true'
         run: |
           set -euo pipefail
+          # persist-credentials: false 下 git push 无凭证：gh 注入 credential
+          # helper（GH_TOKEN 限定本次运行，不落盘、不入日志）
+          gh auth setup-git
           FENCE='```'
           VERSION="$(python -c "import tomllib; print(tomllib.load(open('vendor/_upstream/pyproject.toml','rb'))['project']['version'])")"
           BRANCH="sync/upstream-v${VERSION}"
