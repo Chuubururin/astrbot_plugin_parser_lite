@@ -8,7 +8,6 @@
 import dataclasses as dcs
 from enum import IntEnum
 from functools import cached_property
-from astrbot.api import logger as _astrbot_logger
 import re
 from typing import Any, Generic, Protocol, SupportsIndex, TypeVar, overload
 
@@ -17,8 +16,7 @@ import yarl
 
 TypeFragment = TypeVar("TypeFragment")
 _IMAGEHASH_EXP = re.compile(r"/([a-z0-9]{32,})\.")
-# 上架合规日志层：模块级 LOG 重绑 astrbot.api logger（替代内置 logging
-# getLogger，roll 流水线自动应用，偏差声明见 utils/log.py）
+from astrbot.api import logger as _astrbot_logger
 LOG = _astrbot_logger
 
 
