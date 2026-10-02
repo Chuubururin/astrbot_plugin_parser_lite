@@ -1,6 +1,6 @@
 """生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
 
-数据源：vendor nonebot_plugin_parser_lite 1.3.8（第一层
+数据源：vendor nonebot_plugin_parser_lite 1.3.9rc1（第一层
 分析数据 vendor_analysis.json，scripts/analyze_vendor.py 从上游快照现场
 再生，不入库）。
 消费方：main.py —— 区分上游字段与桥自有字段，并在启动时告警陈旧配置键。
