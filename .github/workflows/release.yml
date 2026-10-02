@@ -113,6 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/verify_vendor.py
+          python scripts/audit_compliance.py
           python -m pytest -c config/pyproject.toml --rootdir=. -q
 
       - name: 构建插件 zip（显式白名单，杜绝发布物混入）

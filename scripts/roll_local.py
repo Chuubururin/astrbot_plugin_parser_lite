@@ -457,6 +457,17 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
 
     _rebuild_vendor(new_standalone)
     _apply_log_compliance()
+    # 上架合规门禁：上游新增违规在承接时即红（而非等市场审核反馈）
+    result = subprocess.run(
+        [sys.executable, "scripts/audit_compliance.py"], capture_output=True, text=True
+    )
+    print(result.stdout.strip())
+    if result.returncode != 0:
+        _fail(
+            "contract_red",
+            f"上架合规扫描失败（详见上方清单，规则见 scripts/audit_compliance.py）："
+            f"{result.stderr[-500:]}",
+        )
 
     result = subprocess.run(
         [sys.executable, "scripts/derive_requirements.py"], capture_output=True, text=True

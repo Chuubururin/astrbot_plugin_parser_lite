@@ -148,6 +148,8 @@ jobs:
           git -C .sync-work/upstream checkout -q "$STANDALONE"
       - name: vendor 三层校验（含上游逐字节比对）
         run: python scripts/verify_vendor.py
+      - name: 上架合规扫描（模拟 astr-plugin-reviewer 可机器化规则）
+        run: python scripts/audit_compliance.py
       # generate_config --check 依赖不入库的 vendor_analysis.json，CI 上改走
       # run_injection --offline --check（缺分析产物时回退现场分析，覆盖第二层
       # 生成工件与工作树逐字节一致）
