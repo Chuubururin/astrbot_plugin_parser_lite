@@ -64,6 +64,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # roll 的 git add/commit 需要 runner 侧提交身份：CI 上从未配置过——
+      # 此前的 roll 全部红在更早的契约层，首次走到提交层即暴露（issue #4）
+      - name: 配置 git 提交身份（roll 提交署名）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
