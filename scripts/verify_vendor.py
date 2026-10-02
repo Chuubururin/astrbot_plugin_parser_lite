@@ -41,6 +41,8 @@ def declared_dists() -> set[str]:
     for dist, mod in aliases.items():
         if dist in names:
             names.add(mod)
+    # 宿主本体：插件运行前提，等同已声明（上架合规日志层 import astrbot.api）
+    names.add("astrbot")
     return names
 
 
