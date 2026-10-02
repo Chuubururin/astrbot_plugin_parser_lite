@@ -77,6 +77,8 @@ jobs:
           set -euo pipefail
           case "${TAG_NAME}" in
             */*) echo "::error::tag 名含 '/'（${TAG_NAME}）会破坏发布物文件路径，请使用无斜杠 tag"; exit 1 ;;
+            v*) ;;
+            *) echo "::error::dispatch 发版必须填 tag_name（v 前缀 tag，如 v1.3.8）；留空仅限 push tag 通道——手动 dispatch 请在 Inputs 里填发布 tag，而非分支名"; exit 1 ;;
           esac
           # 「发布 tag 只能来自 promote 推进线」的机器判定。判据是 **tag 的
           # 提交 ∈ main 历史**（祖先），而非「= main 尖端」：尖端相等会误锁
