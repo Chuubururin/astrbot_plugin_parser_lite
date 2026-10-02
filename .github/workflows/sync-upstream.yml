@@ -179,13 +179,16 @@ jobs:
           VERSION="$(python -c "import tomllib; print(tomllib.load(open('vendor/_upstream/pyproject.toml','rb'))['project']['version'])")"
           BRANCH="sync/upstream-v${VERSION}"
           git checkout -q -b "$BRANCH"
-          # 幂等重放：同一版本已有 open PR（上次红后重试）则更新其 head，不重复开
+          # 幂等重放：分支是一次性 PR head（失败重跑时 roll 整树重建同内容，
+          # 上次运行还可能留下「push 成功但开 PR 失败」的孤儿分支），统一
+          # --force 覆盖为当前 run 的产出；同版本已有 open PR 则 head 更新
+          # 不重复开
           EXISTING="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
           if [ -n "$EXISTING" ]; then
-            git push --force-with-lease -q origin "$BRANCH"
+            git push --force -q origin "$BRANCH"
             echo "已更新 open PR #${EXISTING}（${BRANCH}）"
           else
-            git push -q origin "$BRANCH"
+            git push --force -q origin "$BRANCH"
             {
               echo "## 上游同步 v${VERSION}"
               echo ""
