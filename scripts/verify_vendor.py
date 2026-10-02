@@ -116,12 +116,23 @@ def check_upstream_consistency(violations: list[str]) -> bool:
         return False
     import filecmp
 
+    # 上架合规日志层（零修改铁律的唯一已声明例外）：这两个文件的偏差是
+    # roll 的 _apply_log_compliance 产出，豁免逐字节比对、断言改写在位
+    log_compliance_files = {
+        Path("utils/log.py"),
+        Path("parsers/tieba/types.py"),
+    }
     for py in VENDOR_PKG.rglob("*"):
         # __pycache__/ 是 import vendor 产生的字节码缓存（本地与 CI runner 都会
         # 写入），不属于快照内容，排除出逐字节比对
         if not py.is_file() or "__pycache__" in py.parts:
             continue
         rel = py.relative_to(VENDOR_PKG)
+        if rel in log_compliance_files:
+            text = py.read_text(encoding="utf-8")
+            if "import logging" in text or "from astrbot.api import logger" not in text:
+                violations.append(f"vendor 合规日志层漂移: {rel}")
+            continue
         ref = upstream_src / rel
         if not ref.is_file() or not filecmp.cmp(py, ref, shallow=False):
             violations.append(f"vendor 与上游不一致: {rel}")

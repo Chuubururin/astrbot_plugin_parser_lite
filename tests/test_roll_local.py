@@ -295,6 +295,9 @@ def _roll_harness(
     (vmeta / "pyproject.toml").write_text('[project]\nversion = "1.3.7"\n', encoding="utf-8")
     monkeypatch.setattr(roll, "STATE_PATH", state_path)
     monkeypatch.setattr(roll, "VENDOR_META", vmeta)
+    # 合规日志层落盘点随 harness 沙箱化（不触真实 .sync-work/vendor）
+    monkeypatch.setattr(roll, "VENDOR_PKG", tmp_path / "vpkg")
+    monkeypatch.setattr(roll, "_apply_log_compliance", lambda: None)
     # 契约红时 pytest-fail.log 必须落在沙箱而非真实 .sync-work 评审证据路径
     monkeypatch.setattr(roll, "PYTEST_FAIL_LOG", tmp_path / "pytest-fail.log")
     monkeypatch.setattr(roll.os, "chdir", lambda path: None)
@@ -408,6 +411,46 @@ def test_check_exit_code_zero_when_upstream_unchanged(
     monkeypatch.setattr(roll, "_ensure_clone", lambda: None)
     monkeypatch.setattr(roll, "_detect", lambda: (_SHA_A, _SHA_B, _SHA_A))
     assert roll.main(["--check"]) == 0
+
+
+# ---- 上架合规日志层：整树重建后的自动重应用 ----
+
+
+def test_apply_log_compliance_rewrites_and_fails_loud_on_drift(
+    roll: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """合规层改写两个 vendor 日志出口（logging 消失、astrbot logger 在位）；
+    上游文本漂移（锚点失配）时响亮失败而非静默跳过。"""
+    pkg = tmp_path / "pkg"
+    (pkg / "utils").mkdir(parents=True)
+    (pkg / "parsers" / "tieba").mkdir(parents=True)
+    (pkg / "utils" / "log.py").write_text(
+        '"""Logging adapter used by the standalone build."""\n\nimport logging\n\n\n'
+        "class ParserLogger(logging.LoggerAdapter):\n    def success(self, message, "
+        "*args, **kwargs) -> None:\n        self.info(message, *args, **kwargs)\n\n\n"
+        'logger = ParserLogger(logging.getLogger("nonebot_plugin_parser_lite"), {})\n',
+        encoding="utf-8",
+    )
+    (pkg / "parsers" / "tieba" / "types.py").write_text(
+        "import logging\nimport re\n\nLOG = logging.getLogger(__name__)\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(roll, "VENDOR_PKG", pkg)
+
+    roll._apply_log_compliance()
+
+    log_src = (pkg / "utils" / "log.py").read_text(encoding="utf-8")
+    assert "import logging" not in log_src
+    assert "from astrbot.api import logger" in log_src
+    types_src = (pkg / "parsers" / "tieba" / "types.py").read_text(encoding="utf-8")
+    assert "import logging" not in types_src
+    assert "LOG = _astrbot_logger" in types_src
+
+    # 锚点失配（上游改写文本漂移）→ 响亮失败
+    (pkg / "parsers" / "tieba" / "types.py").write_text(
+        "LOG = logging.getLogger('renamed')\n", encoding="utf-8"
+    )
+    with pytest.raises(SystemExit, match="锚点失配"):
+        roll._apply_log_compliance()
 
 
 # ---- L3：祖先校验门区分「非祖先」与「校验失败」----

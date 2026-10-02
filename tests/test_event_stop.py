@@ -12,10 +12,10 @@ RespondStage。
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import pytest
+from astrbot.api import logger as _test_logger
 
 pytest.importorskip("astrbot")
 
@@ -89,7 +89,7 @@ def _plugin_with_bot() -> tuple[Any, _RecordingBot]:
     from astrbot_plugin_parser_lite.main import ParserLitePlugin
 
     plugin = ParserLitePlugin.__new__(ParserLitePlugin)
-    plugin.logger = logging.getLogger("test.parser_lite")
+    plugin.logger = _test_logger
     return plugin, _RecordingBot()
 
 
@@ -167,7 +167,7 @@ def _run_terminate(
     monkeypatch.setattr(main_mod, "shutdown_runtime", fake_shutdown)
 
     plugin = main_mod.ParserLitePlugin.__new__(main_mod.ParserLitePlugin)
-    plugin.logger = logging.getLogger("test.parser_lite")
+    plugin.logger = _test_logger
     plugin._parser = _StubParser(raise_type_error=aclose_raises)
     asyncio.run(plugin.terminate())
     return calls["n"], main_mod._runtime_shutdown_done
@@ -197,7 +197,7 @@ def test_terminate_is_not_idempotent_unsafe_across_failure(
 
     def _fresh_plugin() -> Any:
         plugin = main_mod.ParserLitePlugin.__new__(main_mod.ParserLitePlugin)
-        plugin.logger = logging.getLogger("test.parser_lite")
+        plugin.logger = _test_logger
         # 两个实例都 aclose 失败，模拟 curl_cffi 的重复关闭
         plugin._parser = _StubParser(raise_type_error=True)
         return plugin

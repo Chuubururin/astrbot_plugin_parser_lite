@@ -106,10 +106,6 @@ VENDOR_IMPORT_WHITELIST: dict[str, frozenset[str]] = {
             "nonebot_plugin_parser_lite.parsers.base",
             "nonebot_plugin_parser_lite.parsers.hupu",
             "nonebot_plugin_parser_lite.parsers.kuwo",
-            # tieba/types 的模块级 LOG：日志面重绑到 astrbot.api logger
-            "nonebot_plugin_parser_lite.parsers.tieba",
-            # utils/log 模块属性重绑（vendor 全部模块的日志出口）
-            "nonebot_plugin_parser_lite.utils",
             "nonebot_plugin_parser_lite.utils.ffmpeg",
             "nonebot_plugin_parser_lite.utils.format",
         },

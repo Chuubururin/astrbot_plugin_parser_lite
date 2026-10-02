@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, cast
@@ -219,31 +218,44 @@ def test_dns_transient_failure_is_degradable(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 审计日志：拒绝事件必须留痕（异常传播链只体现安全终态，日志是运维侧
-# 「SSRF 拦了什么」的唯一入口，覆盖目标 URL 与拒绝原因）
+# 「SSRF 拦了什么」的唯一入口，覆盖目标 URL 与拒绝原因）。审计断言经
+# monkeypatch 替身收口——上架合规日志层下包内禁止内置 logging 模块，
+# caplog 的级别常量会重新引入该导入。
 # ---------------------------------------------------------------------------
 
-_SSRF_LOGGER = "astrbot_plugin_parser_lite.bridge.ssrf"
+
+class _RecordingLogger:
+    """ssrf logger 替身：拒绝告警落在消息清单里供断言（延迟格式化就地展开）。"""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def warning(self, message: str, *args, **kwargs) -> None:
+        self.messages.append(message % args if args else message)
 
 
-def test_blocked_url_is_audit_logged(caplog: pytest.LogCaptureFixture):
-    with (
-        caplog.at_level(logging.WARNING, logger=_SSRF_LOGGER),
-        pytest.raises(UrlBlockedError),
-    ):
+def _patch_audit_logger(monkeypatch: pytest.MonkeyPatch) -> _RecordingLogger:
+    fake = _RecordingLogger()
+    monkeypatch.setattr(ssrf, "logger", fake)
+    return fake
+
+
+def test_blocked_url_is_audit_logged(monkeypatch: pytest.MonkeyPatch):
+    fake = _patch_audit_logger(monkeypatch)
+    with pytest.raises(UrlBlockedError):
         validate_url("http://169.254.169.254/latest/meta-data/")
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("SSRF" in m and "169.254.169.254" in m for m in messages), (
-        f"拒绝事件未落审计日志：{messages}"
+    assert any("SSRF" in m and "169.254.169.254" in m for m in fake.messages), (
+        f"拒绝事件未落审计日志：{fake.messages}"
     )
 
 
-def test_allowed_url_is_not_audit_logged(caplog: pytest.LogCaptureFixture):
-    with caplog.at_level(logging.WARNING, logger=_SSRF_LOGGER):
-        validate_url("https://8.8.8.8")
-    assert not [r for r in caplog.records if "SSRF" in r.getMessage()], "放行请求不应产生审计噪音"
+def test_allowed_url_is_not_audit_logged(monkeypatch: pytest.MonkeyPatch):
+    fake = _patch_audit_logger(monkeypatch)
+    validate_url("https://8.8.8.8")
+    assert not fake.messages, "放行请求不应产生审计噪音"
 
 
-def test_backend_fallback_block_is_audit_logged(monkeypatch, caplog: pytest.LogCaptureFixture):
+def test_backend_fallback_block_is_audit_logged(monkeypatch: pytest.MonkeyPatch):
     """无预验证上下文的拨号路径（代理连接目标）拒绝时同样留痕。"""
     import socket
 
@@ -251,15 +263,12 @@ def test_backend_fallback_block_is_audit_logged(monkeypatch, caplog: pytest.LogC
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    fake = _patch_audit_logger(monkeypatch)
     backend = ssrf._PinnedNetworkBackend(httpcore.AsyncNetworkBackend())
-    with (
-        caplog.at_level(logging.WARNING, logger=_SSRF_LOGGER),
-        pytest.raises(UrlBlockedError),
-    ):
+    with pytest.raises(UrlBlockedError):
         _run(backend.connect_tcp("attacker.example.com", 443))
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("SSRF" in m and "attacker.example.com" in m for m in messages), (
-        f"拨号拒绝未落审计日志：{messages}"
+    assert any("SSRF" in m and "attacker.example.com" in m for m in fake.messages), (
+        f"拨号拒绝未落审计日志：{fake.messages}"
     )
 
 

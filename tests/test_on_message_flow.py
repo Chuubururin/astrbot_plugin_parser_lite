@@ -13,11 +13,11 @@ on_message 可直接以 async generator 驱动。
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 import pytest
+from astrbot.api import logger as _test_logger
 
 pytest.importorskip("astrbot")
 
@@ -127,7 +127,7 @@ def _make_plugin(
     parser: _FakeParser, config: dict[str, Any] | None = None
 ) -> main_mod.ParserLitePlugin:
     plugin = main_mod.ParserLitePlugin.__new__(main_mod.ParserLitePlugin)
-    plugin.logger = logging.getLogger("test.parser_lite")
+    plugin.logger = _test_logger
     plugin.config = {"plite_render": False, "plite_verbose_error": False, **(config or {})}
     plugin._parser = parser
     return plugin

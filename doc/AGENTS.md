@@ -87,7 +87,11 @@ Fresh-context PR → PR** 主线：
 
 ## 硬性约束（详见 CONTRIBUTING.md 第 4 节）
 
-- `vendor/` 是逐字节零修改的上游快照，**禁止任何工具格式化或手改**。
+- `vendor/` 是上游快照，**禁止任何工具格式化或手改**；唯一已声明例外为
+  上架合规日志层（`utils/log.py`、`parsers/tieba/types.py`——上架审核禁止
+  内置 logging 模块，由 roll 流水线的 `_apply_log_compliance` 在整树重建
+  后自动应用，`verify_vendor` 按同集合豁免并断言改写在位，人工不得另行
+  改动）。
 - `_conf_schema.json` / `bridge/gen_config.py` / `bridge/texts.py` / `bridge/render_params.py` /
   `templates/` / `metadata.yaml` / `README.md` 都是**生成工件**，改数据源或模板后
   跑 `python scripts/run_injection.py --offline` 再生，不要直接编辑。

@@ -195,29 +195,19 @@ async def test_kuwo_request_uses_clean_music_id(
     assert result.title == "歌名"
 
 
-# ---------------------------------------------------------------- vendor 日志面
+# ---------------------------------------------------------------- 快照合规日志层
 
 
-def test_vendor_logging_rebound_to_astrbot_logger() -> None:
-    """上架规范：插件与 vendor 日志面统一走 astrbot.api logger。
-
-    vendor 的 utils/log.logger 与 tieba 模块级 LOG 在桥内重绑为透传包装；
-    底层必须是 astrbot.api logger（宿主插件日志隔离的前提），且 vendor
-    调用面的 .success 别名可用。
-    """
-    from astrbot.api import logger as astrbot_logger
-    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.parsers.tieba import (
-        types as tieba_types,
-    )
-    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.utils import (
-        log as vendor_log,
-    )
-
-    vendor_patches.apply_vendor_patches()
-    assert vendor_log.logger._astrbot_logger is astrbot_logger
-    assert tieba_types.LOG._astrbot_logger is astrbot_logger
-    vendor_log.logger.success("smoke")  # vendor 调用面的 .success 别名不炸
-    tieba_types.LOG.info("smoke")
+def test_vendor_log_compliance_layer_in_place() -> None:
+    """上架合规日志层：vendor 的日志出口不得出现内置 logging（审核器扫
+    仓库全部 .py，logging 为硬规则）；roll 整树重建后由
+    _apply_log_compliance 自动重应用，本用例钉住改写在位。"""
+    log_src = _vendor_src("utils/log.py")
+    assert "import logging" not in log_src
+    assert "from astrbot.api import logger" in log_src
+    types_src = _vendor_src("parsers/tieba/types.py")
+    assert "logging.getLogger" not in types_src
+    assert "from astrbot.api import logger" in types_src
 
 
 # ---------------------------------------------------------------- hupu

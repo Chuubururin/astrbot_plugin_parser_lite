@@ -13,8 +13,7 @@ ParseResult → AstrBot 组件的**翻译**，不引入解析业务规则；R2 =
 AST 白名单（`VENDOR_CONSUMERS` 常量即本清单的真值源，增删模块须同步两处）。
 
 **vendored snapshot（vendor 快照）**
-`vendor/nonebot_plugin_parser_lite` —— 上游 standalone 分支的逐字节
-零修改副本。唯一升级方式是整树替换（0002），禁止 merge/patch。
+`vendor/nonebot_plugin_parser_lite` —— 上游 standalone 分支的快照。唯一升级方式是整树替换（0002），禁止 merge/patch。唯一已声明偏差为**上架合规日志层**：审核器扫仓库全部 .py 且 logging 为硬规则（插件日志必须且只能来自 astrbot.api logger），`utils/log.py` 与 `parsers/tieba/types.py` 由 roll 流水线的 `_apply_log_compliance` 在重建后自动改写（锚点失配响亮失败），`verify_vendor` 第 3 层按同集合豁免逐字节比对并断言改写在位。
 `vendor/_upstream/` 存上游发布产物副本，供逐字节审计与 requirements
 派生。
 

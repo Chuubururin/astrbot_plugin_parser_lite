@@ -60,6 +60,65 @@ from typing import NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = REPO_ROOT / ".github" / "sync-state.json"
+
+# 上架合规日志层：审核器扫仓库全部 .py 且 logging 为硬规则（插件日志必须
+# 且只能来自 astrbot.api logger，禁止内置 logging 模块）——整树重建后对
+# 两处 vendor 日志出口自动重应用改写。这是「vendor 零修改铁律」的唯一
+# 已声明例外：与上游的偏差恰为本常量与锚点替换的产出，verify_vendor 第 3
+# 层按同集合豁免逐字节比对并断言改写在位。
+_COMPLIANT_LOG_PY = '''"""Logging adapter used by the standalone build (AstrBot 上架合规版).
+
+上架规范要求插件日志必须且只能来自 astrbot.api logger（禁止内置 logging
+模块）。本文件与上游原版的偏差是已声明的快照合规层：由 roll 流水线在整树
+重建后自动应用（_apply_log_compliance），verify_vendor 按同集合豁免并断言
+改写在位。
+"""
+
+from astrbot.api import logger as _astrbot_logger
+
+
+class ParserLogger:
+    """vendor 调用面的日志适配（组合替代上游的 LoggerAdapter 继承）：
+
+    ``success`` 是 vendor 调用面的 info 别名，其余属性透传宿主 logger。
+    """
+
+    def __init__(self, base=None) -> None:
+        self._base = base if base is not None else _astrbot_logger
+
+    def success(self, message, *args, **kwargs) -> None:
+        self._base.info(message, *args, **kwargs)
+
+    def __getattr__(self, item):
+        return getattr(self._base, item)
+
+
+logger = ParserLogger(_astrbot_logger)
+'''
+
+
+def _apply_log_compliance() -> None:
+    """整树重建后应用 vendor 日志合规层（锚点失配即响亮失败）。"""
+    log_py = VENDOR_PKG / "utils" / "log.py"
+    log_py.write_text(_COMPLIANT_LOG_PY, encoding="utf-8")
+    types_py = VENDOR_PKG / "parsers" / "tieba" / "types.py"
+    src = types_py.read_text(encoding="utf-8")
+    for anchor, replacement in (
+        ("import logging\n", ""),
+        (
+            "LOG = logging.getLogger(__name__)",
+            "from astrbot.api import logger as _astrbot_logger\nLOG = _astrbot_logger",
+        ),
+    ):
+        if anchor not in src:
+            raise SystemExit(
+                "vendor 日志合规锚点失配：parsers/tieba/types.py 的上游文本已漂移，"
+                "请人工复核改写规则"
+            )
+        src = src.replace(anchor, replacement)
+    types_py.write_text(src, encoding="utf-8")
+
+
 # contract_red 时 pytest 完整输出落盘点（sync-upstream 诊断包取用）；
 # .sync-work 不入库
 PYTEST_FAIL_LOG = REPO_ROOT / ".sync-work" / "pytest-fail.log"
@@ -397,6 +456,7 @@ def _roll(new_standalone: str, new_main: str, old_standalone: str) -> None:
     old_short, new_short = old_standalone[:12], new_standalone[:12]
 
     _rebuild_vendor(new_standalone)
+    _apply_log_compliance()
 
     result = subprocess.run(
         [sys.executable, "scripts/derive_requirements.py"], capture_output=True, text=True
