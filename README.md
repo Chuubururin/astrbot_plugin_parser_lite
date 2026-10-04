@@ -52,12 +52,6 @@ standalone「复制目录」场景，AstrBot 用户无需操作：
 
 </div>
 
-> [!IMPORTANT]
->
-> 严禁将本项目用于任何非法用途
->
-> 由于使用不当造成的一切责任由使用者承担，本项目维护者无任何责任
-
 如果你需要不依赖 `nonebot2` 的插件，请切换到 [`standalone`](https://github.com/sokoko-org/nonebot-plugin-parser-lite/tree/standalone) 分支
 
 ## 📖 支持的平台
