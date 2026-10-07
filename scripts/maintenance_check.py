@@ -112,9 +112,11 @@ def junit_outcomes() -> dict[str, str]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "junit.xml"
+        # 命令走 {py} 占位符（token 级替换），junit 路径转 posix 斜杠——
+        # Windows 反斜杠路径内插进命令串会被 shlex 的 posix 规则当转义符吞掉
         result = _run(
-            f"{sys.executable} -m pytest -c config/pyproject.toml --rootdir=. -q "
-            f"-p no:cacheprovider --junit-xml={report}"
+            "{py} -m pytest -c config/pyproject.toml --rootdir=. -q "
+            f"-p no:cacheprovider --junit-xml={report.as_posix()}"
         )
         if not report.is_file():
             raise RuntimeError(
