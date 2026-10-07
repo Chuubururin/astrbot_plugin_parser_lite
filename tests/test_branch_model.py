@@ -743,3 +743,74 @@ def test_docs_describe_the_two_branch_model_only() -> None:
         assert "两条" in text or "两个长期分支" in text, (
             f"{path.name} 未明确声明本版只有两条长期分支"
         )
+
+
+# ==================================================== 同步 → 提权 → 发布 的续链
+#
+# GITHUB_TOKEN 的 push 与 bot 合并 PR 产生的 push 都不触发工作流（防循环规则），
+# 所以 dev 上的 promote 不会因 sync PR 合并而自醒。续链的唯一确定性入口是
+# dispatch（GITHUB_TOKEN 具备 actions: write），与 promote → release 同口径。
+# 两处派发缺一不可：本次运行内的续链覆盖「合并落在等待窗口内」的常规路径，
+# 补链步骤覆盖「合并发生在本次运行结束之后」——必需检查等人批准时窗口可达数小时。
+
+SYNC_PATH = WORKFLOWS / "sync-upstream.yml"
+PROMOTE_DISPATCH = "gh workflow run promote-dev-to-main.yml --ref dev"
+BOT_MERGE_NO_PUSH = "bot 合并 PR 产生的 push 同样不触发工作流"
+
+
+def _sync_steps() -> list[dict]:
+    return _load(SYNC_PATH)["jobs"]["sync"]["steps"]
+
+
+def test_sync_declares_actions_write_for_dispatch() -> None:
+    """dispatch promote 需要 actions: write。"""
+    perms = _load(SYNC_PATH)["jobs"]["sync"]["permissions"]
+    assert perms.get("actions") == "write", "缺 actions: write，dispatch promote 会 403"
+
+
+def test_sync_dispatches_promote_both_in_run_and_on_next_run() -> None:
+    """续链必须两处派发：本次运行内 + 下一次运行补链。
+
+    只有其一会漏：合并可能落在本次运行结束之后（必需检查等人批准时窗口长达数小时），
+    只做补链则常规路径要等到下一次 cron 才发版。
+    """
+    text = SYNC_PATH.read_text(encoding="utf-8")
+    assert text.count(PROMOTE_DISPATCH) >= 2, (
+        "续链派发点不足两处：需要「本次运行内」与「下一次运行补链」各一处"
+    )
+    names = [str(s.get("name", "")) for s in _sync_steps()]
+    assert any("补链" in n for n in names), "缺补链步骤（接手未提权的 dev 尖端）"
+
+
+def test_sync_backfill_only_dispatches_for_reserved_prefixes() -> None:
+    """补链只认 promote 契约的保留前缀，否则每次 cron 都空派发一次 promote。"""
+    body = next(str(s.get("run", "")) for s in _sync_steps() if "补链" in str(s.get("name", "")))
+    # case 模式里的 [merge] 必须整体加引号：裸写在 glob 中是字符类，会匹配 "merge"
+    assert "'[merge] sync:'" in body, "保留前缀模式必须整体加引号，否则 [merge] 被当字符类"
+    assert "'chore(release):'" in body, "缺 chore(release): 前缀分支"
+    assert "::notice::" in body, "非保留前缀时应给出可见的「不派发」说明，而非静默跳过"
+
+
+def test_sync_chain_wait_does_not_fail_the_roll() -> None:
+    """等不到合并只能告警，不得让 roll 红。
+
+    PR 已开、auto-merge 已挂时 roll 本身是成功的；必需检查红或等待批准属于「停在
+    原地等人」，红掉会误报成 roll 失败并开一张归错类的 Issue。
+    """
+    pr_step = next(
+        str(s.get("run", "")) for s in _sync_steps() if s.get("name") == "开 PR 并挂自动合并"
+    )
+    tail = pr_step.split("gh pr merge --squash --auto", 1)[1]
+    assert PROMOTE_DISPATCH in tail, "合并落地后必须派发 promote"
+    assert "::warning::" in tail, "窗口内未合并必须告警"
+    assert "exit 1" not in tail, "等不到合并不得让步骤失败（会误报 roll 红）"
+
+
+def test_sync_documents_why_the_chain_needs_dispatch() -> None:
+    """头注释写明续链存在的理由：bot 合并不产生 push 事件。
+
+    判据限定在 ``on:`` 之前的注释区：步骤内也提到同一事实，不限定则删掉头注释
+    仍会被步骤内那句话蒙混过关。
+    """
+    header = SYNC_PATH.read_text(encoding="utf-8").split("\non:", 1)[0]
+    assert BOT_MERGE_NO_PUSH in header, "头注释缺续链理由（bot 合并不发 push 事件）"

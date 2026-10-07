@@ -270,6 +270,20 @@ done
 **这是刻意的**：`main` 与 `dev` 是同一个提交，`dev` 上的 CI 已经跑过，再跑一遍纯属冗余。
 「`main` 是绿的」这一事实由 promote run 自身承载。
 
+同一个规则也覆盖 **bot 合并 PR 产生的 push**：sync PR 由 `GITHUB_TOKEN` 合并后，
+`dev` 上的 `ci` / `promote` 都不会自醒，版本会停在 `dev` 不提权不发布。所以
+`sync-upstream` 自己续链，两处 `gh workflow run promote-dev-to-main.yml --ref dev`：
+
+- **本次运行内**：挂上 auto-merge 后等一个有界窗口，合并落地即派发。等不到只告警
+  不判红——PR 已开、auto-merge 已挂，roll 本身是成功的，检查红或等待批准属于
+  「停在原地等人」。
+- **每次运行开头的补链**：`dev` 尖端与 `main` 不同、且尖端提交带保留前缀时派发。
+  合并可能落在上一次运行结束之后（必需检查等人批准时窗口可达数小时），只靠本次
+  运行内那处会漏。
+
+`GITHUB_TOKEN` 具备 `actions: write`，dispatch 是它可用的唯一续链口；
+`promote → release` 同此口径（见 §5.1）。
+
 ---
 
 ## 6. 合并规则一览

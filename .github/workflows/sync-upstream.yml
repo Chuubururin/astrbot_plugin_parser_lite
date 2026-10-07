@@ -17,8 +17,11 @@ name: sync-upstream
 #
 # 为什么必须走 PR 轨道而不是直推 dev：dev 开着 required_pull_request_reviews
 # （0 批准），GITHUB_TOKEN 的 Actions bot 无直推权；且 GITHUB_TOKEN 的 push
-# 不触发工作流，而 bot 合并 PR 属于 pull_request 串行事件，目标分支的 push
-# 工作流（ci/promote）会运行。
+# 不触发工作流。
+# bot 合并 PR 产生的 push 同样不触发工作流（防循环规则覆盖合并），dev 上的
+# promote 不会因此自醒，版本会停在 dev 不提权不发布。续链的唯一确定性入口是
+# dispatch（GITHUB_TOKEN 具备 actions: write），与 promote → release 同口径，
+# 见「补链 promote」与「开 PR 并挂自动合并」两步。
 #
 # cron 只从默认分支读定义（默认分支 = dev，见 doc/BRANCHING.md）。
 
@@ -57,6 +60,7 @@ jobs:
       contents: write # 推 sync/ 分支
       pull-requests: write # 开 PR + squash-merge
       issues: write # 失败通知（去重）
+      actions: write # dispatch promote 续链：bot 合并不发 push 事件，dispatch 是唯一确定性入口
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -70,6 +74,34 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # 补链：bot 合并 PR 不产生 push 事件，dev 上的 promote 不会自醒。合并可能
+      # 落在上一次运行结束之后（必需检查等人批准时窗口可达数小时），故每次运行
+      # 开头对账一次：dev 尖端是未提权的保留前缀提交就派发 promote。放在 roll
+      # 之前，本次 roll 红也不影响补链。只认保留前缀，普通提交派了也是空跑。
+      - name: 补链 promote（dev 尖端已合并未提权时）
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          DEV_TIP="$(gh api "repos/$REPO/commits/dev" --jq '.sha')"
+          MAIN_TIP="$(gh api "repos/$REPO/commits/main" --jq '.sha')"
+          if [ "$DEV_TIP" = "$MAIN_TIP" ]; then
+            echo "main 已跟上 dev（${DEV_TIP:0:8}），无需补链"
+            exit 0
+          fi
+          SUBJECT="$(gh api "repos/$REPO/commits/$DEV_TIP" --jq '.commit.message' | head -1)"
+          case "$SUBJECT" in
+            '[merge] sync:'*|'chore(release):'*)
+              echo "dev 尖端 ${DEV_TIP:0:8} 是未提权的保留前缀提交：$SUBJECT"
+              gh workflow run promote-dev-to-main.yml --ref dev
+              echo "补链：已派发 promote-dev-to-main（main ${MAIN_TIP:0:8} → dev ${DEV_TIP:0:8}）" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::notice::dev 尖端非保留前缀（$SUBJECT），按 promote 契约 main 不动，不派发"
+              ;;
+          esac
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -205,6 +237,33 @@ jobs:
           # required checks 全绿后由 GitHub 完成 squash-merge；红了停在原地等人
           gh pr merge --squash --auto "$BRANCH" || \
             echo "::warning::auto-merge 挂载失败，需人工检查 PR 状态"
+
+          # 续链：--auto 只是挂上，合并发生在必需检查全绿之后，而 bot 合并不产生
+          # push 事件，promote 不会自醒。这里等一个有界窗口，合并落地即派发
+          # promote（它再自动打 tag 并 dispatch release）。等不到不算 roll 失败：
+          # PR 已开、auto-merge 已挂，检查红或等待批准属于「停在原地等人」，由补链
+          # 步骤接手，故只告警——红掉会误报成 roll 失败并开一张归错类的 Issue。
+          if ! PR_NUMBER="$(gh pr view "$BRANCH" --json number --jq '.number' 2>/dev/null)"; then
+            echo "::warning::取不到 PR 编号，本次不续链；下一次 cron 的补链步骤会接手"
+          else
+            deadline=$(( $(date +%s) + 420 ))
+            merged=false
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              state="$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)"
+              if [ "$state" = "MERGED" ]; then
+                merged=true
+                break
+              fi
+              sleep 20
+            done
+            if [ "$merged" = true ]; then
+              gh workflow run promote-dev-to-main.yml --ref dev
+              echo "续链：PR #${PR_NUMBER} 已合并 → 已派发 promote-dev-to-main（tag 与 release 由其接续）" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::PR #${PR_NUMBER} 在 7 分钟窗口内未合并（CI 红或等待人工批准 CI）；本次不续链，下一次 cron 的补链步骤接手"
+              echo "PR #${PR_NUMBER} 已开且挂上 auto-merge，窗口内未合并——续链交给下一次运行的补链步骤" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
 
       - name: 失败通知（去重开 Issue + 诊断包）
         if: failure() && github.event.inputs.dry_run != 'true'
