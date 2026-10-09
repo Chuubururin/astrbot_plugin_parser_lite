@@ -1,9 +1,9 @@
 {
   "upstream_repo": "sokoko-org/nonebot-plugin-parser-lite",
   "upstream_branch": "standalone",
-  "upstream_version": "1.3.9rc2",
-  "main_sha": "270f8e75a9ee",
-  "standalone_sha": "36e7624650395f54a298eecbbc45fcafe54955c2",
-  "synced_at": "2026-10-06T11:26:05+00:00",
+  "upstream_version": "1.3.9rc3",
+  "main_sha": "248c7867c20a",
+  "standalone_sha": "4c8fe4dfb61d2f6be0efd04dba596a0c9e30cdd4",
+  "synced_at": "2026-10-09T11:27:36+00:00",
   "consecutive_failures": 0
 }
