@@ -20,6 +20,7 @@ import tomllib
 from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Literal
 
 import pytest
 import yaml
@@ -94,6 +95,27 @@ def test_analysis_unknown_type_fails_loudly(analyzer: ModuleType) -> None:
     """未知类型形态显式报错，而非静默产出错误分析产物。"""
     with pytest.raises(SystemExit, match="未知类型形态"):
         analyzer._shape(dict[str, int])
+
+
+def test_analysis_literal_maps_to_option_set(analyzer: ModuleType) -> None:
+    """``Literal[...]`` 归一为既有 enum 形态：面板要的是选项集，不是自由文本。
+
+    归一而非新增一种 kind，第二层的类型映射表（generate_config._astrbot_type）
+    才不需要跟着扩；可空包裹同样归一，可空性由 schema 侧的空默认表达。
+    """
+    assert analyzer._shape(Literal["jpeg", "webp"]) == {
+        "kind": "enum",
+        "value_kind": "string",
+        "options": ["jpeg", "webp"],
+    }
+    assert analyzer._shape(Literal[1, 2])["value_kind"] == "int"
+    assert analyzer._shape(Literal["a"] | None)["options"] == ["a"]
+
+
+def test_analysis_literal_mixed_scalars_fail_loudly(analyzer: ModuleType) -> None:
+    """选项不是同一种标量时响亮失败：混着映射会让面板存进上游拒收的值。"""
+    with pytest.raises(SystemExit, match="Literal"):
+        analyzer._shape(Literal["jpeg", 1])
 
 
 def test_analysis_missing_doc_fails_loudly(

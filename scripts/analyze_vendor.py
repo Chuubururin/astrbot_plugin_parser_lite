@@ -40,7 +40,7 @@ import tomllib
 from enum import Enum
 from pathlib import Path
 from types import UnionType
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Literal, Union, get_args, get_origin
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ANALYSIS_PATH = REPO_ROOT / "vendor_analysis.json"
@@ -136,6 +136,21 @@ def _shape(annotation: Any) -> dict[str, Any]:
             "value_kind": "string" if issubclass(annotation, str) else "int",
             "options": [e.value for e in annotation],
         }
+    if get_origin(annotation) is Literal:
+        # 归一到既有 enum 形态而非新增一种：面板要的是选项集，第二层的类型映射表
+        # 因此不需要跟着扩。选项必须是同一种标量——混着映射会让面板存进上游拒收的值。
+        args = get_args(annotation)
+        value_kinds = {type(arg) for arg in args}
+        if value_kinds == {str}:
+            value_kind = "string"
+        elif value_kinds == {int}:
+            value_kind = "int"
+        else:
+            raise SystemExit(
+                f"Literal 选项不是同一种标量（须全为 str 或全为 int），无法映射为面板选项集，"
+                f"请扩充 scripts/analyze_vendor.py：{annotation!r}",
+            )
+        return {"kind": "enum", "value_kind": value_kind, "options": list(args)}
     raise SystemExit(
         f"配置字段出现未知类型形态，请在 scripts/analyze_vendor.py 扩充分析规则：{annotation!r}",
     )
