@@ -127,6 +127,11 @@
         'default': 'False',
         'required': False,
       }),
+      'plite_render_format': dict({
+        'annotation': "typing.Literal['jpeg', 'webp']",
+        'default': "'webp'",
+        'required': False,
+      }),
       'plite_render_theme': dict({
         'annotation': "<class 'str'>",
         'default': "'default'",
