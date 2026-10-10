@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any
+from typing import Any, Literal
 
 from anyio import Path
 from pydantic import BaseModel, field_validator, model_validator
@@ -98,6 +98,8 @@ class Config(BaseModel):
     """哔哩哔哩 CDN 地区；支持 zh、en、ja、proxy 线路"""
     plite_bili_cdn_domain: str | None = None
     """自定义哔哩哔哩 CDN 域名，优先于地区配置"""
+    plite_render_format: Literal["jpeg", "webp"] = "webp"
+    """渲染图片格式，jpeg会丢失透明度但可能兼容性更好"""
 
     @field_validator("plite_download_command")
     @classmethod
@@ -299,6 +301,11 @@ class Config(BaseModel):
     def bili_cdn_domain(self) -> str | None:
         """自定义哔哩哔哩 CDN 域名"""
         return self.plite_bili_cdn_domain
+
+    @property
+    def render_format(self) -> Literal["jpeg", "webp"]:
+        """渲染图片格式"""
+        return self.plite_render_format
 
 
 # 初始化配置实例
