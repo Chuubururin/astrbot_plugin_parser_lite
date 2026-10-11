@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from astrbot.api import logger as _test_logger
 
@@ -54,6 +55,23 @@ class _RecordingBot:
 
     async def call_action(self, action: str, **kwargs) -> None:
         self.calls.append({"action": action, **kwargs})
+
+
+class _RecordingLogger:
+    """记录 warning/exception 的日志桩：把「落哪个日志级别」变成可断言的事实。"""
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+        self.exceptions: list[str] = []
+
+    def warning(self, msg: str, *args: Any) -> None:
+        self.warnings.append(msg % args if args else msg)
+
+    def exception(self, msg: str, *args: Any) -> None:
+        self.exceptions.append(msg % args if args else msg)
+
+    def __getattr__(self, name: str) -> Any:
+        return lambda *_a: None
 
 
 def _make_event(
@@ -259,6 +277,134 @@ async def test_unexpected_exception_fails_closed() -> None:
     bot = event.bot
     assert isinstance(bot, _RecordingBot)
     assert _emoji_ids(bot)[-1] == (EMOJI_MAP["fail"][0], True)
+
+
+def _upstream_status_error(
+    status_code: int = 500, path: str = "/api/getSongInfo"
+) -> httpx.HTTPStatusError:
+    """构造平台 API 的 raise_for_status 产物（vendor 各 parser 直接抛裸 httpx 异常）。"""
+    request = httpx.Request("POST", f"https://nextmusic.toubiec.cn{path}")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(
+        f"Server error '{status_code}'", request=request, response=response
+    )
+
+
+async def test_upstream_http_error_is_classified_as_warning() -> None:
+    """上游接口的 4xx/5xx 是上游状态，不是桥侧未知异常：WARN 一行，不落 ERROR 全栈。"""
+    plugin = _make_plugin(_FakeParser(parse_exc=_upstream_status_error()))
+    log = _RecordingLogger()
+    plugin.logger = log
+    event = _make_event(URL)
+
+    yielded = await _drive(plugin, event)
+
+    assert log.exceptions == [], "上游 HTTP 错误被当成未知异常处理（ERROR + 完整堆栈）"
+    assert len(log.warnings) == 1
+    assert "nextmusic.toubiec.cn" in log.warnings[0]
+    assert "500" in log.warnings[0]
+    assert yielded == [], "verbose_error 关闭时上游 HTTP 错误不得向用户发消息"
+    assert event.is_stopped()
+    bot = event.bot
+    assert isinstance(bot, _RecordingBot)
+    assert _emoji_ids(bot)[-1] == (EMOJI_MAP["fail"][0], True)
+
+
+async def test_upstream_detail_truncates_long_path() -> None:
+    """端点摘要的路径部分来自群里贴的链接，长度不可控——记日志前必须截断。"""
+    long_path = "/api/getSongInfo/" + "z" * 400 + "TAILEND"
+    plugin = _make_plugin(_FakeParser(parse_exc=_upstream_status_error(path=long_path)))
+    log = _RecordingLogger()
+    plugin.logger = log
+
+    await _drive(plugin, _make_event(URL))
+
+    assert len(log.warnings) == 1
+    line = log.warnings[0]
+    assert "TAILEND" not in line, "超长路径未截断，整段写进日志"
+    assert len(line) < 200, f"日志行随输入无限增长：len={len(line)}"
+
+
+async def test_upstream_error_user_text_has_no_path_echo() -> None:
+    """会话侧只回状态码：路径可能整段来自成员贴的链接，不得当作机器人发言回显。"""
+    plugin = _make_plugin(
+        _FakeParser(parse_exc=_upstream_status_error(502, path="/api/echo-MARKER-never-echo")),
+        config={"plite_verbose_error": True},
+    )
+    plugin.logger = _RecordingLogger()
+
+    yielded = await _drive(plugin, _make_event(URL))
+
+    assert len(yielded) == 1, "上游接口失败对用户完全静默"
+    result = yielded[0]
+    assert isinstance(result, MessageEventResult)
+    texts = [c.text for c in result.chain if isinstance(c, Comp.Plain)]
+    assert any("502" in t for t in texts)
+    assert all("echo-MARKER-never-echo" not in t for t in texts), (
+        f"把成员可控的 URL 路径回显进会话：{texts}"
+    )
+
+
+# ---- 即时媒体链的直发接线 ----
+
+
+async def _two_chain_send_result(*_a: Any) -> Any:
+    """替身 send_result：先产出一条单组件视频链，再产出一条文本链。"""
+    yield [Comp.Video(file="file:///tmp/v.mp4")]
+    yield [Comp.Plain(text="正文")]
+
+
+async def test_media_chain_is_direct_sent_and_never_yielded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """媒体链接管后不得再 yield——否则宿主二次发送，同一条视频发两遍。"""
+    sent: list[list[Any]] = []
+
+    async def spy(event: Any, comps: list[Any], **_kw: Any) -> bool:
+        sent.append(comps)
+        return True
+
+    monkeypatch.setattr(main_mod, "send_result", _two_chain_send_result)
+    monkeypatch.setattr(main_mod, "send_media_chain_with_retry", spy)
+
+    plugin = _make_plugin(_FakeParser())
+    event = _make_event(URL)
+
+    yielded = await _drive(plugin, event)
+
+    assert len(sent) == 1 and isinstance(sent[0][0], Comp.Video), "视频链未走直发"
+    assert len(yielded) == 1, "被直发的媒体链又 yield 了一次（会重复发送）"
+    result = yielded[0]
+    assert isinstance(result, MessageEventResult)
+    assert any(c.text == "正文" for c in result.chain if isinstance(c, Comp.Plain))
+    bot = event.bot
+    assert isinstance(bot, _RecordingBot)
+    assert _emoji_ids(bot)[-1] == (EMOJI_MAP["done"][0], True)
+
+
+async def test_media_send_exhaustion_ends_with_fail_reaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重试预算用尽：表情终态是 fail 而非 done，事件同样被阻断。"""
+
+    async def spy(event: Any, comps: list[Any], **_kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(main_mod, "send_result", _two_chain_send_result)
+    monkeypatch.setattr(main_mod, "send_media_chain_with_retry", spy)
+
+    plugin = _make_plugin(_FakeParser())
+    event = _make_event(URL)
+
+    yielded = await _drive(plugin, event)
+
+    assert len(yielded) == 1, "文本链仍应送达"
+    assert event.is_stopped()
+    bot = event.bot
+    assert isinstance(bot, _RecordingBot)
+    assert _emoji_ids(bot)[-1] == (EMOJI_MAP["fail"][0], True), (
+        "媒体没发出去却记 done——表情终态与事实不符"
+    )
 
 
 # ---- 入口过滤 ----

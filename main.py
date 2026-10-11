@@ -19,6 +19,7 @@ from pathlib import Path as SyncPath
 from typing import Any
 
 import astrbot.api.message_components as Comp
+import httpx
 from anyio import Path as AnyioPath
 from astrbot.api import AstrBotConfig, star
 from astrbot.api.event import AstrMessageEvent, filter
@@ -38,6 +39,8 @@ from .bridge.render import cache_or_render_image
 from .bridge.sender import (
     VIDEO_FILE_THRESHOLD_DEFAULT_MB,
     ask_lazy_download,
+    is_direct_send_media,
+    send_media_chain_with_retry,
     send_result,
     set_video_file_threshold_mb,
 )
@@ -163,6 +166,23 @@ def _stop_event(event: AstrMessageEvent) -> None:
     """
     event.stop_event()
     event.clear_result()
+
+
+_MAX_DETAIL_PATH_CHARS = 120
+"""上游端点摘要中路径部分的长度上限。路径由群成员贴的链接派生，长度不可控。"""
+
+
+def _upstream_status_detail(exc: httpx.HTTPStatusError) -> str:
+    """上游平台 API 的 HTTP 错误摘要（仅日志）：方法/端点/状态码三项。
+
+    不带响应体——上游错误页常是整段 HTML，且其中可能含上游侧的调用上下文；
+    端点与状态码已足以判断是接口挂了还是该资源不存在。路径按上限截断。
+    """
+    request = exc.request
+    path = request.url.path
+    if len(path) > _MAX_DETAIL_PATH_CHARS:
+        path = path[:_MAX_DETAIL_PATH_CHARS] + "..."
+    return f"{request.url.host}{path} {request.method} HTTP {exc.response.status_code}"
 
 
 class ParserLitePlugin(star.Star):
@@ -309,11 +329,21 @@ class ParserLitePlugin(star.Star):
                 if self._cfg("plite_verbose_error"):
                     yield event.plain_result(f"解析失败：{exc.message}")
                 return
+            except httpx.HTTPStatusError as exc:
+                # vendor 各平台 parser 对上游接口直接 raise_for_status：非 2xx 是「上游
+                # 返回了错误」，与 ParseException 同档收尾，不落下方未知异常分支。
+                self.logger.warning("上游接口返回错误: %s", _upstream_status_detail(exc))
+                await self._fail(event)
+                if self._cfg("plite_verbose_error"):
+                    # 会话侧只给状态码：端点路径整段来自成员贴的链接，不拿它当机器人发言
+                    yield event.plain_result(f"解析失败：{exc.response.status_code}")
+                return
             except Exception:
                 self.logger.exception("解析异常")
                 await self._fail(event)
                 return
 
+            media_failed = False
             try:
                 if self._cfg("plite_render"):
                     yield event.chain_result(await self._build_card_chain(result))
@@ -325,6 +355,12 @@ class ParserLitePlugin(star.Star):
                     settled = True
                     return
                 async for chain in send_result(result, event):
+                    if is_direct_send_media(chain):
+                        # 媒体链接管直发以换取重试；不再 yield——宿主对同一条链的二次
+                        # 发送会表现为视频发两遍
+                        if not await send_media_chain_with_retry(event, chain):
+                            media_failed = True
+                        continue
                     yield event.chain_result(chain)
             except UrlBlockedError as exc:
                 self.logger.warning("发送被 SSRF 守卫拒绝: %s", exc)
@@ -335,7 +371,8 @@ class ParserLitePlugin(star.Star):
                 await self._fail(event)
                 return
 
-            await self._react(event, "done")
+            # 重试耗尽的媒体记 fail：内容确有未送达，done 会与事实不符
+            await self._react(event, "fail" if media_failed else "done")
             _stop_event(event)
             settled = True
         finally:

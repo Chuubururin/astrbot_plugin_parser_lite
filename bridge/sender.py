@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import weakref
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path as SyncPath
@@ -611,6 +611,59 @@ async def _build_forward_segs(
     ordered.append(texts.REPOST_MARKER)
     ordered.extend(await build_nodes(repost))
     return ordered
+
+
+MEDIA_SEND_BACKOFF_SECONDS = (15, 45)
+"""媒体重试前的等待秒数序列，累计上界 60 秒。
+
+协议端上传抖动的恢复窗口是几十秒~分钟量级，两级退避刚好跨得进去；再放长就是任务队列
+的职责——在消息处理器里等分钟级会让表情挂满一分钟，还与成员自己重发撞成重复发送。
+"""
+
+MEDIA_SEND_ATTEMPTS = len(MEDIA_SEND_BACKOFF_SECONDS) + 1
+"""总尝试次数（含首次）。由退避序列长度推导——两个常量各改一半会在取退避秒数时
+抛 IndexError，而且只在发送失败的路径上抛，正常测试看不见。"""
+
+_DIRECT_SEND_MEDIA_COMPS = (Comp.Video, Comp.Record, Comp.File)
+"""即时媒体在 `_handle_immediate_media` 里各自独立成链的组件形态。"""
+
+
+def is_direct_send_media(comps: list[Comp.BaseMessageComponent]) -> bool:
+    """是否为接管直发的形态：只认单组件媒体链，文本/图片/混合链一律留给宿主。"""
+    return len(comps) == 1 and isinstance(comps[0], _DIRECT_SEND_MEDIA_COMPS)
+
+
+async def send_media_chain_with_retry(
+    event: AstrMessageEvent,
+    comps: list[Comp.BaseMessageComponent],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
+    """单组件媒体链直发 + 有限退避重试，返回是否送达。
+
+    必须直发才谈得上重试：媒体上传失败（协议端 highway 连接超时）被宿主 RespondStage
+    就地吞掉（`except Exception` → `logger.error`），插件从 yield 路径拿不到任何成败
+    信号。代价如实声明——这条链不经宿主发送，丢掉 before_sent_message 钩子、
+    path_Mapping（File）与分段回复节奏；t2i、超阈值转合并转发、@/引用装饰与内容安全
+    审核对纯媒体单组件链本就不生效。
+    """
+    for attempt in range(1, MEDIA_SEND_ATTEMPTS + 1):
+        if attempt > 1:
+            await sleep(MEDIA_SEND_BACKOFF_SECONDS[attempt - 2])
+        try:
+            await event.send(event.chain_result(comps))
+        except Exception as exc:
+            logger.warning(
+                "媒体发送失败（第 %d/%d 次）：%r",
+                attempt,
+                MEDIA_SEND_ATTEMPTS,
+                exc,
+            )
+            continue
+        if attempt > 1:
+            logger.warning("媒体第 %d 次尝试送达", attempt)
+        return True
+    return False
 
 
 async def send_result(

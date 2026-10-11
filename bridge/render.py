@@ -77,7 +77,8 @@ class InlineBudgetExceeded(RuntimeError):
 
 
 class RenderArtifactError(RuntimeError):
-    """渲染产物不可用（0 字节）：拒绝把它写进缓存或当成缓存命中。"""
+    """渲染产物不可用（非图片字节 / 0 字节 / 转换后非 JPEG）：拒绝写进缓存，
+    也拒绝被当成缓存命中，由调用方的降级路径接管。"""
 
 
 def base64_size(raw_size: int) -> int:
@@ -661,13 +662,25 @@ async def build_html(result: ParseResult, theme: Theme) -> str:
     return await to_thread.run_sync(_inline_css_sync, rendered)
 
 
+_T2I_IMAGE_MAGICS = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
+"""t2i 产物可接受的图片魔数：PNG（桥请求的 ``type``）与 JPEG。
+
+判定按字节而非按文件名——宿主 ``download_image_by_url`` 不校验响应状态码与
+内容类型，``save_temp_img`` 又把任何响应字节一律写成 ``.jpg`` 文件名，
+扩展名不承载格式信息，错误页也会以「渲染成功的路径」回到这里。
+"""
+
+
 async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> bytes:
-    """渲染结果卡片长图，返回 PNG 原始字节（上游 render_image 等价）。
+    """渲染结果卡片长图，返回 t2i 产出的图片字节（上游 render_image 等价）。
 
     两阶段渲染：桥内 jinja2（build_html）产出完整 HTML，再交给 AstrBot
     html_render 截图——远端 t2i 只接收最终 HTML 字符串（``{{ html }}``
     变量注入），渲染编排全在桥侧。renderer 为插件实例（Star 基类提供
     html_render 方法）。
+
+    产物字节先过形态校验，非图片即抛 ``RenderArtifactError``（由调用方降级
+    路径接管），不留给转换环节抛无信息的 UnidentifiedImageError。
     """
     html = await build_html(result, theme)
 
@@ -679,7 +692,16 @@ async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> b
     )
 
     # 读图为 anyio.Path 异步（内部 to_thread），不阻塞事件循环
-    return await Path(str(image_path)).read_bytes()
+    data = await Path(str(image_path)).read_bytes()
+    if not data.startswith(_T2I_IMAGE_MAGICS):
+        logger.warning(
+            "t2i 产物不是可识别图片（len=%d head=%r），拒绝当作渲染成功: %s",
+            len(data),
+            data[:64],
+            image_path,
+        )
+        raise RenderArtifactError("t2i artifact is not a recognizable image")
+    return data
 
 
 RENDER_CACHE_REV = "4"

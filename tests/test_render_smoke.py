@@ -385,6 +385,67 @@ async def test_cache_or_render_image_reuses_cache(tmp_path: Path, monkeypatch: A
     assert len(calls) == 1, "缓存命中仍触发 html_render——复用语义被破坏"
 
 
+async def test_cache_or_render_image_rejects_non_image_t2i_artifact(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """t2i 产物不是图片字节即响亮失败，而不是交给 PIL 抛出无信息的 UnidentifiedImageError。
+
+    宿主 download_image_by_url 不校验响应状态码与内容类型，错误页也落盘成
+    「渲染成功」返回路径，失败点于是漂到转换环节。
+    """
+    bad = tmp_path / "io_temp_img_1700000000_abcd1234.jpg"
+    bad.write_bytes(b"<html><head><title>502 Bad Gateway</title></head></html>")
+    calls: list[int] = []
+
+    class _RecordingLogger:
+        def __init__(self) -> None:
+            self.warnings: list[str] = []
+
+        def warning(self, msg: str, *args: Any) -> None:
+            self.warnings.append(msg % args if args else msg)
+
+        def __getattr__(self, name: str) -> Any:
+            return lambda *_a: None
+
+    log = _RecordingLogger()
+    monkeypatch.setattr(render, "logger", log)
+
+    with pytest.raises(render.RenderArtifactError):
+        await render.cache_or_render_image(
+            _result(url="https://www.bilibili.com/video/av-t2i-non-image"),
+            renderer=_ShotRenderer(bad, calls),
+        )
+
+    assert calls == [1], "html_render 未被调用，产物形态校验根本没被执行到"
+    # 诊断必须自带证据：拒绝把失败点漂到转换环节后，仅抛异常仍无法定位
+    # 远端到底返回了什么
+    assert any("502 Bad Gateway" in line for line in log.warnings), (
+        f"拒绝产物时未把产物字节头记入日志，故障仍不可定位：{log.warnings}"
+    )
+
+
+async def test_cache_or_render_image_accepts_jpeg_t2i_artifact(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """形态校验按字节判定，不误杀 JPEG 产物：宿主 save_temp_img 把任何响应字节
+    都写成 ``.jpg`` 文件名，扩展名不承载格式信息，校验也不得按请求的
+    ``type=png`` 收窄成只认 PNG。"""
+    shot = tmp_path / "io_temp_img_1700000001_ef012345.jpg"
+    shot.write_bytes(b"\xff\xd8\xff\xe0-fake-jpeg")
+    calls: list[int] = []
+
+    async def _fake_png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
+        return png_data
+
+    monkeypatch.setattr(render, "_png_to_jpeg", _fake_png_to_jpeg)
+    dest = await render.cache_or_render_image(
+        _result(url="https://www.bilibili.com/video/av-t2i-jpeg"),
+        renderer=_ShotRenderer(shot, calls),
+    )
+
+    assert await dest.read_bytes() == b"\xff\xd8\xff\xe0-fake-jpeg"
+
+
 # ---------------------------------------------------------------- 内联预算
 
 
