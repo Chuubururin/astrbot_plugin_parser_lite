@@ -452,3 +452,125 @@ async def test_immediate_video_zero_size_gate_with_anyio_path(tmp_path: Path) ->
     assert len(chains) == 1
     assert isinstance(chains[0][0], Comp.Plain)
     assert chains[0][0].text == texts.VIDEO_ZERO_SIZE
+
+
+# ---- 即时媒体链的直发退避重试 ----
+
+
+class _FlakyEvent:
+    """按脚本抛错的事件替身：模拟协议端上传失败（前 N 次抛，其后成功）。"""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.calls = 0
+        self.sent: list[Any] = []
+        self._fail_times = fail_times
+
+    def chain_result(self, comps: list[Any]) -> Any:
+        return comps
+
+    async def send(self, message: Any) -> None:
+        self.calls += 1
+        self.sent.append(message)
+        if self.calls <= self._fail_times:
+            raise RuntimeError(
+                "highway upload transport failed after 3 attempts: TCP connect timeout"
+            )
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def warning(self, msg: str, *args: Any) -> None:
+        self.warnings.append(msg % args if args else msg)
+
+    def __getattr__(self, name: str) -> Any:
+        return lambda *_a: None
+
+
+def _video_chain() -> list[Any]:
+    return [Comp.Video(file="file:///tmp/v.mp4")]
+
+
+def _recording_sleep(slept: list[float]) -> Any:
+    async def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    return _sleep
+
+
+def test_is_direct_send_media_covers_only_single_media_component() -> None:
+    """接管面只限单组件媒体链：文本/图片/混合链一律留给宿主。"""
+    assert sender.is_direct_send_media(_video_chain())
+    assert sender.is_direct_send_media([Comp.Record(file="file:///tmp/a.mp3")])
+    assert sender.is_direct_send_media([Comp.File(name="f.zip", file="/tmp/f.zip")])
+    # 反向：宿主后处理（t2i、转合并转发、@/引用、path_Mapping 之外的部分）只对
+    # 这些形态有意义，误接管会静默丢掉它们
+    assert not sender.is_direct_send_media([Comp.Plain(text="hi")])
+    assert not sender.is_direct_send_media([Comp.Image(file="file:///tmp/i.jpg")])
+    assert not sender.is_direct_send_media([Comp.Video(file="f"), Comp.Plain(text="t")])
+    assert not sender.is_direct_send_media([])
+
+
+async def test_direct_media_send_success_makes_no_extra_attempts() -> None:
+    event = _FlakyEvent(fail_times=0)
+    slept: list[float] = []
+
+    ok = await sender.send_media_chain_with_retry(
+        event, _video_chain(), sleep=_recording_sleep(slept)
+    )
+
+    assert ok
+    assert event.calls == 1, "首次成功仍重试——重复发送风险"
+    assert slept == [], "成功路径不得退避等待"
+
+
+async def test_direct_media_send_retries_into_success() -> None:
+    """上传抖动窗口内的一次重试就该救回来（这是本机制存在的全部理由）。"""
+    event = _FlakyEvent(fail_times=1)
+    slept: list[float] = []
+
+    ok = await sender.send_media_chain_with_retry(
+        event, _video_chain(), sleep=_recording_sleep(slept)
+    )
+
+    assert ok
+    assert event.calls == 2
+    assert slept == [sender.MEDIA_SEND_BACKOFF_SECONDS[0]]
+
+
+async def test_direct_media_send_gives_up_within_budget() -> None:
+    """预算封顶：次数与累计等待都有上界，不在消息处理器里等分钟级。"""
+    event = _FlakyEvent(fail_times=99)
+    slept: list[float] = []
+
+    ok = await sender.send_media_chain_with_retry(
+        event, _video_chain(), sleep=_recording_sleep(slept)
+    )
+
+    assert not ok
+    assert event.calls == sender.MEDIA_SEND_ATTEMPTS
+    assert slept, "退避序列为空——重试已被阉割成单次发送"
+    assert slept == list(sender.MEDIA_SEND_BACKOFF_SECONDS)
+    assert sum(slept) <= 60, f"最坏额外时延失控：{slept}"
+
+
+async def test_direct_media_send_logs_every_failed_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """放弃前每次失败都留一行 WARN（含次数与原因），运维面不依赖宿主那条 ERROR。"""
+    log = _RecordingLogger()
+    monkeypatch.setattr(sender, "logger", log)
+    event = _FlakyEvent(fail_times=99)
+
+    ok = await sender.send_media_chain_with_retry(event, _video_chain(), sleep=_recording_sleep([]))
+
+    assert not ok
+    assert len(log.warnings) == sender.MEDIA_SEND_ATTEMPTS
+    first = f"1/{sender.MEDIA_SEND_ATTEMPTS}"
+    last = f"{sender.MEDIA_SEND_ATTEMPTS}/{sender.MEDIA_SEND_ATTEMPTS}"
+    assert first in log.warnings[0]
+    assert last in log.warnings[-1]
+    assert all("TCP connect timeout" in line for line in log.warnings), (
+        f"失败原因未记入日志：{log.warnings}"
+    )
