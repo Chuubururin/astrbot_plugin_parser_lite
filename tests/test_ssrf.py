@@ -272,12 +272,23 @@ def test_backend_fallback_block_is_audit_logged(monkeypatch: pytest.MonkeyPatch)
     )
 
 
-class _FakeBaseBackend(httpcore.AsyncNetworkBackend):
-    """拨号桩：记录 dial 序列，可指定首个 IP 拒连（模拟故障转移）。"""
+_CONNECT_ERROR_SHAPES: dict[str, type[Exception]] = {
+    "timeout": httpcore.ConnectTimeout,
+    "refused": httpcore.ConnectError,
+    "raw-oserror": OSError,
+}
+"""拨号失败形状表，镜像 httpcore anyio 后端的 exc_map（``TimeoutError →
+ConnectTimeout``、``OSError → ConnectError``）。真实路径上 ``connect_tcp`` 只可能
+冒出包装后的前两类；裸 ``OSError`` 不是生产形状，只作兼容下限单独保留一条用例。"""
 
-    def __init__(self, fail_for: set[str] | None = None):
-        self.dials: list[str] = []
+
+class _FakeBaseBackend(httpcore.AsyncNetworkBackend):
+    """拨号桩：记录 (地址, 本次拨号超时) 序列，可指定若干地址按给定形状失败。"""
+
+    def __init__(self, fail_for: set[str] | None = None, shape: str = "timeout"):
+        self.dials: list[tuple[str, float | None]] = []
         self.fail_for = fail_for or set()
+        self.shape = shape
 
     # 桩签名须与 httpcore connect_tcp 一致，timeout 参数名不可改
     async def connect_tcp(
@@ -288,9 +299,9 @@ class _FakeBaseBackend(httpcore.AsyncNetworkBackend):
         local_address=None,
         socket_options=None,
     ):
-        self.dials.append(host)
+        self.dials.append((host, timeout))
         if host in self.fail_for:
-            raise OSError(f"connection refused: {host}")
+            raise _CONNECT_ERROR_SHAPES[self.shape](f"connect failed: {host}")
         return object()
 
 
@@ -311,21 +322,150 @@ def test_pinned_backend_dials_validated_ip(monkeypatch):
     with contextlib.suppress(Exception):  # 桩 stream 不支持后续 IO，仅看拨号序列
         _run(transport.handle_async_request(httpx.Request("GET", "http://attacker.example.com/")))
 
-    assert fake.dials == ["93.184.216.34"]  # 钉在 mock 解析出的 IP
+    assert fake.dials == [("93.184.216.34", None)]  # 钉在 mock 解析出的 IP
     assert ssrf._PINNED_IPS.get() is None  # 请求结束后上下文复位
 
 
 def test_pinned_backend_failover_in_validated_order():
-    """多 IP 故障转移：按校验顺序逐个尝试，与 curl RESOLVE 列表语义对齐。"""
+    """多 IP 故障转移：首个地址超时后继续拨校验列表里的下一个（生产形状）。"""
     base = _FakeBaseBackend(fail_for={"93.184.216.34"})
     backend = ssrf._PinnedNetworkBackend(base)
     token = ssrf._PINNED_IPS.set(["93.184.216.34", "8.8.8.8"])
     try:
-        stream = _run(backend.connect_tcp("example.com", 443))
+        stream = _run(backend.connect_tcp("example.com", 443, timeout=15.0))
     finally:
         ssrf._PINNED_IPS.reset(token)
-    assert base.dials == ["93.184.216.34", "8.8.8.8"]
+    assert [ip for ip, _ in base.dials] == ["93.184.216.34", "8.8.8.8"]
     assert stream is not None
+
+
+def test_pinned_backend_failover_on_connect_error():
+    """拒连同样转移：任一坏地址都不能单独决定整条请求的生死。"""
+    base = _FakeBaseBackend(fail_for={"93.184.216.34"}, shape="refused")
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(["93.184.216.34", "8.8.8.8"])
+    try:
+        stream = _run(backend.connect_tcp("example.com", 443, timeout=15.0))
+    finally:
+        ssrf._PINNED_IPS.reset(token)
+    assert [ip for ip, _ in base.dials] == ["93.184.216.34", "8.8.8.8"]
+    assert stream is not None
+
+
+def test_pinned_backend_failover_accepts_raw_oserror():
+    """兼容下限：裸 OSError（非 httpcore 形状，如第三方后端）同样触发转移。"""
+    base = _FakeBaseBackend(fail_for={"93.184.216.34"}, shape="raw-oserror")
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(["93.184.216.34", "8.8.8.8"])
+    try:
+        _run(backend.connect_tcp("example.com", 443, timeout=15.0))
+    finally:
+        ssrf._PINNED_IPS.reset(token)
+    assert [ip for ip, _ in base.dials] == ["93.184.216.34", "8.8.8.8"]
+
+
+def test_pinned_backend_failover_stays_inside_caller_timeout():
+    """总时长封顶：各次拨号分摊的超时之和不得超过调用方给的 connect 超时。
+
+    不封顶会把一次 15 秒失败放大成 N×15 秒的静默等待；分份后成员侧最坏等待
+    与单地址时同量级，覆盖面从 1 个地址变成整个已验证列表。
+    """
+    ips = ["93.184.216.34", "8.8.8.8", "1.1.1.1"]
+    base = _FakeBaseBackend(fail_for=set(ips))
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(ips)
+    try:
+        with pytest.raises(httpcore.ConnectTimeout):
+            _run(backend.connect_tcp("example.com", 443, timeout=15.0))
+    finally:
+        ssrf._PINNED_IPS.reset(token)
+    budgets = [t for _, t in base.dials]
+    assert len(budgets) == 3
+    assert all(budget is not None and budget > 0 for budget in budgets)
+    assert all(budget is not None and budget <= 15.0 for budget in budgets)
+    assert sum(budget for budget in budgets if budget is not None) <= 15.0 + 1e-6
+
+
+def test_pinned_backend_without_caller_timeout_passes_deadline_through():
+    """调用方未给 connect 超时：不做分份，None 原样传递，仍逐个尝试。"""
+    base = _FakeBaseBackend(fail_for={"93.184.216.34"})
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(["93.184.216.34", "8.8.8.8"])
+    try:
+        _run(backend.connect_tcp("example.com", 443))
+    finally:
+        ssrf._PINNED_IPS.reset(token)
+    assert [budget for _, budget in base.dials] == [None, None]
+
+
+def test_pinned_backend_with_zero_timeout_still_dials_once():
+    """connect 超时为 0：预算即刻耗尽，但首个地址仍须真拨一次、失败形状取自对端。
+
+    剩余时间判据若无条件生效，这里会在零次拨号时抛 AssertionError，把「超时」
+    伪装成「断言失败」，上层拿不到可分类的异常。
+    """
+    base = _FakeBaseBackend(fail_for={"93.184.216.34"})
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(["93.184.216.34", "8.8.8.8"])
+    try:
+        with pytest.raises(httpcore.ConnectTimeout):
+            _run(backend.connect_tcp("example.com", 443, timeout=0.0))
+    finally:
+        ssrf._PINNED_IPS.reset(token)
+    assert [ip for ip, _ in base.dials] == ["93.184.216.34"]
+    assert base.dials[0][1] == 0.0
+
+
+def test_pinned_backend_tries_at_most_the_resolve_channel_cap():
+    """尝试次数上限与 curl RESOLVE 通道同源，两条通道不得对同一域名给出不同可达性。"""
+    ips = [f"93.184.216.{i}" for i in range(1, 7)]
+    base = _FakeBaseBackend(fail_for=set(ips))
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(ips)
+    try:
+        with pytest.raises(httpcore.ConnectTimeout):
+            _run(backend.connect_tcp("example.com", 443, timeout=15.0))
+    finally:
+        ssrf._PINNED_IPS.reset(token)
+    assert [ip for ip, _ in base.dials] == ips[: ssrf._MAX_FAILOVER_IPS]
+
+
+def test_pinned_backend_reraises_last_failure():
+    """全失败时上抛最后一个错误：异常类型与信息交给上层按类型收尾。"""
+    ips = ["93.184.216.34", "8.8.8.8"]
+    base = _FakeBaseBackend(fail_for=set(ips))
+    backend = ssrf._PinnedNetworkBackend(base)
+    token = ssrf._PINNED_IPS.set(ips)
+    with pytest.raises(httpcore.ConnectTimeout) as excinfo:
+        try:
+            _run(backend.connect_tcp("example.com", 443, timeout=15.0))
+        finally:
+            ssrf._PINNED_IPS.reset(token)
+    assert str(excinfo.value) == "connect failed: 8.8.8.8"
+    assert len(base.dials) == 2
+
+
+def test_transport_failover_recovers_after_bad_first_ip(monkeypatch):
+    """端到端形状：经 _PinnedTransport 的请求，首个已验证地址失败后由第二个建成。"""
+    import socket
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    transport = ssrf._PinnedTransport()
+    fake = _FakeBaseBackend(fail_for={"93.184.216.34"})
+    backend = transport._pool._network_backend
+    assert isinstance(backend, ssrf._PinnedNetworkBackend)
+    backend._base = fake
+
+    with contextlib.suppress(Exception):  # 桩 stream 不支持后续 IO，仅看拨号序列
+        _run(transport.handle_async_request(httpx.Request("GET", "http://example.com/")))
+
+    assert [ip for ip, _ in fake.dials] == ["93.184.216.34", "8.8.8.8"]
 
 
 def test_pinned_backend_without_context_fails_closed(monkeypatch):

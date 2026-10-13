@@ -49,6 +49,7 @@ import inspect
 import ipaddress
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -226,6 +227,11 @@ def _resolve_pinned_fallback(host: str) -> list[str]:
         raise
 
 
+_MAX_FAILOVER_IPS = 4
+"""单请求最多尝试的已验证地址数，httpx 钉扎通道与 curl RESOLVE 通道共用同一上限：
+两条通道对同一域名必须给出同样的可达性判定，否则同一平台在两条面上时好时坏。"""
+
+
 class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
     """httpcore 网络后端包装：把 TCP 连接钉在已验证 IP 上，逐个尝试直至成功。
 
@@ -234,6 +240,9 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
     handle_async_request 预验证的 IP 集合（contextvar 传递，零二次解析），
     无预验证上下文（如代理连接目标）时现场解析并逐 IP 校验。无论哪条
     路径，拨号目标都只可能是已验证公网 IP。
+
+    逐地址尝试的时间份数由调用方的 connect 超时分摊：坏地址串行重试不得把
+    一次超时放大成 N 倍静默等待，最坏等待时长与只拨一个地址时同量级。
     """
 
     def __init__(self, base: httpcore.AsyncNetworkBackend) -> None:
@@ -257,18 +266,33 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
         # 回退解析内的 getaddrinfo 是阻塞调用，而 connect_tcp 跑在事件循环上：
         # 与 handle_async_request 同口径投线程池，DNS 慢/黑洞不冻结整个循环
         ips = pinned if pinned is not None else await _offload(_resolve_pinned_fallback, host)
+        targets = ips[:_MAX_FAILOVER_IPS]
+        deadline = None if timeout is None else time.monotonic() + timeout
+        share: float | None = None
+        if timeout is not None:
+            share = timeout / len(targets)
+
         last_error: Exception | None = None
-        for ip in ips:
+        for ip in targets:
+            attempt_timeout = timeout
+            if deadline is not None and share is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 and last_error is not None:
+                    break
+                attempt_timeout = min(max(remaining, 0.0), share)
             try:
                 return await self._base.connect_tcp(
                     ip,
                     port,
-                    timeout=timeout,
+                    timeout=attempt_timeout,
                     local_address=local_address,
                     socket_options=socket_options,
                 )
-            except OSError as exc:
-                last_error = exc  # 多 IP 故障转移：与 curl RESOLVE 列表语义对齐
+            except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                # 底层后端把连接失败包装成 ConnectError/ConnectTimeout（都不是
+                # OSError 的子类）：接不住就等于只拨第一个地址，坏地址单独决定
+                # 整条请求的生死。裸 OSError 保留给不走 httpcore 映射的后端。
+                last_error = exc
         assert last_error is not None
         raise last_error
 
@@ -341,7 +365,7 @@ def _publish_resolve_entries(validated: ValidatedUrl) -> list[str]:
     # 环境下表现为 curl 后端整体下载失败
     fresh = {
         f"{validated.host}:{validated.port}": [
-            (f"[{ip}]" if ":" in ip else ip) for ip in validated.ips[:4]
+            (f"[{ip}]" if ":" in ip else ip) for ip in validated.ips[:_MAX_FAILOVER_IPS]
         ]
     }
     with _CURL_OPTIONS_LOCK:
