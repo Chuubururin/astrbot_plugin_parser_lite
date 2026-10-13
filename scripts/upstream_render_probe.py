@@ -61,7 +61,7 @@ def _installed_render_sha256(render_mod: object) -> str:
     return hashlib.sha256(src.encode("utf-8")).hexdigest()
 
 
-_MUSIC_PLATFORMS = {"kugou", "netease", "kuwo", "qsmusic"}
+_MUSIC_PLATFORMS = {"kugou", "netease", "kuwo", "qsmusic", "qqmusic"}
 
 
 def _upstream_template_name(result: Any, templates_dir: Path) -> str:

@@ -65,12 +65,33 @@ GOLDEN_MATCHES: dict[str, tuple[str, ...]] = {
     ),
     "coolapk": ("https://www.coolapk.com/feed/12345678",),
     "linuxdo": ("https://linux.do/t/topic/123456",),
+    "ds": (
+        "https://ds.163.com/feed/6789abcdef0123456789",
+        "https://ds.163.com/article/6789abcdef0123456789",
+    ),
+    "taptap": (
+        "https://www.taptap.cn/moment/5678901234567890",
+        "https://www.taptap.cn/explore/5678901234567890",
+    ),
     "kugou": (
         "https://t1.kugou.com/1abcDEF",
         "https://www.kugou.com/mixsong/abcdef.html",
     ),
     "qsmusic": ("https://qishui.douyin.com/s/abcdef/",),
     "kuwo": ("https://www.kuwo.cn/play_detail/12345678",),
+    # QQ音乐：songmid 与 songid 是两条独立分支，路径正则与 params 两种形态都要采样；
+    # 样本取自 vendor 内 @handle 上方的原始注释 URL。
+    "qqmusic": (
+        "https://y.qq.com/n/ryqq_v2/songDetail/0039MnYb0qxYhV",
+        "https://y.qq.com/n/yqq/song/000Vk1cS3DV3FI.html",
+        "https://y.qq.com/n/ryqq_v2/songDetail/584161671",
+        "https://y.qq.com/n/yqq/song/584161671.html",
+        "https://i.y.qq.com/v8/playsong.html?songmid=0039MnYb0qxYhV",
+        "https://i.y.qq.com/v8/playsong.html?songid=496932669",
+        "https://i2.y.qq.com/n3/other/pages/playsong/index.html"
+        "?ADTAG=ryqq.songDetail&songmid=0039MnYb0qxYhV&songid=0&songtype=0",
+        "https://c6.y.qq.com/base/fcgi-bin/u?__=R8HMYy74qYwf",
+    ),
     # params 型：必需 query id（as_int）
     "duitang": (
         "https://www.duitang.com/blog?id=123456",
@@ -162,9 +183,9 @@ def test_empty_text_rejected(parser: Parser):
 
 # ---------------------------------------------------------------- 元测试
 
-# PlatformEnum 中存在、但 parsers/__init__.py::load_all() 尚未注册 parser 的成员。
-# 上游补齐注册后本常量与断言会自然变红，提示同步收紧。
-KNOWN_UNREGISTERED_ENUM_MEMBERS = frozenset({"ds", "taptap"})
+# WebUI 面板上可选、却永远不会被命中的平台集合（PlatformEnum 有成员，注册表无对应 parser）。
+# 必须为空：非空即意味着面板向用户提供一个静默失效的开关——链接收不到、也没有异常。
+KNOWN_UNREGISTERED_ENUM_MEMBERS: frozenset[str] = frozenset()
 
 
 def _matchable_platforms() -> set[str]:
@@ -219,7 +240,7 @@ def test_golden_covers_every_matchable_platform() -> None:
 def test_schema_platform_options_track_matchable_parsers() -> None:
     """元测试：schema 平台选项与可命中 parser 的差集必须恰为已知未注册枚举成员。
 
-    精确钉扎（而非「超集」）使双向漂移都可见：上游新增未注册枚举成员、
-    或补齐 ds/taptap 的注册，都会让本测试变红并要求人工复核。
+    精确钉扎（而非「超集」）使双向漂移都可见：上游新增未注册枚举成员会让差集变大，
+    补齐注册会让差集变小，两种都要求人工复核后同步收紧常量与黄金样本。
     """
     assert _schema_platform_options() - _matchable_platforms() == KNOWN_UNREGISTERED_ENUM_MEMBERS

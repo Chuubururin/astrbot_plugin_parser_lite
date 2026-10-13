@@ -380,3 +380,77 @@ def test_render_params_match_upstream_when_clone_present(extractor: ModuleType) 
     # QRCode 住在 render/context.py，只喂主树必然零命中。
     context_src = extractor.read_context_source(clone, revision)
     assert extractor.extract(fresh.stdout, context_src)["params"] == committed["params"]
+
+
+# ---- 防漂移：桥侧手抄的上游音乐平台集合 ----
+
+
+def _literal_members(source: str, *, name: str, where: str) -> set[str]:
+    """取源码里 ``name = frozenset({...})`` 的成员集合；形态一变即失败。"""
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        value = node.value
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            if value.func.id not in {"frozenset", "set"} or len(value.args) != 1:
+                break
+            value = value.args[0]
+        return {str(item) for item in ast.literal_eval(value)}
+    raise AssertionError(f"{where} 没有可读的 {name} 字面量集合，须同步本守护")
+
+
+def test_music_platform_mirror_matches_upstream_theme() -> None:
+    """手抄的上游音乐平台集合必须逐成员等于上游 ``render/theme.py`` 的同名常量。
+
+    上游 render 模块不进 standalone 树，这条镜像不随 roll 的注入面自动跟随；
+    音乐平台的卡面取值（封面归属）依赖它，少一个成员就是该平台静默按普通卡渲染。
+    """
+    clone = REPO_ROOT / ".sync-work" / "upstream"
+    if (
+        subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    ):
+        pytest.skip("无上游克隆（CI 无克隆），跳过镜像复检")
+
+    revision = json.loads(PARAMS_JSON_PATH.read_text(encoding="utf-8"))["source_revision"]
+    if (
+        subprocess.run(
+            ["git", "-C", str(clone), "cat-file", "-e", revision], capture_output=True, check=False
+        ).returncode
+        != 0
+    ):
+        pytest.skip("快照 source_revision 对象不在本地克隆，跳过镜像复检")
+
+    theme_src = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(clone),
+            "show",
+            f"{revision}:src/nonebot_plugin_parser_lite/render/theme.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if theme_src.returncode != 0:
+        pytest.fail(
+            f"上游 {revision[:12]} 已无 render/theme.py：MUSIC_PLATFORMS 的镜像源移动过，"
+            "须同步本守护与 bridge/render.py"
+        )
+    upstream = _literal_members(theme_src.stdout, name="MUSIC_PLATFORMS", where="上游 theme.py")
+
+    bridge_src = (REPO_ROOT / "bridge" / "render.py").read_text(encoding="utf-8")
+    probe_src = (REPO_ROOT / "scripts" / "upstream_render_probe.py").read_text(encoding="utf-8")
+    assert _literal_members(bridge_src, name="_MUSIC_PLATFORMS", where="bridge/render.py") == (
+        upstream
+    ), "bridge/render.py 的音乐平台镜像与上游不一致"
+    assert _literal_members(
+        probe_src, name="_MUSIC_PLATFORMS", where="scripts/upstream_render_probe.py"
+    ) == (upstream), "upstream_render_probe.py 的音乐平台镜像与上游不一致"

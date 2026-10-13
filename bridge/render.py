@@ -121,7 +121,7 @@ Theme = Literal["light", "dark"]
 
 TEMPLATES_DIR = SyncPath(__file__).resolve().parent.parent / "templates"
 
-_MUSIC_PLATFORMS = frozenset({"kugou", "netease", "kuwo", "qsmusic"})
+_MUSIC_PLATFORMS = frozenset({"kugou", "netease", "kuwo", "qsmusic", "qqmusic"})
 """镜像上游 render/theme.py ``MUSIC_PLATFORMS``（Theme API v1 模板选择规则）。"""
 
 _THEME_SCHEMA_VERSION = 1

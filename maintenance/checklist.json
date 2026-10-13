@@ -351,7 +351,7 @@
       "scope": [
         "tests/test_match_golden.py"
       ],
-      "diagnosis": "断言给出差集。左侧多出 = 上游新增未注册枚举成员；左侧变少 = 上游补齐了 ds/taptap 的注册",
+      "diagnosis": "断言给出差集。左侧多出 = 上游新增未注册枚举成员；左侧变少或集合变空 = 上游补齐了某平台的注册",
       "action": [
         "情形 A（新增未注册成员）：确认 parsers/ 下确无对应 parser 后，把平台名加入 KNOWN_UNREGISTERED_ENUM_MEMBERS",
         "情形 B（补齐注册）：从 KNOWN_UNREGISTERED_ENUM_MEMBERS 移除该平台，并按 MC-07 补黄金样本"
