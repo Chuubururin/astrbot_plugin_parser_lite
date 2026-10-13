@@ -3,7 +3,8 @@
 全部离线可跑（宿主 + 容器）：
 - 渲染链用 VideoContent(cover=None)（hupu 补丁新引入的取值分布）：vendor
   模板对视频只调 safe_src("get_cover_path")，None 走 PLACEHOLDER 降级，
-  不触发媒体下载；
+  不触发媒体下载；卡面数据面取媒体 size 与平台 logo 两处出站，在该用例的
+  下载器边界打桩；
 - 并发解析隔离走 result cache 预置 sentinel（与 test_workchains 同模式），
   缓存命中短路网络。
 """
@@ -11,7 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,6 +35,9 @@ from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.data import (
     PlatformEnum,
     VideoContent,
 )
+from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.download import (
+    DOWNLOADER,
+)
 from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.helper import UniHelper
 from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.parsers.hupu import (
     util as hupu_util,
@@ -40,6 +47,10 @@ from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.parsers.kuwo i
 )
 
 PLATFORM = Platform(name=PlatformEnum.HUPU, display_name="虎扑")
+
+_MINIMAL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 @pytest.fixture(autouse=True)
@@ -91,9 +102,25 @@ async def test_hupu_cover_none_flows_through_media_chain() -> None:
 # ---------------------------------------------------------------- 渲染链
 
 
-async def test_render_chain_with_patched_video_repost_and_qrcode() -> None:
+async def test_render_chain_with_patched_video_repost_and_qrcode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """补丁产出 + 转发递归 + 二维码 + max_comments 运行期求值，一次贯通。"""
     configure(plite_append_qrcode=True, plite_max_comments=1)
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(_MINIMAL_PNG)
+
+    async def fake_head_size(**kwargs: Any) -> int:
+        return 2048
+
+    async def fake_download_img(**kwargs: Any) -> Path:
+        return logo
+
+    # 卡面数据面有两处取远端字节：媒体 size 的 HEAD 探测与平台 logo 下载。二者都在
+    # 下载器边界打桩，本模块因此零出站（宿主机与容器同形，不受解析器返回什么影响）
+    monkeypatch.setattr(DOWNLOADER, "head_size", fake_head_size)
+    monkeypatch.setattr(DOWNLOADER, "download_img", fake_download_img)
     video = _hupu_video_without_cover()
     result = ParseResult(
         platform=PLATFORM,
@@ -118,8 +145,9 @@ async def test_render_chain_with_patched_video_repost_and_qrcode() -> None:
 
     assert "标题" in html and "前文" in html and "尾文" in html
     assert "转发帖" in html and "转发文本" in html
-    # append_qrcode 运行期生效：二维码 data URI 已内联
-    assert "data:image/png;base64," in html
+    # append_qrcode 运行期生效：二维码那张图本身就是内联 data URI（按模板的
+    # alt 标记定位，平台 logo 也内联为 data URI，不能只数出现与否）
+    assert re.search(r'data:image/png;base64,[^"]+"\s+alt="二维码"', html)
     # cover=None 走占位降级而非崩溃（补丁引入的取值分布）
     assert PLACEHOLDER_IMAGE in html
     # max_comments 运行期求值：只渲染 1 条评论
