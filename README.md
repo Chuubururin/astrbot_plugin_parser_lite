@@ -4,7 +4,7 @@
 
 # astrbot_plugin_parser_lite
 
-![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.9-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
+![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.10rc2-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
 
 [nonebot-plugin-parser-lite](https://github.com/sokoko-org/nonebot-plugin-parser-lite) 的
 AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接与 JSON 卡片，并转发为内容卡片。
@@ -13,7 +13,7 @@ AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平
 
 - **安装与更新**：AstrBot 插件市场安装，或 WebUI「插件」页上传发布 zip；手动部署的覆盖后重启
 - **配置**：WebUI 插件页共 36 个配置项（3 桥接 + 33 上游），保存后自动重载
-- **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.9），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
+- **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.10rc2），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
 - **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
 - **问题反馈**：[仓库 Issues](https://github.com/Chuubururin/astrbot_plugin_parser_lite/issues)，请附可复现的分享链接与 WebUI 日志
 
@@ -90,6 +90,7 @@ standalone「复制目录」场景，AstrBot 用户无需操作：
 | **酷狗音乐**   | ✅       | ❌         |
 | **汽水音乐**   | ✅       | ❌         |
 | **酷我音乐**   | ✅       | ❌         |
+| **QQ音乐**     | ✅       | ❌         |
 
 > 💡 **标识说明**
 >
@@ -304,6 +305,8 @@ plite_theme_dirs=[]
 plite_zhihu_ck="z_c0=xxxx"
 
 # [可选] linuxdo cookie, 部分帖子需要登录或有一定的阅读等级才可以查看
+# 首次成功请求后会把服务器更新的 Cookie 保存到插件配置目录 linuxdo_cookies.txt
+# 配置项非空时会优先使用它并补齐缓存；清空后才使用缓存文件
 plite_linuxdo_ck="xxxx"
 
 # [可选] X cookie, R18帖子和帖子翻译需要登录才可以查看
