@@ -178,9 +178,10 @@ def test_repo_artifacts_are_fresh(gen: ModuleType, analyzer: ModuleType) -> None
 def test_root_changelog_is_verbatim_mirror(gen: ModuleType, analyzer: ModuleType) -> None:
     """仓库根 CHANGELOG.md 是 doc/CHANGELOG.md 的机器镜像，且随注入流水线再生。
 
-    存在的理由：变更历史的通用落点是仓库根，而本仓库的权威文本在 doc/ 下；
-    手抄副本必然漂移，所以它进 build_artifacts（幂等 + --check + 新鲜度断言
-    一并生效），正文逐字直通，只在头部加一枚「勿手改」的生成件横幅。
+    存在的理由：宿主 dashboard 的 plugin_service.get_plugin_changelog 只在已安装插件
+    的根目录按固定文件名找它（找不到只在日志 warning），所以它必须进仓库根、进发布包；
+    而权威文本按维护契约归 doc/。手抄副本必然漂移，故它进 build_artifacts
+    （幂等 + --check + 新鲜度断言一并生效），正文逐字直通，只加一枚「勿手改」横幅。
     """
     source = (REPO_ROOT / "doc" / "CHANGELOG.md").read_text(encoding="utf-8")
     generated = gen.build_root_changelog()

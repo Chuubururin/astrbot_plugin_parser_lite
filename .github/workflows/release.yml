@@ -123,8 +123,11 @@ jobs:
           # 白名单 = main.py 的桥接导入闭包全量（config_sync/vendor_patches/texts/
           # render_params 均为运行时硬依赖，缺一即 ModuleNotFoundError）；
           # 闭包与白名单的一致性由 tests/test_release_manifest.py 机械钉扎
+          # README/logo/CHANGELOG 属宿主按固定文件名在插件根目录查找的展示件：
+          # CHANGELOG.md 是 doc/CHANGELOG.md 的生成镜像，dashboard 的
+          # plugin_service.get_plugin_changelog 只在安装目录读它，不进包即无消费者。
           cp -a metadata.yaml requirements.txt main.py bridge \
-                templates vendor _conf_schema.json README.md logo.png \
+                templates vendor _conf_schema.json README.md CHANGELOG.md logo.png \
                 dist/astrbot_plugin_parser_lite/
           cd dist
           zip -qr "../astrbot_plugin_parser_lite-${TAG_NAME}.zip" astrbot_plugin_parser_lite
@@ -153,6 +156,7 @@ jobs:
               "astrbot_plugin_parser_lite/bridge/render_params.py",
               "astrbot_plugin_parser_lite/bridge/gen_config.py",
               "astrbot_plugin_parser_lite/_conf_schema.json",
+              "astrbot_plugin_parser_lite/CHANGELOG.md",
               "astrbot_plugin_parser_lite/vendor/nonebot_plugin_parser_lite/__init__.py",
               "astrbot_plugin_parser_lite/logo.png",
           ]

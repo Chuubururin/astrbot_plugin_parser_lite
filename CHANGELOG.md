@@ -9,9 +9,10 @@ nonebot-plugin-parser-lite 对齐，桥内修复不独立 bump；上游解析能
 
 ## 2026-10-15
 
-- 变更历史现在有一份仓库根镜像 `CHANGELOG.md`（变更记录的通用落点）：内容由
-  `doc/CHANGELOG.md` 逐字复制、由两层注入流水线随其余工件一起再生，手改无效——
-  要改内容请改 `doc/CHANGELOG.md` 再跑 `scripts/run_injection.py`。
+- 插件详情页现在有「更新日志」：WebUI 读取**已安装插件根目录**的 `CHANGELOG.md`
+  （宿主按固定文件名查找，找不到只在日志里 warning）。该文件由 `doc/CHANGELOG.md`
+  逐字镜像生成、随注入流水线再生、并纳入发布 zip 白名单，手改镜像无效——要改内容请改
+  `doc/CHANGELOG.md` 再跑 `scripts/run_injection.py`。
 - 修复：上游同步管道自 2026-10-14 起持续失败——上游新增的可空配置项
   `plite_file_upload_timeout` 默认值为空，配置面板只能填具体数值，生成器据此响亮
   拒绝整条流水线。裁决改为「桥无实现面的上游开关不进面板」，逐项理由与守护见
