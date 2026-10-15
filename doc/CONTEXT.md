@@ -324,3 +324,31 @@ fail-closed 的形态是「守卫安装失败 → raise，宿主标插件初始�
 不建 metrics 埋点、不抽对外稳定 API 层——二者都没有消费者；测试直接引用
 桥内部函数是刻意的缝选择（钉真实风险面，见 `doc/AGENTS.md` 改动纪律 5），
 为「接口稳定」新增一层反而给每次 roll 制造待同步的契约。
+
+**面板开关的实现面**
+上游 `Config` 是「NoneBot 宿主语义」的超集：部分开关的读取点全在 standalone
+分支不发布的层（delivery 的 `message.send(_timeout=)`、render 的合并转发组合、
+matchers 的消息组装入口）。桥里没人读它们，放进面板就是给用户一个改了值既无
+效果、也无报错的假开关，故在 `scripts/generate_config.py` 的
+`PANEL_OMITTED_FIELDS` 登记「不进 WebUI 面板」并逐项写明理由。透传清单
+（`bridge/gen_config.py` 的 `VENDOR_FIELDS`）仍保持全量：存量配置键不会误报
+「已不被上游识别」，上游若把实现面搬进 standalone，用户已写的值即刻生效。
+
+当前 4 项裁决（README「桥接说明」的省略计数指向本节）：
+
+- `plite_file_upload_timeout`：空默认（未设置＝沿用宿主默认）在 AstrBot 面板没有
+  可表示形态，而把 0 当「未设置」更糟——上游判空用 `is not None`，0 会被读成
+  「已设置」，实现面一旦回到 standalone 就是 0 秒超时。其唯一读取点是 NoneBot
+  delivery 层；桥的媒体直发另有重试节奏（`MEDIA_SEND_BACKOFF_SECONDS`）。
+- `plite_render_format`：卡面图片格式由宿主 t2i 端点决定，桥只做 PNG→JPEG 的
+  体积转换，不存在 jpeg/webp 选择面。
+- `plite_summary_in_forward`：读取点在上游 NoneBot 消息组装入口（与本桥
+  `main.py` 对应的那一层）。桥固定按上游默认行为——渲染卡片单独发送、不并入
+  合并转发。
+- `plite_video_in_forward`：读取点在上游 render 层的转发组合。桥的转发组合固定
+  用视频封面图占位。
+
+腐化的两个方向都有执法：面板里的字段在 vendor/桥里没有读取点 → 假开关，
+`tests/test_config_panel.py` 判红；台账里的字段出现读取点 → 同一测试判红（须拆出
+台账回到面板），上游删掉字段 → 生成器的陈旧检查响亮失败。读取点判定含经由
+`@property` 的间接读取（`plite_need_upload` 这类兼容别名靠它才不被误判成死开关）。

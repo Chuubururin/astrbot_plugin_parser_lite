@@ -18,7 +18,7 @@ AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平
 ## 桥接说明（AstrBot 用户只需看本节）
 
 - **安装与更新**：AstrBot 插件市场安装，或 WebUI「插件」页上传发布 zip；手动部署的覆盖后重启
-- **配置**：WebUI 插件页共 {{ vendor_count + bridge_count }} 个配置项（{{ bridge_count }} 桥接 + {{ vendor_count }} 上游），保存后自动重载
+- **配置**：WebUI 插件页共 {{ vendor_count + bridge_count }} 个配置项（{{ bridge_count }} 桥接 + {{ vendor_count }} 上游），保存后自动重载；上游另有 {{ omitted_count }} 个开关的实现面在 NoneBot 宿主层、本桥没有对应行为，故不进面板（逐项理由见 `doc/CONTEXT.md`）
 - **版本与许可证**：随上游快照滚动自动再生（当前上游 v{{ upstream_version }}），与 release tag 锁步；许可证随上游（{{ upstream_meta.license }}），vendor 快照零修改
 - **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
 - **问题反馈**：[仓库 Issues]({{ meta.repo }}/issues)，请附可复现的分享链接与 WebUI 日志
