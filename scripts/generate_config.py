@@ -93,6 +93,41 @@ RANGE_NOTES: dict[str, str] = {
 # 这种同义重复，读起来像是两个不同来源的约束在打架。
 _DESC_UPPER_BOUND_RE = re.compile(r"[（(]\s*最大\s*(\d+)\s*[）)]")
 
+# 面板省略台账：上游 Config 里有、但在本桥的形态下没有实现面的字段——键为字段名，
+# 值为「为什么不进面板」的裁决理由。
+#
+# 存在的理由：AstrBot 面板上的每个开关必须有人读。这些字段的读取点全部落在
+# NoneBot 宿主层（delivery / render / matchers 的消息组装），standalone 分支发布时
+# 已把这些层剥离；放进面板就是给用户一个改了值既无效果、也无报错的假开关。
+# 反过来，把 `float | None = None` 这类空默认硬塞成 0 也更糟：上游判空用的是
+# `is not None`，0 会被当成「已设置」，一旦实现面回到 standalone 就是 0 秒超时。
+#
+# 只省略面板条目，**透传清单（gen_config.VENDOR_FIELDS）保持全量**：存量 WebUI
+# 配置键不会误报「已不被上游识别」，上游若把实现面搬进 standalone，用户已写的值
+# 即刻生效，无需改桥。
+#
+# 腐化两个方向都有守护（tests/test_config_panel.py 与本文件的陈旧检查）：字段在
+# vendor/桥里出现读取点 → 测试判红，须拆出台账；上游删字段 → 此处条目陈旧，
+# build_conf_schema 响亮失败。
+PANEL_OMITTED_FIELDS: dict[str, str] = {
+    "plite_file_upload_timeout": (
+        "空默认（未设置=沿用宿主默认）在面板无可表示形态；其唯一读取点是 NoneBot "
+        "delivery 层的 message.send(_timeout=)，该层不随 standalone 发布，桥的媒体"
+        "直发另有重试节奏"
+    ),
+    "plite_render_format": (
+        "渲染产物格式由宿主 t2i 端点决定，桥只做 PNG→JPEG 的体积转换，没有 jpeg/webp 选择面"
+    ),
+    "plite_summary_in_forward": (
+        "读取点在上游 NoneBot 消息组装入口（与本桥 main.py 对应的那一层），standalone "
+        "不发布该层；桥不把总结卡片并入合并转发"
+    ),
+    "plite_video_in_forward": (
+        "读取点在上游 render 层的合并转发组合逻辑，standalone 不发布该层；桥的转发组合"
+        "固定用视频封面图占位"
+    ),
+}
+
 ANALYSIS_PATH = REPO_ROOT / "vendor_analysis.json"
 SCHEMA_PATH = REPO_ROOT / "_conf_schema.json"
 GEN_CONFIG_PATH = REPO_ROOT / "bridge" / "gen_config.py"
@@ -290,11 +325,23 @@ def _default_value(name: str, field: dict[str, Any], astr_type: str) -> Any:
     if default is None:
         if astr_type == "string":
             return ""  # AstrBot 面板需要具体默认值；可空字符串统一表达为空串
+        # 非字符串的空默认没有诚实的面板形态（塞 0 会被上游的 `is not None`
+        # 当成「已设置」）。出路只有两条：上游补默认值，或桥裁决为不进面板
+        # （PANEL_OMITTED_FIELDS，附理由与被读取点守护）。
         raise SystemExit(
             f"上游字段 {name} 类型为 {astr_type} 但默认值为 null——面板需要具体默认值，"
-            "请在上游补默认值或扩充空值归一规则",
+            "请在上游补默认值，或在 PANEL_OMITTED_FIELDS 登记省略裁决并写明理由",
         )
     return default
+
+
+def _panel_vendor_fields(analysis: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """进面板的上游字段 = 分析产物 − 省略台账（保持分析产物的顺序）。"""
+    return {
+        name: field
+        for name, field in analysis["config_fields"].items()
+        if name not in PANEL_OMITTED_FIELDS
+    }
 
 
 def build_conf_schema(analysis: dict[str, Any] | None = None) -> str:
@@ -318,10 +365,18 @@ def build_conf_schema(analysis: dict[str, Any] | None = None) -> str:
         raise SystemExit(
             f"RANGE_NOTES 覆盖指向已不存在的上游字段 {sorted(stale_range_notes)}，请清理或改名",
         )
+    stale_omissions = set(PANEL_OMITTED_FIELDS) - set(vendor_fields)
+    if stale_omissions:
+        # 同 STRING_OPTIONS/RANGE_NOTES：台账指向已不存在的字段时不会咬到任何东西，
+        # 却会让人以为「这个字段已经处理过了」
+        raise SystemExit(
+            f"PANEL_OMITTED_FIELDS 指向已不存在的上游字段 {sorted(stale_omissions)}，"
+            "该省略裁决已作废，请拆净条目",
+        )
     schema: dict[str, dict[str, Any]] = {}
     for name, bridge_entry in BRIDGE_FIELDS.items():
         schema[name] = dict(bridge_entry)
-    for name, field in vendor_fields.items():
+    for name, field in _panel_vendor_fields(analysis).items():
         astr_type, options = _astrbot_type(field)
         if astr_type not in _ASTRBOT_TYPES:
             raise SystemExit(f"映射产生了非 AstrBot schema 类型 {astr_type!r}（字段 {name}）")
@@ -360,6 +415,7 @@ def build_gen_config(analysis: dict[str, Any] | None = None) -> str:
     return template.render(
         vendor_version=analysis["upstream_version"],
         vendor_fields=sorted(analysis["config_fields"]),
+        omitted=sorted(PANEL_OMITTED_FIELDS),
         bridge_fields=sorted(BRIDGE_FIELDS),
         # repr 保证布尔/整数/字符串默认值都渲染为合法 Python 字面量
         bridge_defaults={name: repr(spec["default"]) for name, spec in BRIDGE_FIELDS.items()},
@@ -449,8 +505,9 @@ def build_readme(analysis: dict[str, Any] | None = None) -> str:
         badges=_readme_badges(analysis),
         upstream_version=analysis["upstream_version"],
         upstream_meta=analysis["upstream_meta"],
-        vendor_count=len(analysis["config_fields"]),
+        vendor_count=len(_panel_vendor_fields(analysis)),
         bridge_count=len(BRIDGE_FIELDS),
+        omitted_count=len(PANEL_OMITTED_FIELDS),
     )
 
 

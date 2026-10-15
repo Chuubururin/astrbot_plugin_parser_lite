@@ -1,6 +1,6 @@
 """生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
 
-数据源：vendor nonebot_plugin_parser_lite 1.3.10rc2（第一层
+数据源：vendor nonebot_plugin_parser_lite 1.3.10rc4（第一层
 分析数据 vendor_analysis.json，scripts/analyze_vendor.py 从上游快照现场
 再生，不入库）。
 消费方：main.py —— 区分上游字段与桥自有字段，并在启动时告警陈旧配置键。
@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
-# 上游 Config 的全部 plite_* 字段（上游演进时随 roll 自动再生）
+# 上游 Config 的全部 plite_* 字段（上游演进时随 roll 自动再生）。
+# 其中 4 项不进 WebUI 面板（桥无实现面，逐项理由见
+# scripts/generate_config.py 的 PANEL_OMITTED_FIELDS），但仍在此透传
+# vendor configure()——存量配置键不误报陈旧，上游补上实现面时值即刻生效。
 VENDOR_FIELDS: frozenset[str] = frozenset(
     {
         "plite_append_qrcode",
@@ -23,6 +26,7 @@ VENDOR_FIELDS: frozenset[str] = frozenset(
         "plite_disabled_platforms",
         "plite_download_command",
         "plite_embed_url",
+        "plite_file_upload_timeout",
         "plite_forward_text_threshold",
         "plite_lazy_download",
         "plite_lazy_download_timeout",

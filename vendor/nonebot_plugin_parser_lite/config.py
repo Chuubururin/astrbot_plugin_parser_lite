@@ -41,6 +41,8 @@ class Config(BaseModel):
     """是否需要上传音频文件"""
     plite_need_upload_video: bool = False
     """是否需要上传视频文件"""
+    plite_file_upload_timeout: float | None = None
+    """文件发送的超时秒数，由适配器支持；未设置时沿用默认等待时间"""
     plite_use_base64: bool = False
     """是否使用 base64 编码发送图片，音频，视频"""
     plite_max_size: int = 90
@@ -148,6 +150,10 @@ class Config(BaseModel):
     def max_size(self) -> int:
         """资源最大大小(mb)"""
         return self.plite_max_size
+
+    @property
+    def file_upload_timeout(self) -> float | None:
+        return self.plite_file_upload_timeout
 
     @property
     def disabled_platforms(self) -> list[PlatformEnum]:

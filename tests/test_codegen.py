@@ -670,9 +670,11 @@ def test_display_texts_match_upstream_when_clone_present(extractor: ModuleType) 
 
 
 def test_schema_covers_all_vendor_fields(gen: ModuleType) -> None:
-    """schema 覆盖上游全部 plite_* 字段，类型合法、默认值与 pydantic 同源。"""
+    """schema 覆盖上游 plite_* 字段（省略台账除外），类型合法、默认值与 pydantic 同源。"""
     schema = json.loads((REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    vendor_names = {n for n in Config.model_fields if n.startswith("plite_")}
+    vendor_names = {n for n in Config.model_fields if n.startswith("plite_")} - set(
+        gen.PANEL_OMITTED_FIELDS
+    )
     missing = vendor_names - set(schema)
     assert not missing, f"schema 缺上游字段，请重跑生成器：{sorted(missing)}"
 
@@ -707,12 +709,12 @@ def test_enum_options_match_enum_members() -> None:
     )
 
 
-def test_schema_no_orphan_keys() -> None:
-    """schema 键集合 = 生成模块的 VENDOR_FIELDS ∪ BRIDGE_FIELDS（无孤儿键）。"""
+def test_schema_no_orphan_keys(gen: ModuleType) -> None:
+    """schema 键集合 = VENDOR_FIELDS − 省略台账 ∪ BRIDGE_FIELDS（无孤儿键）。"""
     from astrbot_plugin_parser_lite.bridge.gen_config import BRIDGE_FIELDS, VENDOR_FIELDS
 
     schema = json.loads((REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    assert set(schema) == set(VENDOR_FIELDS) | set(BRIDGE_FIELDS)
+    assert set(schema) == set(VENDOR_FIELDS) - set(gen.PANEL_OMITTED_FIELDS) | set(BRIDGE_FIELDS)
 
 
 def test_gen_config_module_is_pure_data() -> None:
