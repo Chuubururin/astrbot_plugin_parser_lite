@@ -157,17 +157,17 @@ def _patch_hupu_iter_media_and_text() -> None:
     from ..vendor.nonebot_plugin_parser_lite.utils.format import (
         HTML_NEWLINE_TAGS,
         anchor_text,
-        clean_blank,
         is_inside,
     )
 
     def _iter_media_and_text(
         soup: BeautifulSoup,
     ) -> Iterator[ContentItem | str]:
-        """复刻 _iter_media_and_text（上游 hupu/util.py，随 5b3d107 修复对齐）。
+        """复刻 _iter_media_and_text（上游 hupu/util.py，随上游逐行同源）。
 
         上游截断缺陷已修复（skip_parent 跳过已处理子树，不再 decompose），
-        复刻与上游新版逐行同源；差异仅两处 str(None) 补偿：
+        上游 rc4 又去掉了文本节点的空白清理（utils.format.clean_blank 删除）；
+        复刻与差异仅两处 str(None) 补偿：
         ①video 缺 src 时跳过（上游产出字面 "None" 视频 URL）；
         ②poster 缺失传 None（上游 str(None) 产出 "None" 封面 URL）。
         """
@@ -215,8 +215,9 @@ def _patch_hupu_iter_media_and_text() -> None:
                     continue
                 if anchor is not None:
                     continue
-                if text := clean_blank(str(element)):
-                    yield text
+                # 上游随 rc4 改为保留正文空白（utils.format.clean_blank 已删除），
+                # 复刻继续逐行同源
+                yield str(element)
 
     # parse_rich_content 按模块全局查找调用本函数，bbs/comment 的
     # from .util import parse_rich_content 绑定因此自动走到修复版

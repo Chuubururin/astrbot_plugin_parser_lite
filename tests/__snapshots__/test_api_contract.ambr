@@ -62,6 +62,11 @@
         'default': 'False',
         'required': False,
       }),
+      'plite_file_upload_timeout': dict({
+        'annotation': 'float | None',
+        'default': 'None',
+        'required': False,
+      }),
       'plite_forward_text_threshold': dict({
         'annotation': "<class 'int'>",
         'default': '1000',
