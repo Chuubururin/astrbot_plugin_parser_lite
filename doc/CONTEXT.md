@@ -86,7 +86,8 @@ diff 因此随 Issue 直达）、本地复现命令。目标：管道红的处�
 `scripts/run_injection.py`（单命令编排：四数据面提取→分析→生成）产出
 `_conf_schema.json`、`bridge/gen_config.py`、
 `metadata.yaml`（desc 为桥身份手写，许可证/版本随上游注入）、`README.md`（正文上游直通）、
-`bridge/texts.py`（桥显示文本）、`bridge/render_params.py`（桥渲染参数）与 `templates/`
+`CHANGELOG.md`（仓库根镜像，正文逐字复制 `doc/CHANGELOG.md`——变更记录的通用落点在仓库根，
+两头靠人记必然漂移，故由流水线复制、手改无效）、`bridge/texts.py`（桥显示文本）、`bridge/render_params.py`（桥渲染参数）与 `templates/`
 卡面模板族（逐字节再生），手写面仅桥身份（展示字段与兼容性徽章）与桥接说明，机械镜像面随上游演进
 自动再生（一次维护长期有效）。两层各自幂等（重生成 diff=0），由
 `tests/test_codegen.py` 与 `tests/test_render_templates.py` 守护；设计取舍

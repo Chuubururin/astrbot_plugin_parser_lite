@@ -140,6 +140,7 @@ ROLL_ADD_PATHS = (
     "bridge/texts.py",
     "bridge/render_params.py",
     "README.md",
+    "CHANGELOG.md",
     "templates",
     ".github/sync-state.json",
 )

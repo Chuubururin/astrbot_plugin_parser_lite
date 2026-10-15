@@ -69,6 +69,7 @@
         "bridge/render_params.py",
         "metadata.yaml",
         "README.md",
+        "CHANGELOG.md",
         "templates/"
       ],
       "why": "它们是两层注入的产物；手改会在下次 roll 被覆盖并触发幂等断言",

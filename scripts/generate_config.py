@@ -18,6 +18,9 @@
 - ``render_params.py``：桥渲染参数模块，值逐字来自上游 main 分支渲染模块
   提取（渲染参数注入层），render.py/main.py 的渲染/裁剪关键数值
   从这里消费；
+- ``CHANGELOG.md``：仓库根镜像，正文逐字来自 ``doc/CHANGELOG.md``（人书写、被维护
+  契约点名的历史落点）——生成这一份只为让「变更历史的通用落点（仓库根）」与权威
+  文本不漂移，本层不写任何内容；
 - ``templates/*``：卡面模板族（default/music/macros 与 CSS），**逐字节**
   来自上游 main 分支模板快照（模板数据面）——上游模板演进随
   roll 自动再生，不经过 Jinja 二次渲染、不做 EOF 归一化（模板字节的唯一
@@ -135,6 +138,10 @@ METADATA_PATH = REPO_ROOT / "metadata.yaml"
 README_PATH = REPO_ROOT / "README.md"
 TEXTS_PATH = REPO_ROOT / "bridge" / "texts.py"
 RENDER_PARAMS_PATH = REPO_ROOT / "bridge" / "render_params.py"
+# 变更历史的权威文本与它的仓库根镜像（镜像进装配点：幂等、--check 与新鲜度
+# 断言一并生效，手抄副本必然漂移）
+DOC_CHANGELOG_PATH = REPO_ROOT / "doc" / "CHANGELOG.md"
+ROOT_CHANGELOG_PATH = REPO_ROOT / "CHANGELOG.md"
 RENDER_TEMPLATES_DIR = REPO_ROOT / "templates"
 # 模板名防火墙的汇点复检副本（与 extract_render_templates / analyze_vendor
 # 各自独立实现——不共码是有意的；三处同集合由
@@ -574,6 +581,21 @@ def expected_template_names(analysis: dict[str, Any]) -> frozenset[str]:
     return frozenset(analysis["upstream_render_templates"]["files"]) | BRIDGE_TEMPLATE_EXTRAS
 
 
+def build_root_changelog() -> str:
+    """渲染仓库根 CHANGELOG.md（doc/CHANGELOG.md 的逐字镜像 + 生成件横幅）。
+
+    变更历史的通用落点是仓库根，而本仓库的权威文本在 doc/ 下（维护契约里点名的
+    历史落点）；两头都靠人记得写必然漂移，故根件由流水线复制，正文一字不改——
+    只加一枚横幅说明「改这里无效，去 doc/ 改」。
+    """
+    source = DOC_CHANGELOG_PATH.read_text(encoding="utf-8")
+    banner = (
+        "<!-- 生成文件：scripts/generate_config.py 从 doc/CHANGELOG.md 逐字镜像到仓库根，勿手改。\n"
+        "     权威文本在 doc/CHANGELOG.md：改那里，再跑 scripts/run_injection.py 再生本件。 -->\n\n"
+    )
+    return banner + source
+
+
 def build_artifacts(analysis: dict[str, Any]) -> dict[Path, str]:
     """组装全部派生工件——check、write 与测试共用的单一装配点。
 
@@ -588,6 +610,7 @@ def build_artifacts(analysis: dict[str, Any]) -> dict[Path, str]:
         README_PATH: build_readme(analysis),
         TEXTS_PATH: build_texts(analysis),
         RENDER_PARAMS_PATH: build_render_params(analysis),
+        ROOT_CHANGELOG_PATH: build_root_changelog(),
     }
     artifacts = {path: content.rstrip("\n") + "\n" for path, content in raw.items()}
     artifacts.update(build_template_files(analysis))
