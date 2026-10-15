@@ -30,15 +30,19 @@ PLUGIN_PACKAGE = PLUGIN_DIR.name
 BRIDGE_DIR = PLUGIN_DIR / "bridge"
 
 # 仓库根目录白名单（约定：根目录只承载入口与元数据文件）。
-# logo.png 是唯一的二进制例外：AstrBot 的 star_manager 把 logo 文件名硬编码
-# 为 ``logo.png`` 且只在插件根目录查找（找到后覆写 metadata.logo_path），
-# 位置不可改，故必须常驻根目录。
+# 两个位置由宿主硬编码、不可改，故必须常驻根目录：
+#   - logo.png：star_manager 把 logo 文件名硬编码为 ``logo.png`` 且只在插件根目录
+#     查找（找到后覆写 metadata.logo_path）；
+#   - CHANGELOG.md：dashboard 的 plugin_service.get_plugin_changelog 在已安装插件的
+#     根目录按固定文件名（CHANGELOG.md/changelog.md/CHANGELOG/changelog）查找并展示
+#     「更新日志」，找不到只在日志里 warning。本件是 doc/CHANGELOG.md 的生成镜像。
 ROOT_ALLOWED = frozenset(
     {
         ".gitignore",
         "CODE_OF_CONDUCT.md",
         "CONTRIBUTING.md",
         "README.md",
+        "CHANGELOG.md",
         "_conf_schema.json",
         "logo.png",
         "main.py",

@@ -27,6 +27,7 @@ _NON_PY_ENTRIES = (
     "vendor",
     "_conf_schema.json",
     "README.md",
+    "CHANGELOG.md",
     "logo.png",
 )
 
@@ -177,7 +178,19 @@ def test_release_whitelist_covers_non_py_entries() -> None:
 
 
 def test_zip_required_list_covers_non_py_entries() -> None:
-    """zip 结构断言 required 清单至少覆盖元数据/生成物/快照入口。"""
+    """zip 结构断言 required 清单至少覆盖元数据/生成物/快照入口。
+
+    CHANGELOG.md 在列的理由与 README/logo 同类：宿主 plugin_service 的
+    get_plugin_changelog 只在**已安装插件的根目录**按固定文件名找它，找不到就在
+    日志里 warning「has no changelog file」——文件进了 zip 才有消费者，躺在仓库根
+    对 AstrBot 用户没有任何效果。
+    """
     required = _required_section(RELEASE_YML.read_text(encoding="utf-8"))
-    for entry in ("metadata.yaml", "main.py", "bridge/gen_config.py", "_conf_schema.json"):
+    for entry in (
+        "metadata.yaml",
+        "main.py",
+        "bridge/gen_config.py",
+        "_conf_schema.json",
+        "CHANGELOG.md",
+    ):
         assert f"astrbot_plugin_parser_lite/{entry}" in required, f"zip 结构断言缺关键文件：{entry}"

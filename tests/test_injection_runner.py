@@ -41,11 +41,11 @@ def runner() -> ModuleType:
 def sandbox_repo(runner: ModuleType) -> Generator[Path]:
     """写入模式测试的沙箱仓库：生成工件与模板复制自真实仓库，重定向全部写目标。
 
-    run_injection 的写目标（gen 六工件 + templates/ prune + ANALYSIS_PATH）都是
+    run_injection 的写目标（gen 七工件 + templates/ prune + ANALYSIS_PATH）都是
     模块加载时由各自 REPO_ROOT 派生的常量；逐路径重定向到沙箱后
     runner.main(["--offline"]) 不再触碰真实工作树。读取面（vendor/_upstream/*.json、
-    templates/ 源）保持指向真实仓库——--check 的新鲜度语义因此不变。
-    手工保存/还原（monkeypatch 为函数作用域，不能用于模块级 fixture）。
+    templates/ 源、doc/CHANGELOG.md 镜像源）保持指向真实仓库——--check 的新鲜度语义
+    因此不变。手工保存/还原（monkeypatch 为函数作用域，不能用于模块级 fixture）。
 
     对称断言钉住「build_artifacts 的全部键都落在沙箱内」：若编排层将来新增
     写目标而本 fixture 未同步更新，此处先红（而不是悄悄写回真实工作树）。
@@ -56,6 +56,7 @@ def sandbox_repo(runner: ModuleType) -> Generator[Path]:
         "bridge/gen_config.py",
         "metadata.yaml",
         "README.md",
+        "CHANGELOG.md",
         "bridge/texts.py",
         "bridge/render_params.py",
     ):
@@ -72,6 +73,7 @@ def sandbox_repo(runner: ModuleType) -> Generator[Path]:
         (runner.gen, "GEN_CONFIG_PATH", sandbox / "gen_config.py"),
         (runner.gen, "METADATA_PATH", sandbox / "metadata.yaml"),
         (runner.gen, "README_PATH", sandbox / "README.md"),
+        (runner.gen, "ROOT_CHANGELOG_PATH", sandbox / "CHANGELOG.md"),
         (runner.gen, "TEXTS_PATH", sandbox / "texts.py"),
         (runner.gen, "RENDER_PARAMS_PATH", sandbox / "render_params.py"),
         (runner.gen, "RENDER_TEMPLATES_DIR", templates),
@@ -92,6 +94,7 @@ def sandbox_repo(runner: ModuleType) -> Generator[Path]:
                 "gen_config.py",
                 "metadata.yaml",
                 "README.md",
+                "CHANGELOG.md",
                 "texts.py",
                 "render_params.py",
             )

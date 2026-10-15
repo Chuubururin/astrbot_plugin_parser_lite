@@ -175,6 +175,49 @@ def test_repo_artifacts_are_fresh(gen: ModuleType, analyzer: ModuleType) -> None
         assert path.read_text(encoding="utf-8") == content
 
 
+def test_root_changelog_is_verbatim_mirror(gen: ModuleType, analyzer: ModuleType) -> None:
+    """仓库根 CHANGELOG.md 是 doc/CHANGELOG.md 的机器镜像，且随注入流水线再生。
+
+    存在的理由：宿主 dashboard 的 plugin_service.get_plugin_changelog 只在已安装插件
+    的根目录按固定文件名找它（找不到只在日志 warning），所以它必须进仓库根、进发布包；
+    而权威文本按维护契约归 doc/。手抄副本必然漂移，故它进 build_artifacts
+    （幂等 + --check + 新鲜度断言一并生效），正文逐字直通，只加一枚「勿手改」横幅。
+    """
+    source = (REPO_ROOT / "doc" / "CHANGELOG.md").read_text(encoding="utf-8")
+    generated = gen.build_root_changelog()
+    assert (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8") == generated
+    assert generated.endswith(source), "镜像正文必须逐字直通，不改写历史"
+    assert source in generated
+    assert "勿手改" in generated and "doc/CHANGELOG.md" in generated, "缺生成件横幅"
+    assert gen.build_root_changelog() == generated, "镜像再生不幂等"
+    analysis = json.loads(analyzer.build_analysis())
+    assert gen.ROOT_CHANGELOG_PATH in gen.build_artifacts(analysis), (
+        "镜像未进装配点（--check 咬不到）"
+    )
+
+
+def test_prohibited_edit_list_matches_generated_artifact_set(gen: ModuleType) -> None:
+    """维护清单 P-02 的「不得手工编辑」覆盖集 == 实际生成工件集合（模板目录折叠为一项）。
+
+    存在的理由：新增/移除派生工件时若不同步声明面，P-02 就成了「看起来管着、
+    其实管不到」的假保护——与本仓库拒绝假开关同一判据。
+    """
+    entries = json.loads((REPO_ROOT / "maintenance" / "checklist.json").read_text(encoding="utf-8"))
+    covers = next(
+        entry["covers"] for entry in entries["prohibited_actions"] if entry["id"] == "P-02"
+    )
+    analysis = json.loads(ANALYSIS_PATH.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for path in gen.build_artifacts(analysis):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        names.add("templates/" if relative.startswith("templates/") else relative)
+    declared = set(covers)
+    assert names == declared, (
+        f"生成工件集合与 P-02 声明不一致：仅工件有 {sorted(names - declared)}，"
+        f"仅声明有 {sorted(declared - names)}"
+    )
+
+
 def test_generator_consumes_analysis_only(gen: ModuleType) -> None:
     """第二层零 vendor 依赖：不 import 仓库包（分析只发生在第一层）。"""
     tree = ast.parse(GENERATOR_PATH.read_text(encoding="utf-8"))
