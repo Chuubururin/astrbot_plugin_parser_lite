@@ -37,7 +37,12 @@
         'default': '<BiliVideoQuality._1080P: 80>',
         'required': False,
       }),
-      'plite_blacklist_users': dict({
+      'plite_bsb_api_base': dict({
+        'annotation': 'str | None',
+        'default': 'None',
+        'required': False,
+      }),
+      'plite_bsb_categories': dict({
         'annotation': 'list[str]',
         'default': '[]',
         'required': False,
@@ -110,6 +115,16 @@
       'plite_max_size': dict({
         'annotation': "<class 'int'>",
         'default': '90',
+        'required': False,
+      }),
+      'plite_media_speedup_rules': dict({
+        'annotation': 'list[str]',
+        'default': '[]',
+        'required': False,
+      }),
+      'plite_media_transcode_concurrency': dict({
+        'annotation': "<class 'int'>",
+        'default': '1',
         'required': False,
       }),
       'plite_need_forward_contents': dict({

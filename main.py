@@ -268,6 +268,16 @@ class ParserLitePlugin(star.Star):
         """桥自有配置读取：缺省回落 BRIDGE_DEFAULTS（键字面量只写一次）。"""
         return self.config.get(key, BRIDGE_DEFAULTS[key])
 
+    def _blacklist_users(self) -> set[str]:
+        """黑名单成员集合；形态异常按「没有名单」处理，不按「逐字符匹配」处理。
+
+        桥自有字段不经 vendor pydantic 校验，面板里存的形态由宿主决定：把 `"u1"` 当
+        列表迭代就是逐字符比对（`u` 或 `1` 发链接都会被静默吞掉），把 None 交给
+        `set()` 则是 TypeError——两者都比「不拦截」糟。
+        """
+        raw = self._cfg("plite_blacklist_users")
+        return {str(item) for item in raw} if isinstance(raw, list | tuple) else set()
+
     async def terminate(self) -> None:
         global _runtime_shutdown_done
         # 顺序与置位时机都关键：shutdown_runtime 非幂等（curl_cffi
@@ -294,7 +304,7 @@ class ParserLitePlugin(star.Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         sender_id = str(event.get_sender_id())
-        if sender_id == str(event.get_self_id()) or sender_id in set(pconfig.blacklist_users):
+        if sender_id == str(event.get_self_id()) or sender_id in self._blacklist_users():
             return
 
         url = self._extract_url(event)

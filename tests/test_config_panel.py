@@ -123,14 +123,17 @@ def test_panel_field_set_is_upstream_minus_ledger(gen: ModuleType) -> None:
 
 
 def test_omitted_fields_state_a_reason_and_panel_has_no_dead_switch(gen: ModuleType) -> None:
-    """省略必须有理由；进面板的字段必须有读取点——面板上不存在静默失效的开关。"""
+    """省略必须有理由；面板上的每个开关必须有读取点——不分上游还是桥自有。
+
+    读取点判定对桥自有字段同样成立：开关换主人（例如上游删掉 `plite_blacklist_users`
+    后桥接手该字段）不改变「面板里不许有假开关」这条判据。
+    """
     for field, reason in gen.PANEL_OMITTED_FIELDS.items():
         assert len(reason) >= 20, f"{field} 的省略理由过于简略，无法支撑裁决"
 
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    panel_vendor_fields = set(schema) - set(gen.BRIDGE_FIELDS)
-    dead = sorted(name for name in panel_vendor_fields if not _readers(name))
-    assert not dead, f"面板上的字段在 vendor/桥里无人读取（假开关）：{dead}"
+    dead = sorted(name for name in schema if not _readers(name))
+    assert not dead, f"面板上的开关在 vendor/桥里无人读取（假开关）：{dead}"
 
 
 def test_omitted_fields_truly_have_no_reader(gen: ModuleType) -> None:
