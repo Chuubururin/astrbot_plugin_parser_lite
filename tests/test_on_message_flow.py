@@ -441,7 +441,11 @@ async def test_blacklisted_user_is_ignored() -> None:
     assert not event.is_stopped()
 
 
-@pytest.mark.parametrize("malformed", [None, "u1", 7, {"u1": True}], ids=["none", "str", "int", "dict"])
+@pytest.mark.parametrize(
+    "malformed",
+    [None, "u1", 7, {"u1": True}],
+    ids=["none", "str", "int", "dict"],
+)
 async def test_malformed_blacklist_neither_blocks_nor_crashes(malformed: Any) -> None:
     """黑名单值形态异常时按「没有名单」处理，不按「逐字符匹配」处理。
 
@@ -457,6 +461,22 @@ async def test_malformed_blacklist_neither_blocks_nor_crashes(malformed: Any) ->
 
     assert parser.matched_urls == [URL], f"畸形黑名单 {malformed!r} 不该拦截消息"
     assert yielded != []
+
+
+def test_blacklist_coercion_does_not_iterate_a_bare_string() -> None:
+    """收口的两条判据：整体形态（字符串不是列表）与元素形态（数字转字符串）。
+
+    `{str(x) for x in "u1"}` 会产出 {"u", "1"}——正好命中一个 id 为 "1" 的成员并把他的
+    链接静默吞掉；这类「看起来在拦截、其实在逐字符比对」的形态必须当场拒掉。
+    """
+    bare = _make_plugin(_FakeParser(), config={"plite_blacklist_users": "u1"})
+    assert bare._blacklist_users() == set()
+
+    mixed = _make_plugin(_FakeParser(), config={"plite_blacklist_users": ["u1", 2]})
+    assert mixed._blacklist_users() == {"u1", "2"}
+
+    keyed = _make_plugin(_FakeParser(), config={"plite_blacklist_users": {"u1": True}})
+    assert keyed._blacklist_users() == set()
 
 
 async def test_self_message_is_ignored() -> None:
