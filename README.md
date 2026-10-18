@@ -4,7 +4,7 @@
 
 # astrbot_plugin_parser_lite
 
-![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.10rc4-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
+![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue) ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28%2C%3C5-blue) [![license](https://img.shields.io/badge/license-MIT-yellow)](https://github.com/sokoko-org/nonebot-plugin-parser-lite) [![upstream](https://img.shields.io/badge/upstream-v1.3.10rc5-informational)](https://github.com/sokoko-org/nonebot-plugin-parser-lite/releases)
 
 [nonebot-plugin-parser-lite](https://github.com/sokoko-org/nonebot-plugin-parser-lite) 的
 AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平台的分享链接与 JSON 卡片，并转发为内容卡片。
@@ -12,8 +12,8 @@ AstrBot 桥接插件：在 QQ 群聊中自动解析 B 站/抖音/小红书等平
 ## 桥接说明（AstrBot 用户只需看本节）
 
 - **安装与更新**：AstrBot 插件市场安装，或 WebUI「插件」页上传发布 zip；手动部署的覆盖后重启
-- **配置**：WebUI 插件页共 33 个配置项（3 桥接 + 30 上游），保存后自动重载；上游另有 4 个开关的实现面在 NoneBot 宿主层、本桥没有对应行为，故不进面板（逐项理由见 `doc/CONTEXT.md`）
-- **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.10rc4），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
+- **配置**：WebUI 插件页共 37 个配置项（4 桥接 + 33 上游），保存后自动重载；上游另有 4 个开关的实现面在 NoneBot 宿主层、本桥没有对应行为，故不进面板（逐项理由见 `doc/CONTEXT.md`）
+- **版本与许可证**：随上游快照滚动自动再生（当前上游 v1.3.10rc5），与 release tag 锁步；许可证随上游（MIT），vendor 快照零修改
 - **架构与滚动同步机制**：见仓库 `doc/CONTEXT.md`（两层注入与各数据面的术语定义）
 - **问题反馈**：[仓库 Issues](https://github.com/Chuubururin/astrbot_plugin_parser_lite/issues)，请附可复现的分享链接与 WebUI 日志
 
@@ -239,10 +239,6 @@ plite_max_size=90
 # "rednote", "taptap", "tieba", "weibo", "wmpvp", "x", "zhihu", "zlb"]
 plite_disabled_platforms=["x"]
 
-# [可选] 黑名单用户列表
-# 示例 plite_blacklist=["QQClient_123456"]
-plite_blacklist_users=[]
-
 # [可选] 是否在解析结果中附加原始URL
 plite_append_url=False
 
@@ -317,18 +313,35 @@ plite_x_ck="auth_token=xxx"
 
 # [可选] 渲染图片格式，jpeg会丢失透明度但可能兼容性更好，仅建议在默认格式无法发送时更改
 plite_render_format="webp"
+
+# [可选] 媒体倍速规则，格式 `平台:作者id:倍速`
+# 示例 plite_media_speedup_rules=["bilibili:123456:1.25"] 表示该 UP 主的音视频以 1.25 倍速发送
+plite_media_speedup_rules=[]
+
+# [可选] 媒体倍速并发操作数
+plite_media_transcode_concurrency=1
+
+# [可选] 哔哩哔哩空降服务地址, wiki: https://github.com/hanydd/BilibiliSponsorBlock/wiki/API
+# 留空表示不启用
+plite_bsb_api_base=""
+
+# [可选] 参与裁切的片段分类，配置了空降服务地址时必填
+# 可选分类参考服务器提供者提供的分类列表
+plite_bsb_categories=[]
 ```
 
 </details>
 
 ## 🎉 使用
 
-|   指令   |          参数           |         权限          | 需要@ | 范围 |       说明        |
-| :------: | :---------------------: | :-------------------: | :---: | :--: | :---------------: |
-| 开启解析 |            -            | SUPERUSER/OWNER/ADMIN |  是   | 全部 |     开启解析      |
-| 关闭解析 |            -            | SUPERUSER/OWNER/ADMIN |  是   | 全部 |     关闭解析      |
-|    bm    | bv号或引用一个链接/卡片 |           -           |  否   | 全部 |   下载 B 站音频   |
-|  blogin  |            -            |       SUPERUSER       |  是   | 全部 | 扫码获取 B 站凭证 |
+|   指令   |          参数           |         权限          | 需要@ | 范围 |                     说明                      |
+| :------: | :---------------------: | :-------------------: | :---: | :--: | :-------------------------------------------: |
+| 开启解析 |       可选目标 ID       | SUPERUSER/OWNER/ADMIN |  是   | 全部 | 开启当前会话解析；仅 SUPERUSER 可指定其他目标 |
+| 关闭解析 |       可选目标 ID       | SUPERUSER/OWNER/ADMIN |  是   | 全部 | 关闭当前会话解析；仅 SUPERUSER 可指定其他目标 |
+|    bm    | bv号或引用一个链接/卡片 |           -           |  否   | 全部 |                 下载 B 站音频                 |
+|  blogin  |            -            |       SUPERUSER       |  是   | 全部 |               扫码获取 B 站凭证               |
+
+不带参数时，群聊和频道指令操作当前会话，私聊指令操作当前用户。超级管理员可以指定其他目标：群聊中填写群号，私聊中填写用户 ID，频道中填写当前服务器下的频道 ID。私聊中关闭解析后，该用户在同一平台的私聊、群聊和频道中都不能触发解析
 
 ## 🎨 渲染主题
 

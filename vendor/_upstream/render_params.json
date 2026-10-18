@@ -2,7 +2,7 @@
   "_provenance": "scripts/extract_render_params.py 生成（上游 main 渲染参数提取，勿手改）",
   "params": {
     "render_template_version": {
-      "value": "20260923-1",
+      "value": "20261016-1",
       "source": "render/__init__.py:RENDER_TEMPLATE_VERSION"
     },
     "viewport_width": {
@@ -46,6 +46,6 @@
       "source": "render/__init__.py:TEXT_SPLIT_PUNCTUATION"
     }
   },
-  "source_revision": "3df4147c554d8848505068ca4384d52adc2a4d30",
-  "source_digest": "41f0528b863a1641c8394386d8142708c37fc4b3d6653535c09b6b8f93147f3e"
+  "source_revision": "72a16681c8f02fc125d6cb021689f1547f415d11",
+  "source_digest": "42ccf0a2804538b133d1f287d65561a9659cae024dcb8c063adfc3d06005341f"
 }

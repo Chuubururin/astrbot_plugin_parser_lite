@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Callable, MutableSequence, Sequence
 import re
 from typing import Final, Literal
@@ -7,7 +9,6 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 
 from ..constants import STICKER_CDN
-from ..creator import Creator
 from ..data import ContentItem
 
 DEFAULT_PLACEHOLDER_PATTERN: Final = re.compile(r"\[(?P<name>[^]]+)\]")
@@ -35,6 +36,9 @@ def replace_placeholder_to_sticker(
     """
     if not placeholder_pattern.search(text):
         return [text]
+
+    # creator 会导入 data，而 data 需要本模块的格式化函数，只能在函数内导入
+    from ..creator import Creator
 
     result: list[ContentItem] = []
     last_pos = 0

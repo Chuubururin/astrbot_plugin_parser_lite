@@ -1,6 +1,6 @@
 """生成文件：scripts/generate_config.py 经模板注入生成，勿手改。
 
-数据源：vendor nonebot_plugin_parser_lite 1.3.10rc4（第一层
+数据源：vendor nonebot_plugin_parser_lite 1.3.10rc5（第一层
 分析数据 vendor_analysis.json，scripts/analyze_vendor.py 从上游快照现场
 再生，不入库）。
 消费方：main.py —— 区分上游字段与桥自有字段，并在启动时告警陈旧配置键。
@@ -21,7 +21,8 @@ VENDOR_FIELDS: frozenset[str] = frozenset(
         "plite_bili_cdn_region",
         "plite_bili_video_codes",
         "plite_bili_video_quality",
-        "plite_blacklist_users",
+        "plite_bsb_api_base",
+        "plite_bsb_categories",
         "plite_day_range",
         "plite_disabled_platforms",
         "plite_download_command",
@@ -36,6 +37,8 @@ VENDOR_FIELDS: frozenset[str] = frozenset(
         "plite_max_comments",
         "plite_max_retries",
         "plite_max_size",
+        "plite_media_speedup_rules",
+        "plite_media_transcode_concurrency",
         "plite_need_forward_contents",
         "plite_need_upload",
         "plite_need_upload_audio",
@@ -53,6 +56,7 @@ VENDOR_FIELDS: frozenset[str] = frozenset(
 # 桥自有配置键（不透传 vendor configure()；语义见 _conf_schema.json）
 BRIDGE_FIELDS: frozenset[str] = frozenset(
     {
+        "plite_blacklist_users",
         "plite_render",
         "plite_verbose_error",
         "plite_video_file_threshold_mb",
@@ -60,6 +64,7 @@ BRIDGE_FIELDS: frozenset[str] = frozenset(
 )
 # 桥自有配置默认值（main.py 统一从此取回退，避免默认字面量双份漂移）
 BRIDGE_DEFAULTS: dict[str, object] = {
+    "plite_blacklist_users": [],
     "plite_render": True,
     "plite_verbose_error": False,
     "plite_video_file_threshold_mb": 100,

@@ -7,13 +7,34 @@ import json
 import math
 from typing import Any
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from anyio import Path
 
+from ..config import pconfig
+from ..constants import MIN_KEEP_PIECE_SECONDS
 from ..exception import SizeLimitException
 from .cache import CacheManager
 from .common import fmt_size
 from .log import logger
+
+_TRANSCODE_LIMITS: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = WeakKeyDictionary()
+
+
+def get_transcode_limit() -> asyncio.Semaphore:
+    """返回当前事件循环共享的转码信号量
+
+    信号量不能跨事件循环复用，因此按事件循环缓存。懒下载发生在原消息处理
+    结束后，也必须走同一份限制。
+    """
+    loop = asyncio.get_running_loop()
+    cached = _TRANSCODE_LIMITS.get(loop)
+    if cached is None:
+        cached = asyncio.Semaphore(pconfig.media_transcode_concurrency)
+        _TRANSCODE_LIMITS[loop] = cached
+    return cached
 
 
 class FFmpeg:
@@ -654,6 +675,260 @@ class FFmpeg:
         logger.success(
             f"Created Live Photo video {output_path.name}, "
             f"{await fmt_size(output_path)}"
+        )
+        return output_path
+
+    @classmethod
+    async def _get_edit_output_path(
+        cls, input_path: Path, suffix: str, *params: Any
+    ) -> Path:
+        """按源路径与编辑参数算出产物名，参数变了就不会命中旧产物"""
+        cache_key = ",".join([str(input_path), *(str(param) for param in params)])
+        file_name = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
+        cache_dir = await CacheManager.ensure_dir(CacheManager.MEDIA)
+        return cache_dir / f"{file_name}{suffix}"
+
+    @staticmethod
+    def _build_keep_pieces(
+        cut_ranges: tuple[tuple[float, float], ...],
+        duration: float,
+    ) -> list[tuple[float, float]]:
+        """把「要删掉的区间」换算成「要保留的区间」，入参需已排序且不重叠"""
+        pieces: list[tuple[float, float]] = []
+        cursor = 0.0
+        for start, end in cut_ranges:
+            if start > cursor:
+                pieces.append((cursor, start))
+            cursor = max(cursor, end)
+        if cursor < duration:
+            pieces.append((cursor, duration))
+        return [
+            (start, end)
+            for start, end in pieces
+            if end - start > MIN_KEEP_PIECE_SECONDS
+        ]
+
+    @classmethod
+    def _build_mute_expression(
+        cls, mute_ranges: tuple[tuple[float, float], ...]
+    ) -> str:
+        terms = [
+            f"between(t,{cls._format_filter_number(start)},"
+            f"{cls._format_filter_number(end)})"
+            for start, end in mute_ranges
+        ]
+        return "+".join(terms)
+
+    @classmethod
+    def _build_timeline_filter(
+        cls,
+        pieces: list[tuple[float, float]],
+        mute_ranges: tuple[tuple[float, float], ...],
+        *,
+        has_audio: bool,
+    ) -> tuple[list[str], str, str | None]:
+        """裁切并拼接保留区间
+
+        消音表达式在 split 之前作用于原始时间轴，因此消音区间不需要随裁切
+        重新映射。音频只取第一条流，多轨产物在 IM 侧基本只有第一条会被播。
+
+        :return: (滤镜片段, 视频输出标签, 音频输出标签)
+        """
+        count = len(pieces)
+        parts: list[str] = []
+
+        if count == 1:
+            parts.append("[0:v]null[vc0]")
+        else:
+            labels = "".join(f"[vc{i}]" for i in range(count))
+            parts.append(f"[0:v]split={count}{labels}")
+
+        audio_source = "0:a"
+        if has_audio and mute_ranges:
+            enable = cls._build_mute_expression(mute_ranges)
+            parts.append(f"[0:a]volume=enable='{enable}':volume=0[am]")
+            audio_source = "am"
+
+        if has_audio:
+            if count == 1:
+                parts.append(f"[{audio_source}]anull[ac0]")
+            else:
+                audio_labels = "".join(f"[ac{i}]" for i in range(count))
+                parts.append(f"[{audio_source}]asplit={count}{audio_labels}")
+
+        for index, (start, end) in enumerate(pieces):
+            left = cls._format_filter_number(start)
+            right = cls._format_filter_number(end)
+            parts.append(
+                f"[vc{index}]trim=start={left}:end={right},"
+                f"setpts=PTS-STARTPTS[v{index}]"
+            )
+            if has_audio:
+                parts.append(
+                    f"[ac{index}]atrim=start={left}:end={right},"
+                    f"asetpts=PTS-STARTPTS[a{index}]"
+                )
+
+        joined = "".join(
+            f"[v{i}]" + (f"[a{i}]" if has_audio else "") for i in range(count)
+        )
+        if has_audio:
+            parts.append(f"{joined}concat=n={count}:v=1:a=1[vt][at]")
+            return parts, "[vt]", "[at]"
+        parts.append(f"{joined}concat=n={count}:v=1:a=0[vt]")
+        return parts, "[vt]", None
+
+    @classmethod
+    async def edit_video(
+        cls,
+        input_path: Path,
+        *,
+        speed_ratio: float = 1.0,
+        cut_ranges: tuple[tuple[float, float], ...] = (),
+        mute_ranges: tuple[tuple[float, float], ...] = (),
+    ) -> Path:
+        """重编码视频，一次 ffmpeg 调用产出终态文件
+
+        倍速、裁切、消音可以同时传，落在同一条滤镜链里，避免多代有损编码；只消音
+        时视频流直接复制。产物名由源路径与编辑参数算出，命中缓存即复用。
+
+        :param input_path: 源视频路径
+        :param speed_ratio: 播放倍率
+        :param cut_ranges: 需要删除的时间轴区间，需已排序、裁剪且不重叠
+        :param mute_ranges: 需要消音的时间轴区间，按源时间轴表达
+        :return: 产物路径
+        """
+        output_path = await cls._get_edit_output_path(
+            input_path, ".mp4", speed_ratio, cut_ranges, mute_ranges
+        )
+        if await output_path.exists():
+            return output_path
+
+        probe = await cls._probe_media(input_path)
+        duration = cls._get_duration(probe, input_path)
+        has_audio = any(
+            stream.get("codec_type") == "audio" for stream in probe.get("streams", [])
+        )
+
+        pieces = (
+            cls._build_keep_pieces(cut_ranges, duration)
+            if cut_ranges
+            else [(0.0, duration)]
+        )
+        if not pieces:
+            raise RuntimeError("裁切后没有剩余片段")
+        # 裁掉开头或结尾时只剩一个片段，但仍然要裁，不能拿「片段数 > 1」当判据
+        needs_trim = bool(cut_ranges)
+
+        filter_parts: list[str] = []
+        # 滤镜图里引用输入流要带方括号，-map 直接引用输入流时不带
+        video_source, video_target = "[0:v]", "0:v"
+        audio_source = "[0:a]" if has_audio else None
+        audio_target = "0:a" if has_audio else None
+
+        if needs_trim:
+            filter_parts, video_target, audio_target = cls._build_timeline_filter(
+                pieces, mute_ranges, has_audio=has_audio
+            )
+            video_source, audio_source = video_target, audio_target
+        elif has_audio and mute_ranges:
+            enable = cls._build_mute_expression(mute_ranges)
+            filter_parts.append(f"[0:a]volume=enable='{enable}':volume=0[at]")
+            audio_source = audio_target = "[at]"
+
+        video_filtered = needs_trim or speed_ratio != 1.0
+        if speed_ratio != 1.0:
+            ratio = cls._format_filter_number(speed_ratio)
+            filter_parts.append(f"{video_source}setpts=PTS/{ratio}[vf]")
+            video_source = video_target = "[vf]"
+            if audio_source is not None:
+                filter_parts.append(f"{audio_source}atempo={ratio}[af]")
+                audio_source = audio_target = "[af]"
+
+        cmd: list[str] = ["-y", "-hide_banner", "-loglevel", "error"]
+        cmd += ["-i", str(input_path)]
+        if filter_parts:
+            cmd += ["-filter_complex", ";".join(filter_parts)]
+        cmd += ["-map", video_target]
+        if video_filtered:
+            cmd += [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        else:
+            cmd += ["-c:v", "copy"]
+        if audio_target is None:
+            cmd += ["-an"]
+        else:
+            cmd += ["-map", audio_target]
+            cmd += (
+                ["-c:a", "copy"]
+                if audio_target == "0:a"
+                else ["-c:a", "aac", "-b:a", "192k"]
+            )
+        logger.info(f"Editing video '{input_path.name}' as '{output_path.name}'")
+        temp_path = cls.temporary_output_path(output_path)
+        cmd += ["-movflags", "+faststart", str(temp_path)]
+        try:
+            await cls.exec_ffmpeg_monitored(
+                cmd, output_path=temp_path, max_size_mb=pconfig.max_size
+            )
+            await temp_path.replace(output_path)
+        finally:
+            await temp_path.unlink(missing_ok=True)
+        logger.success(
+            f"Edited video {output_path.name}, size={await fmt_size(output_path)}"
+        )
+        return output_path
+
+    @classmethod
+    async def edit_audio(
+        cls,
+        input_path: Path,
+        *,
+        speed_ratio: float,
+    ) -> Path:
+        """按倍率重编码音频，产物沿用源文件的容器
+
+        音频只处理倍速，裁切与消音是画面时间轴上的概念；``-vn`` 会连内嵌封面
+        一起去掉，语音/文件消息用不到它。
+
+        :param input_path: 源音频路径
+        :param speed_ratio: 播放倍率
+        :return: 产物路径
+        """
+        suffix = input_path.suffix.lower() or ".m4a"
+        output_path = await cls._get_edit_output_path(input_path, suffix, speed_ratio)
+        if await output_path.exists():
+            return output_path
+
+        cmd: list[str] = ["-y", "-hide_banner", "-loglevel", "error"]
+        cmd += [
+            "-i",
+            str(input_path),
+            "-vn",
+            "-af",
+            f"atempo={cls._format_filter_number(speed_ratio)}",
+        ]
+        # 编码器与码率交给 ffmpeg 按输出后缀决定
+        logger.info(f"Editing audio '{input_path.name}' as '{output_path.name}'")
+        temp_path = cls.temporary_output_path(output_path)
+        cmd += [str(temp_path)]
+        try:
+            await cls.exec_ffmpeg_monitored(
+                cmd, output_path=temp_path, max_size_mb=pconfig.max_size
+            )
+            await temp_path.replace(output_path)
+        finally:
+            await temp_path.unlink(missing_ok=True)
+        logger.success(
+            f"Edited audio {output_path.name}, size={await fmt_size(output_path)}"
         )
         return output_path
 

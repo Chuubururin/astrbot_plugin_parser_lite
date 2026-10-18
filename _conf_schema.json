@@ -14,6 +14,11 @@
     "type": "bool",
     "default": false
   },
+  "plite_blacklist_users": {
+    "description": "黑名单用户列表，这些用户触发的解析将被忽略",
+    "type": "list",
+    "default": []
+  },
   "plite_zhihu_ck": {
     "description": "知乎 cookies",
     "type": "string",
@@ -105,11 +110,6 @@
       "ds",
       "qqmusic"
     ]
-  },
-  "plite_blacklist_users": {
-    "description": "黑名单用户列表，这些用户触发的解析将被忽略",
-    "type": "list",
-    "default": []
   },
   "plite_bili_video_codes": {
     "description": "B站视频编码",
@@ -241,5 +241,25 @@
     "description": "自定义哔哩哔哩 CDN 域名，优先于地区配置",
     "type": "string",
     "default": ""
+  },
+  "plite_media_speedup_rules": {
+    "description": "媒体倍速规则，格式 `平台:作者id:倍速`",
+    "type": "list",
+    "default": []
+  },
+  "plite_media_transcode_concurrency": {
+    "description": "媒体倍速并发操作数",
+    "type": "int",
+    "default": 1
+  },
+  "plite_bsb_api_base": {
+    "description": "哔哩哔哩空降服务地址, wiki: https://github.com/hanydd/BilibiliSponsorBlock/wiki/API",
+    "type": "string",
+    "default": ""
+  },
+  "plite_bsb_categories": {
+    "description": "参与裁切的片段分类，配置了服务地址时必填",
+    "type": "list",
+    "default": []
   }
 }
