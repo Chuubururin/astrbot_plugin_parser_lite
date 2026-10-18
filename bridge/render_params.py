@@ -9,7 +9,7 @@ t2i 适配补丁等桥自有语义不在此模块，见 bridge/render.py 的规�
 from __future__ import annotations
 
 # render/__init__.py:RENDER_TEMPLATE_VERSION
-RENDER_TEMPLATE_VERSION = "20260923-1"
+RENDER_TEMPLATE_VERSION = "20261016-1"
 # render/__init__.py:get_new_page viewport.width
 VIEWPORT_WIDTH = 620
 # render/__init__.py:get_new_page viewport.height

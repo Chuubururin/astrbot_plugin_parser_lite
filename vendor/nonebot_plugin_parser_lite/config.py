@@ -28,6 +28,28 @@ def parse_hm_to_minutes(value: str) -> int:
     return hour * 60 + minute
 
 
+def parse_media_speedup_rules(
+    value: list[str],
+) -> dict[tuple[PlatformEnum, str], float]:
+    """把 ``["bilibili:123456:1.25"]`` 解析成 ``{(平台, 作者 id): 倍速}``"""
+    rules: dict[tuple[PlatformEnum, str], float] = {}
+    for raw in value:
+        parts = [part.strip() for part in raw.split(":")]
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            raise ValueError(f"变速规则应为 平台:作者id:倍速，收到: {raw!r}")
+        platform_name, author_id, ratio_text = parts
+        try:
+            platform = PlatformEnum(platform_name)
+        except ValueError:
+            raise ValueError(f"变速规则里的平台不存在: {platform_name!r}") from None
+        try:
+            ratio = float(ratio_text)
+        except ValueError:
+            raise ValueError(f"变速规则的倍速不是数字，收到: {raw!r}") from None
+        rules[(platform, author_id)] = ratio
+    return rules
+
+
 class Config(BaseModel):
     plite_zhihu_ck: str | None = None
     """知乎 cookies"""
@@ -55,8 +77,6 @@ class Config(BaseModel):
     """是否在解析结果中添加原始URL二维码"""
     plite_disabled_platforms: list[PlatformEnum] = []
     """禁用的解析器"""
-    plite_blacklist_users: list[str] = []
-    """黑名单用户列表，这些用户触发的解析将被忽略"""
     plite_bili_video_codes: list[BiliVideoCodecs] = [
         BiliVideoCodecs.AVC,
         BiliVideoCodecs.AV1,
@@ -102,6 +122,14 @@ class Config(BaseModel):
     """自定义哔哩哔哩 CDN 域名，优先于地区配置"""
     plite_render_format: Literal["jpeg", "webp"] = "webp"
     """渲染图片格式，jpeg会丢失透明度但可能兼容性更好"""
+    plite_media_speedup_rules: list[str] = []
+    """媒体倍速规则，格式 `平台:作者id:倍速`"""
+    plite_media_transcode_concurrency: int = 1
+    """媒体倍速并发操作数"""
+    plite_bsb_api_base: str | None = None
+    """哔哩哔哩空降服务地址, wiki: https://github.com/hanydd/BilibiliSponsorBlock/wiki/API"""
+    plite_bsb_categories: list[str] = []
+    """参与裁切的片段分类，配置了服务地址时必填"""
 
     @field_validator("plite_download_command")
     @classmethod
@@ -119,6 +147,13 @@ class Config(BaseModel):
         for item in value:
             parse_hm_to_minutes(item)
         return value
+
+    @field_validator("plite_media_speedup_rules")
+    @classmethod
+    def validate_media_speedup_rules(cls, value: list[str]) -> list[str]:
+        # 启动时就解析一遍，笔误不至于等到发消息才静默不生效
+        parse_media_speedup_rules(value)
+        return [item.strip() for item in value if item.strip()]
 
     @model_validator(mode="after")
     def validate_lazy_download(self) -> "Config":
@@ -236,11 +271,6 @@ class Config(BaseModel):
         return self.plite_video_in_forward
 
     @property
-    def blacklist_users(self) -> list[str]:
-        """黑名单用户列表"""
-        return self.plite_blacklist_users
-
-    @property
     def download_command(self) -> list[str]:
         """在懒下载模式中用户请求下载视频时的命令列表"""
         return self.plite_download_command
@@ -312,6 +342,26 @@ class Config(BaseModel):
     def render_format(self) -> Literal["jpeg", "webp"]:
         """渲染图片格式"""
         return self.plite_render_format
+
+    @property
+    def media_speedup_rules(self) -> dict[tuple[PlatformEnum, str], float]:
+        """媒体倍速规则"""
+        return parse_media_speedup_rules(self.plite_media_speedup_rules)
+
+    @property
+    def media_transcode_concurrency(self) -> int:
+        """媒体倍速并发操作数"""
+        return self.plite_media_transcode_concurrency
+
+    @property
+    def bsb_api_base(self) -> str | None:
+        """哔哩哔哩空降服务地址"""
+        return self.plite_bsb_api_base
+
+    @property
+    def bsb_categories(self) -> list[str]:
+        """参与裁切的片段分类"""
+        return self.plite_bsb_categories
 
 
 # 初始化配置实例

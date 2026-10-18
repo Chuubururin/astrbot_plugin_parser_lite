@@ -350,6 +350,13 @@ matchers 的消息组装入口）。桥里没人读它们，放进面板就是�
 - `plite_video_in_forward`：读取点在上游 render 层的转发组合。桥的转发组合固定
   用视频封面图占位。
 
+反方向的裁决也有：**开关换主人**。`plite_blacklist_users`（黑名单用户）原为上游
+vendor 字段，上游 1.3.10rc5 把它连同 NoneBot 宿主的「按群管理解析开关」一起移除，
+而拦截判定一直在桥的 `main.py` 消息入口里做——该字段遂并入 `BRIDGE_FIELDS` 成为桥自有
+开关，不再透传 `configure()`。面板项名与行为不变，存量配置键继续生效；代价是它不再经
+vendor pydantic 校验，故 `main.py::_blacklist_users` 自带形态收口（非列表按空集处理）。
+判据不变量仍由 `tests/test_config_panel.py` 守：面板上的每个开关必须有读取点，**不分归属**。
+
 腐化的两个方向都有执法：面板里的字段在 vendor/桥里没有读取点 → 假开关，
 `tests/test_config_panel.py` 判红；台账里的字段出现读取点 → 同一测试判红（须拆出
 台账回到面板），上游删掉字段 → 生成器的陈旧检查响亮失败。读取点判定含经由

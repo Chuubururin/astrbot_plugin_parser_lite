@@ -7,6 +7,23 @@
 nonebot-plugin-parser-lite 对齐，桥内修复不独立 bump；上游解析能力的变更
 随 vendor 快照滚动同步，见上游仓库 releases。
 
+## 2026-10-18
+
+- 同步到上游 v1.3.10rc5：B 站「空降」片段裁切（接入 BilibiliSponsorBlock，需同时配置
+  服务地址与分类才生效）、上传前按平台与作者倍速、倍速转码并发数、小红书视频备用下载
+  链接、抖音视频下载改用通用下载器。
+- WebUI 配置面板新增 4 个上游开关：`plite_bsb_api_base`、`plite_bsb_categories`、
+  `plite_media_speedup_rules`、`plite_media_transcode_concurrency`；配置项 33 → 37
+  （4 桥接 + 33 上游）。
+- **黑名单用户**改由本插件自己存放与判定：上游同一版本移除了 vendor 侧的
+  `plite_blacklist_users`（改为 NoneBot 宿主的「按群管理解析开关」，那一层不随
+  standalone 快照发布），而拦截逻辑一直在本插件的消息入口里。面板上这一项的名称、
+  说明与行为均不变，已填写的名单继续生效，无需重新配置。
+- 边界：`plite_bsb_api_base` 指向的服务经插件的下载器出站面访问，仍受出站 SSRF 四层
+  校验约束——把它填成内网、回环或链路本地地址会被拒绝而不是静默放行。
+- 形态容错：黑名单来自桥自有配置（不经上游校验），值不是列表时按「没有名单」处理，
+  不会把字符串按字符逐个比对，也不会因类型异常让整条消息路径失败。
+
 ## 2026-10-15
 
 - 插件详情页现在有「更新日志」：WebUI 读取**已安装插件根目录**的 `CHANGELOG.md`

@@ -28,7 +28,7 @@
   权威是上游本体）。
 
 本层零 vendor 依赖（分析在第一层 scripts/analyze_vendor.py），检出本仓库即可
-离线运行。桥自有语义（3 字段默认值、cdn_region 选项覆盖）在本层声明——唯一
+离线运行。桥自有语义（``BRIDGE_FIELDS`` 各键的默认值、cdn_region 选项覆盖）在本层声明——唯一
 的例外白名单，属于「一次维护长期有效」的规则层；数据层完全上游驱动。幂等：
 重复运行零 diff；``--check`` 供 CI/测试比对。
 """
@@ -64,6 +64,14 @@ BRIDGE_FIELDS: dict[str, dict[str, Any]] = {
         "description": "解析失败时向会话发送简短错误说明（默认仅回应表情并记日志）",
         "type": "bool",
         "default": False,
+    },
+    # 上游 1.3.10rc5 的 #375 移除了 vendor 侧的同名字段（连同「按目标管理解析开关」
+    # 的 NoneBot 宿主层），但拦截逻辑本来就在桥的 on_message 里，功能对用户仍然成立
+    # ——故归属改为桥自有，不透传 vendor configure()。
+    "plite_blacklist_users": {
+        "description": "黑名单用户列表，这些用户触发的解析将被忽略",
+        "type": "list",
+        "default": [],
     },
 }
 
