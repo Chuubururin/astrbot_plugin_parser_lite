@@ -86,7 +86,11 @@ async def fetch_segments(
     categories: list[str],
 ) -> list[SponsorSegment]:
     """查询这条视频标记的片段"""
-    params = {"videoID": bvid, "cid": cid, "categories": categories}
+    params = {
+        "videoID": bvid,
+        "cid": cid,
+        "categories": json.dumps(categories, separators=(",", ":")),
+    }
     try:
         async with asyncio.timeout(REQUEST_TIMEOUT):
             response = await DOWNLOADER.client.get(
@@ -99,7 +103,15 @@ async def fetch_segments(
         return []
 
     if response.status_code != 200:
-        logger.warning(f"SponsorBlock 返回 HTTP {response.status_code}，忽略片段")
+        # 取 content 而不是 text：服务端声明的编码与正文不符时 text 会抛 UnicodeError
+        excerpt = "".join(
+            ch
+            for ch in response.content[:200].decode("utf-8", "replace")
+            if ch.isprintable()
+        )
+        logger.warning(
+            f"SponsorBlock 返回 HTTP {response.status_code}，忽略片段: {excerpt}"
+        )
         return []
     try:
         payload = response.json()
