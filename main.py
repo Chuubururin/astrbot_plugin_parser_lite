@@ -58,6 +58,33 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"'，。；！？】》（【]+", re.
 # 已有同名常量做发送面钳制，此处在 configure 入口先兜一层）。
 _MAX_COMMENTS_HARD_CAP = 100
 
+# 空降分类名的服务端形态（`SponsorBlockServer` parseParams.ts 的 validateString）：
+# 只放行小写字母/数字/下划线/连字符，且**校验是 all-or-nothing**——一个带空格或大写的
+# 名字会让整条请求 400、连同其余合法分类一起失效，而不是只有那个名字无效。面板把这项
+# 做成自由文本，所以归一只能桥来做：vendor 侧无 validator，配置写错要等到解析时才炸。
+_BSB_CATEGORY_SHAPE_RE = re.compile(r"[a-z0-9_-]+\Z")
+
+
+def _sanitize_bsb_categories(raw: Any) -> tuple[list[str], list[str]]:
+    """返回（可用分类名, 被丢弃项）。丢弃项原样回显，供日志点名。
+
+    同时修掉两处大小写不一致：发出去的那一份（服务端拒）与 `sponsorblock.py` 里
+    本地过滤用的那一份（`segment.category` 已 casefold，列表未归一则永远比不中）。
+    """
+    if not isinstance(raw, list | tuple):
+        return [], [raw] if raw else []
+    kept: list[str] = []
+    dropped: list[Any] = []
+    for item in raw:
+        name = item.strip().casefold() if isinstance(item, str) else ""
+        if not name or not _BSB_CATEGORY_SHAPE_RE.match(name):
+            if item not in dropped:
+                dropped.append(item)
+        elif name not in kept:  # 归一后重复的项静默并掉：它并没有被丢弃
+            kept.append(name)
+    return kept, dropped
+
+
 # 分享文案常把链接与标点直接相连（"…（分享了视频）"、"链接。"、"(见)"），
 # 而排除集只列了独占性强的 CJK 标点，抽取结果可能带尾随字符。带脏字符的
 # URL 交给上游 match 会不匹配或把脏字符带进解析目标，用户侧表现为「发了
@@ -206,6 +233,19 @@ class ParserLitePlugin(star.Star):
                 vendor_cfg["plite_max_comments"] = 0
             else:
                 vendor_cfg["plite_max_comments"] = max(0, min(_MAX_COMMENTS_HARD_CAP, raw))
+        if "plite_bsb_categories" in vendor_cfg:
+            kept, dropped = _sanitize_bsb_categories(vendor_cfg["plite_bsb_categories"])
+            if dropped:
+                self.logger.warning(
+                    "空降分类名已归一，其中 %d 项被丢弃（服务端只认小写字母/数字/下划线/"
+                    "连字符，且一个非法名会让整批裁切失效）：%s；保留：%s",
+                    len(dropped),
+                    dropped,
+                    kept,
+                )
+            if vendor_cfg["plite_bsb_categories"] and not kept:
+                self.logger.warning("空降分类名全部非法，已置空：不配合法分类名时空降不生效")
+            vendor_cfg["plite_bsb_categories"] = kept
         try:
             configure(**vendor_cfg)
         except Exception as e:
