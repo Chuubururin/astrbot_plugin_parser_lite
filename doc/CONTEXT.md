@@ -357,6 +357,31 @@ vendor 字段，上游 1.3.10rc5 把它连同 NoneBot 宿主的「按群管理�
 vendor pydantic 校验，故 `main.py::_blacklist_users` 自带形态收口（非列表按空集处理）。
 判据不变量仍由 `tests/test_config_panel.py` 守：面板上的每个开关必须有读取点，**不分归属**。
 
+**自由文本开关的输入面收口（`plite_bsb_categories`）**
+
+上游 issue #379（其 #380 修复）之前，空降查询恒 HTTP 400：vendor 把 `list` 直接交给 httpx
+当 query 参数，编成 `categories=a&categories=b`，而服务端对复数键是无条件 `JSON.parse`。
+协议缺陷归上游，已由其修成 `json.dumps`。
+
+**归一化仍归桥**，因为面板形态是我们给的：上游该字段只是 `list[str]`，四个 validator 里
+唯独没有它，错值要等到解析时才炸。服务端对 `categories` 的校验还是 **all-or-nothing**——
+一个带空格或大写的名字会让整批裁切失效（实测 400 `Unknown category provided.` /
+`categories parameter does not match format requirements.`），而不是只有那个名字无效。
+所以 `main.py::_sanitize_bsb_categories` 在透传前做 `strip + casefold + 形状过滤
+（[a-z0-9_-]+） + 去重`，丢弃项原样进 WARNING 日志。这一处同时修掉两个方向：发出去的
+那份（服务端拒）与 `sponsorblock.py` 本地过滤用的那份（服务端返回的 `category` 已被
+`casefold()`，配置列表未归一则永远比不中——表现为「无异常、只是没裁」，比 400 更难归因）。
+
+刻意**不做**白名单枚举校验：公开实例 `GET /api/categories` 实测 404，没有运行时注册表可拉，
+手抄一份分类名枚举就是我们已在 #365 踩过的「桥侧手抄上游常量」盲区（漂移后果是用户新分类
+被静默丢弃）。因此已知残余：形状合法但拼错的名字（`spnsoor`）仍会让整批 400，可见性由上游
+修复后新增的「响应体摘要入日志」兜住。
+
+守护形态的教训也记在此处：本节首版测试是「在 main.py 里搜子串再比先后」，注入
+`if False and …` 短路变异后仍全绿——那是假守卫。现由 `tests/test_bsb_categories_panel.py`
+直接驱动 `__init__`（手法与 `test_plugin_init` 同源）断言交给 `configure()` 的实际值，
+出网编码则由打在 `httpx.Request.url` 上的哨兵钉住（同时是上游回归警报）。
+
 腐化的两个方向都有执法：面板里的字段在 vendor/桥里没有读取点 → 假开关，
 `tests/test_config_panel.py` 判红；台账里的字段出现读取点 → 同一测试判红（须拆出
 台账回到面板），上游删掉字段 → 生成器的陈旧检查响亮失败。读取点判定含经由
