@@ -377,6 +377,14 @@ vendor pydantic 校验，故 `main.py::_blacklist_users` 自带形态收口（�
 被静默丢弃）。因此已知残余：形状合法但拼错的名字（`spnsoor`）仍会让整批 400，可见性由上游
 修复后新增的「响应体摘要入日志」兜住。
 
+**不要为「启用消音」给请求补发 `actionTypes`**：公开实例在**不带** `actionTypes` 时按全类型
+返回，`mute` 段本来就会到达并被 `sponsorblock.py` 收进消音链、进而触发重编码；显式白名单反而是
+减法——发 `["skip","mute"]` 会把 `actionType=full`（整片即广告）在请求层滤掉。空降剩下的两个
+缺陷都在上游面、桥侧无法补偿，因为信号在 vendor 返回值形状里消失：`full` 段被零长段判据丢弃
+（已开上游功能建议 #381），`STALENESS_TOLERANCE` 命中后的「标注已对不上」只写 `debug`
+（`videoDuration` 与平台声明时长本就存在计时基准差，实测正常工作样本已吃掉 ±2 秒预算的一半以上，
+阈值再紧一点就是静默不裁切）。
+
 守护形态的教训也记在此处：本节首版测试是「在 main.py 里搜子串再比先后」，注入
 `if False and …` 短路变异后仍全绿——那是假守卫。现由 `tests/test_bsb_categories_panel.py`
 直接驱动 `__init__`（手法与 `test_plugin_init` 同源）断言交给 `configure()` 的实际值，
