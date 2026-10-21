@@ -1,6 +1,5 @@
 """哔哩哔哩空降：查询 SponsorBlock 兼容服务，把标注换算成裁切与消音区间"""
 
-import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 import json
@@ -13,9 +12,6 @@ from ...constants import MIN_KEEP_PIECE_SECONDS
 from ...download import DOWNLOADER
 from ...utils.ffmpeg import FFmpeg, get_transcode_limit
 from ...utils.log import logger
-
-REQUEST_TIMEOUT = 5.0
-"""查询超时，免得第三方实例拖慢整条解析链路"""
 
 STALENESS_TOLERANCE = 2.0
 """标注记录的视频时长与实际时长相差多少秒以内还算对得上（上游约定 ±2 秒）"""
@@ -92,12 +88,11 @@ async def fetch_segments(
         "categories": json.dumps(categories, separators=(",", ":")),
     }
     try:
-        async with asyncio.timeout(REQUEST_TIMEOUT):
-            response = await DOWNLOADER.client.get(
-                f"{base_url.rstrip('/')}/api/skipSegments",
-                params=params,
-                headers=DOWNLOADER.headers,
-            )
+        response = await DOWNLOADER.client.get(
+            f"{base_url.rstrip('/')}/api/skipSegments",
+            params=params,
+            headers=DOWNLOADER.headers,
+        )
     except Exception as e:
         logger.warning(f"SponsorBlock 查询失败 {bvid}: {type(e).__name__}: {e!r}")
         return []

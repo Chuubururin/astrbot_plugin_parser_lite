@@ -46,7 +46,6 @@ class HeadResponse:
 
 class UniResponse:
     __slots__ = ("_raw",)
-    raw: CurlResponse | HttpxResponse
 
     def __init__(self, raw: CurlResponse | HttpxResponse):
         self._raw = raw
