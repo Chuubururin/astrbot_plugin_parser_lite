@@ -3,11 +3,14 @@
 上游 main 分支一处运行态缺陷未修复：
 
 - parsers/hupu/util.py：``_iter_media_and_text`` 的 video 处理以
-  ``str(element.get(...))`` 取值，src 缺失产出字面 "None" 视频 URL、
-  poster 缺失产出字面 "None" 封面 URL。截断缺陷（视频块含子节点时
-  descendants 迭代断链）上游已随 5b3d107 修复——上游改用 skip_parent
-  跳过已处理子树，不再 decompose；复刻实现与上游新版逐行同源，
-  仅保留上述两处 str(None) 补偿。
+  ``str(element.get("poster"))`` 取值，poster 缺失产出字面 "None" 封面 URL。
+  截断缺陷（视频块含子节点时 descendants 迭代断链）上游已随 5b3d107 修复——
+  上游改用 skip_parent 跳过已处理子树，不再 decompose；同形的 src 缺失缺陷
+  （补偿①）上游已随 standalone 221506d 修复（改为 ``if video_url :=
+  element.get("src")`` 跳过缺 src 的视频块），该补偿按约定撤销。同一提交还
+  删掉了 hupu 视频的稳定 ``cache_key``（连同 ``urlparse`` 导入）——复刻实现
+  跟随上游一并去掉，桥侧不私留这条差异。复刻实现与上游新版逐行同源，
+  仅保留上述一处 str(None) 补偿。
 
 parsers/buff/news.py 的同源截断缺陷亦已随上游修复（5b3d107），且行为
 语义与补丁版逐项等价（截断修复 / 视频内部节点不当普通图），补丁按哨兵
@@ -41,7 +44,6 @@ import sys
 from collections.abc import Callable, Iterator
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlparse
 
 from anyio import to_thread
 
@@ -167,9 +169,9 @@ def _patch_hupu_iter_media_and_text() -> None:
 
         上游截断缺陷已修复（skip_parent 跳过已处理子树，不再 decompose），
         上游 rc4 又去掉了文本节点的空白清理（utils.format.clean_blank 删除）；
-        复刻与差异仅两处 str(None) 补偿：
-        ①video 缺 src 时跳过（上游产出字面 "None" 视频 URL）；
-        ②poster 缺失传 None（上游 str(None) 产出 "None" 封面 URL）。
+        上游 rc7 修掉缺 src 的 video（补偿①随之撤销），并删掉了视频的稳定
+        cache_key。复刻与差异仅一处：②poster 缺失传 None，不改上游
+        str(None) 产出 "None" 封面 URL 的行为就仍是缺陷。
         """
         seen_anchors: set[int] = set()
         skip_parent: Tag | None = None
@@ -184,20 +186,15 @@ def _patch_hupu_iter_media_and_text() -> None:
                     yield "\n"
                     continue
 
-                if element.name == "video":
-                    video_url = element.get("src")
-                    # 补偿①：缺 src 跳过（上游产出字面 "None" URL）
-                    if not isinstance(video_url, str) or not video_url:
+                if element.name == "video":  # noqa: SIM102  # 与上游逐行同源，不合并条件
+                    if video_url := element.get("src"):
+                        yield Creator.video(
+                            url_or_task=str(video_url),
+                            # 补偿②：poster 缺失传 None（上游 str(None) 产出 "None" 封面 URL）
+                            cover_url=element.get("poster"),
+                        )
+                        skip_parent = element
                         continue
-                    stable_url = urlparse(video_url)._replace(query="", fragment="").geturl()
-                    yield Creator.video(
-                        url_or_task=video_url,
-                        # 补偿②：poster 缺失传 None（上游产出字面 "None" 封面 URL）
-                        cover_url=element.get("poster"),
-                        cache_key=f"hupu:{stable_url}",
-                    )
-                    skip_parent = element
-                    continue
 
                 # 保持与上游逐行同源
                 if element.name == "img":  # noqa: SIM102

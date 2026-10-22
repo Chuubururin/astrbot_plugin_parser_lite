@@ -222,12 +222,17 @@ async def test_skip_segments_query_encodes_categories_as_json_array(
     `categories=sponsor&categories=intro`，服务端对复数键无条件 `JSON.parse` → 恒 400，
     面板上看不出任何异常。下一次 roll 若再退回来，本用例必须红。
     """
+    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.config import pconfig
+
     module = _vendor_sponsorblock()
     seen = _real_channel(monkeypatch, status=200, content=b"[]")
-
-    await module.fetch_segments(
-        "https://bsbsb.top", "BV11Kc2zZEDK", "36656057057", ["sponsor", "intro"]
-    )
+    restore = (pconfig.plite_bsb_api_base, pconfig.plite_bsb_categories)
+    pconfig.plite_bsb_api_base = "https://bsbsb.top"
+    pconfig.plite_bsb_categories = ["sponsor", "intro"]
+    try:
+        await module.SponsorBlock.fetch_segments("BV11Kc2zZEDK", 36656057057)
+    finally:
+        pconfig.plite_bsb_api_base, pconfig.plite_bsb_categories = restore
 
     encoded: httpx.URL = seen["request"].url
     assert str(encoded).startswith("https://bsbsb.top/api/skipSegments?")
@@ -237,6 +242,9 @@ async def test_skip_segments_query_encodes_categories_as_json_array(
     # 都可能被展开成重复参数，标量串则两边一致——这条替 curl 通道也兜住。
     (call_kwargs,) = seen["get_calls"]
     assert isinstance(call_kwargs["params"]["categories"], str)
+    # actionTypes 同款约束：它也是复数键，服务端一样无条件 JSON.parse
+    assert str(encoded).count("actionTypes=") == 1, f"重复参数形态：{encoded}"
+    assert isinstance(call_kwargs["params"]["actionTypes"], str)
     assert call_kwargs.get("use_curl_cffi", False) is False  # 空降走 httpx 通道
 
 
@@ -249,13 +257,20 @@ async def test_non_200_reason_reaches_log_without_faking_lines(
     三件事同时挡住「诊断代码自己把链路炸穿」（`.text` 在编码不符时抛 UnicodeError）
     与「远端正文注入假日志行」。本用例把这三条钉住在位（本仓 #21 的核实结论）。
     """
+    from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.config import pconfig
+
     module = _vendor_sponsorblock()
     logger = _LogCapture()
     monkeypatch.setattr(module, "logger", logger)
     body = b'["Unknown category provided."]\n\x1b[31m\xe4\xb8\xad\xe6\x96\x87\r\nFAKE-LINE'
     _real_channel(monkeypatch, status=400, content=body)
-
-    segments = await module.fetch_segments("https://bsbsb.top", "BV1x", "1", ["sponsor"])
+    restore = (pconfig.plite_bsb_api_base, pconfig.plite_bsb_categories)
+    pconfig.plite_bsb_api_base = "https://bsbsb.top"
+    pconfig.plite_bsb_categories = ["sponsor"]
+    try:
+        segments = await module.SponsorBlock.fetch_segments("BV1x", 1)
+    finally:
+        pconfig.plite_bsb_api_base, pconfig.plite_bsb_categories = restore
 
     assert segments == []
     assert len(logger.warnings) == 1, f"应当只有一条告警：{logger.warnings!r}"

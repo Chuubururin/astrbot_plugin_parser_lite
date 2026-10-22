@@ -124,25 +124,35 @@ _HUPU_VIDEO_HTML = (
 )
 
 
-def test_sentinel_hupu_upstream_still_yields_none_urls() -> None:
-    """行为哨兵（hupu）：上游原件的 str(None) 缺陷仍在。
+def test_sentinel_hupu_upstream_still_yields_none_cover() -> None:
+    """行为哨兵（hupu）：上游原件的缺 poster 字面 "None" 缺陷仍在。
 
-    断言的是上游缺陷本身——上游修复后本用例翻红，提示按约定撤销补丁。
-    （截断缺陷已随 5b3d107 修复，上游原件不再截断，不属于本哨兵守护面。）
+    断言的是上游缺陷本身——上游修复后本用例翻红，提示按约定撤销补偿②。
+    （截断缺陷已随 5b3d107 修复，缺 src 已随 standalone 221506d 修复，
+    两者都不属于本哨兵守护面。）
+    """
+    upstream = vendor_patches.VENDOR_HUPU_ITER
+    assert upstream is not None
+    no_poster = list(
+        upstream(BeautifulSoup('<video src="https://example.com/v.mp4"></video>', "html.parser"))
+    )
+    covers = [v.cover.url for v in no_poster if isinstance(v, VideoContent) and v.cover is not None]
+    assert covers == ["None"], '上游已修复缺 poster 的字面 "None" URL：str(None) 补偿②可撤销'
+
+
+def test_hupu_upstream_skips_video_without_src() -> None:
+    """补偿①已随上游 standalone 221506d 撤销，此处冒烟防上游回退。
+
+    上游原件（VENDOR_HUPU_ITER，挂载前留存）自己就该跳过缺 src 的 video；
+    若这条翻红说明上游把 ``if video_url := element.get("src")`` 改回去了，
+    需要重新上补偿①而不是让桥的复刻版继续替它兜着。
     """
     upstream = vendor_patches.VENDOR_HUPU_ITER
     assert upstream is not None
     no_src = list(
         upstream(BeautifulSoup('<video poster="https://example.com/p.jpg"></video>', "html.parser"))
     )
-    assert [i.path_task.url for i in no_src if isinstance(i, VideoContent)] == ["None"], (
-        "上游已跳过缺 src 的 video：str(None) 补偿①可撤销"
-    )
-    no_poster = list(
-        upstream(BeautifulSoup('<video src="https://example.com/v.mp4"></video>', "html.parser"))
-    )
-    covers = [v.cover.url for v in no_poster if isinstance(v, VideoContent) and v.cover is not None]
-    assert covers == ["None"], '上游已修复缺 poster 的字面 "None" URL：str(None) 补偿②可撤销'
+    assert [i.path_task.url for i in no_src if isinstance(i, VideoContent)] == []
 
 
 # ---------------------------------------------------------------- kuwo
