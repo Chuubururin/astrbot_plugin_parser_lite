@@ -29,6 +29,7 @@ from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot_plugin_parser_lite import main as main_mod
+from astrbot_plugin_parser_lite.bridge.ssrf import UrlBlockedError
 from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite import configure
 from astrbot_plugin_parser_lite.vendor.nonebot_plugin_parser_lite.constants import (
     EMOJI_MAP,
@@ -120,7 +121,7 @@ class _FakeParser:
         self,
         result: ParseResult | None = None,
         *,
-        parse_exc: Exception | None = None,
+        parse_exc: BaseException | None = None,
     ) -> None:
         self._result = result if result is not None else _make_result()
         self._parse_exc = parse_exc
@@ -252,6 +253,30 @@ async def test_parse_exception_verbose_reaches_user() -> None:
     result = yielded[0]
     assert isinstance(result, MessageEventResult)
     assert any("不支持的链接" in c.text for c in result.chain if isinstance(c, Comp.Plain))
+
+
+async def test_url_blocked_message_never_leaks_the_resolved_address() -> None:
+    """SSRF 拒绝的会话文案是固定判词，不带拒绝原因。
+
+    ``UrlBlockedError`` 的文本含解析到的内网地址与端口判据（``域名 X 解析到被
+    拒绝的地址 10.0.0.7``）；开着 verbose_error 把它原样端进群，等于给任何群
+    成员一个内网拓扑探测 oracle。细节只进日志。
+    """
+    parser = _FakeParser(
+        parse_exc=UrlBlockedError("域名 internal.example.com 解析到被拒绝的地址 10.0.0.7")
+    )
+    plugin = _make_plugin(parser, config={"plite_verbose_error": True})
+    event = _make_event(URL)
+
+    yielded = await _drive(plugin, event)
+
+    assert len(yielded) == 1, "verbose_error 开启时安全拒绝应给用户一个判词"
+    result = yielded[0]
+    assert isinstance(result, MessageEventResult)
+    text = "".join(c.text for c in result.chain if isinstance(c, Comp.Plain))
+    assert "10.0.0.7" not in text, f"内网地址泄进会话：{text!r}"
+    assert "internal.example.com" not in text, f"拒绝原因泄进会话：{text!r}"
+    assert "请求被安全策略拒绝" in text
 
 
 async def test_tip_exception_bypasses_verbose_gate() -> None:

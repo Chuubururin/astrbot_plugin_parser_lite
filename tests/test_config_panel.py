@@ -12,6 +12,7 @@ import ast
 import importlib.util
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 
@@ -32,8 +33,12 @@ _SCAN_ROOTS = (
 )
 
 
+@lru_cache(maxsize=1)
 def _property_reads() -> dict[str, set[str]]:
-    """Config 的 @property → 其函数体里 `self.<名称>` 读到的成员名集合。"""
+    """Config 的 @property → 其函数体里 `self.<名称>` 读到的成员名集合。
+
+    每个面板字段都要走一遍可达性传递，vendor config.py 的 AST 只解析一次。
+    """
     tree = ast.parse(CONFIG_PY.read_text(encoding="utf-8"))
     cls = next(
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Config"
@@ -74,18 +79,35 @@ def _reachable_names(field: str) -> set[str]:
         names |= expanded
 
 
-def _reader_files(names: set[str]) -> list[str]:
-    patterns = [re.compile(rf"\b{re.escape(name)}\b") for name in sorted(names)]
-    hits: list[str] = []
+@lru_cache(maxsize=1)
+def _scan_blobs() -> tuple[tuple[str, str], ...]:
+    """待扫描文件的（相对路径, 文本）快照。
+
+    每个面板字段都要全树扫一遍读取点：225 个 .py（约 1.8MB）× 字段数是本模块
+    最贵的一项（单条用例实测 6.0s，其中读盘占满）。快照进程内只取一次。
+    """
+    blobs: list[tuple[str, str]] = []
     for root in _SCAN_ROOTS:
         files = [root] if root.is_file() else list(root.rglob("*.py"))
         for path in files:
             if path.name in NON_READER_FILE_NAMES:
                 continue
-            blob = path.read_text(encoding="utf-8", errors="replace")
-            if any(pattern.search(blob) for pattern in patterns):
-                hits.append(str(path.relative_to(REPO_ROOT)).replace("\\", "/"))
-    return sorted(hits)
+            blobs.append(
+                (
+                    path.relative_to(REPO_ROOT).as_posix(),
+                    path.read_text(encoding="utf-8", errors="replace"),
+                )
+            )
+    return tuple(blobs)
+
+
+def _reader_files(names: set[str]) -> list[str]:
+    patterns = [re.compile(rf"\b{re.escape(name)}\b") for name in sorted(names)]
+    return sorted(
+        relative
+        for relative, blob in _scan_blobs()
+        if any(pattern.search(blob) for pattern in patterns)
+    )
 
 
 def _readers(field: str) -> list[str]:

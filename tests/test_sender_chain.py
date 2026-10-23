@@ -178,6 +178,22 @@ async def test_video_over_threshold_becomes_file(
     assert comp.file == str(big)
 
 
+def test_video_threshold_has_one_clamping_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    """阈值判据只有一处：非法值回落默认，越界按边界钳制，返回实际生效值。
+
+    上界不是洁癖——调高阈值等于让更多视频走 base64 分支，整段视频驻留内存，
+    而 AstrBot 面板对 int 字段不做范围校验，运行期不钳就等于没有上界。
+    """
+    monkeypatch.setattr(sender, "_video_file_threshold_mb", sender.VIDEO_FILE_THRESHOLD_DEFAULT_MB)
+
+    assert sender.set_video_file_threshold_mb("不是数字") == sender.VIDEO_FILE_THRESHOLD_DEFAULT_MB
+    assert sender.set_video_file_threshold_mb(None) == sender.VIDEO_FILE_THRESHOLD_DEFAULT_MB
+    assert sender.set_video_file_threshold_mb(0) == 1
+    over = sender.VIDEO_FILE_THRESHOLD_MAX_MB + 500
+    assert sender.set_video_file_threshold_mb(over) == sender.VIDEO_FILE_THRESHOLD_MAX_MB
+    assert sender._video_file_threshold_mb == sender.VIDEO_FILE_THRESHOLD_MAX_MB
+
+
 def _make_result() -> ParseResult:
     return ParseResult(
         platform=Platform(name=PlatformEnum.HUPU, display_name="虎扑"),
@@ -434,7 +450,7 @@ async def test_immediate_video_stats_anyio_path_without_crash(tmp_path: Path) ->
     video.write_bytes(b"video-bytes")
     cont = _ImmediateVideo(anyio.Path(video))
 
-    chains = [chain async for chain in sender._handle_immediate_media(cont, cast(Any, None))]
+    chains = [chain async for chain in sender._handle_immediate_media(cont)]
 
     assert len(chains) == 1
     assert isinstance(chains[0][0], Comp.Video), "正常视频应产出 Video 组件而非崩溃"
@@ -447,7 +463,7 @@ async def test_immediate_video_zero_size_gate_with_anyio_path(tmp_path: Path) ->
     video.write_bytes(b"")
     cont = _ImmediateVideo(anyio.Path(video))
 
-    chains = [chain async for chain in sender._handle_immediate_media(cont, cast(Any, None))]
+    chains = [chain async for chain in sender._handle_immediate_media(cont)]
 
     assert len(chains) == 1
     assert isinstance(chains[0][0], Comp.Plain)

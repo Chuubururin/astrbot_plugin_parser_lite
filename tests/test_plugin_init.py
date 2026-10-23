@@ -34,7 +34,7 @@ def _init_plugin(monkeypatch: pytest.MonkeyPatch, **over: Any) -> Any:
     monkeypatch.setattr(main_mod, "configure", lambda **_kw: None)
     monkeypatch.setattr(main_mod, "sync_import_time_config", lambda: None)
     monkeypatch.setattr(main_mod, "Parser", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "set_video_file_threshold_mb", lambda _mb: None)
+    monkeypatch.setattr(main_mod, "set_video_file_threshold_mb", lambda _mb: 100)
     monkeypatch.setattr(main_mod, "apply_vendor_patches", lambda: None)
     for name, value in over.items():
         monkeypatch.setattr(main_mod, name, value)
@@ -64,3 +64,26 @@ def test_init_degrades_when_vendor_patches_fail(monkeypatch: pytest.MonkeyPatch)
         apply_vendor_patches=_fail_patches,
     )
     assert plugin is not None, "vendor 补丁失败不应阻断启动"
+
+
+def test_config_error_summary_never_carries_input_values() -> None:
+    """配置异常摘要只给类型名与字段名。
+
+    pydantic 的 ``errors()`` 每项同时带 ``loc`` 与 ``input``，``%r`` 会把 input
+    一并 repr 出来——而 vendor 配置面携带 linuxdo/zhihu cookie，凭据不得落日志。
+    """
+
+    class _ValidationLike(Exception):
+        def errors(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "loc": ("plite_zhihu_ck", 3),
+                    "input": "SECRET-COOKIE-VALUE",
+                    "msg": "字段过长",
+                }
+            ]
+
+    summary = main_mod._config_error_summary(_ValidationLike("SECRET-COOKIE-VALUE"))
+    assert "SECRET-COOKIE-VALUE" not in summary, f"输入值进了摘要：{summary}"
+    assert "plite_zhihu_ck" in summary, f"摘要丢了出错字段名：{summary}"
+    assert main_mod._config_error_summary(ValueError("SECRET-COOKIE-VALUE")) == "ValueError"

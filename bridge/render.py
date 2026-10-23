@@ -4,8 +4,9 @@
 JSON-like 的 ``data`` 根变量，不再接触模型对象与过滤器）；模板为上游
 render/templates 的逐字节快照（模板数据面注入层）；截图引擎用 AstrBot
 内置 html_render。AstrBot 自定义模板只走网络 t2i 端点（远端浏览器渲染），
-读不到本地 file:// 路径，因此本地媒体必须内联为 base64 data URI；任何
-渲染失败由调用方降级为 sender 纯文本路径。
+读不到本地 file:// 路径，因此本地媒体必须内联为 base64 data URI；远端渲染
+失败先按有限退避重试（秒级窗口，见 T2I_RENDER_BACKOFF_SECONDS），仍失败才由
+调用方降级为 sender 纯文本路径。
 
 已知边界：上游 Theme API 的用户主题目录（plite_theme_dirs/plite_render_theme）
 在桥不生效——远端 t2i 无 base_url 相对资源解析，自定义主题目录的
@@ -15,15 +16,18 @@ file:// 与外链样式在桥管线里必然穿帮；桥固定渲染内置 defau
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import hashlib
 import json
 import mimetypes
 import re
+import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
+from functools import lru_cache
 from html import escape
 from io import BytesIO
 from pathlib import Path as SyncPath
@@ -32,6 +36,7 @@ from typing import Any, Literal, cast
 import qrcode
 from anyio import Path, to_thread
 from astrbot.api import logger
+from jinja2 import Environment, FileSystemLoader
 from PIL import Image
 
 from ..vendor.nonebot_plugin_parser_lite.config import _nickname, pconfig
@@ -56,19 +61,26 @@ from . import render_params, texts
 PLACEHOLDER_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 
 INLINE_BUDGET_BYTES = 24 * 1024 * 1024
-"""单次渲染允许内联进 HTML 的媒体总预算（base64 编码后字节）。
+"""单次渲染允许内联的媒体总预算（base64 后字节，按取源记账）。
 
-按 base64 后的实际字节记账（HTML 里 data URI 的真实体量，约原始文件的
-4/3）——若按原始字节记账，24MB 预算实际会产出约 32MB HTML 整段 POST 给
-远程 t2i。
+一张图通常只取源一次（数据层算好 URI，模板把同一个值插进多个槽位），故本预算
+≈ 卡面里整图字节的总量；装饰层的重复副本在收尾面被换成缩略图，不额外占预算。
+收小它不会让载荷更安全，只会让卡发不出去：载荷由取源次数与收尾面瘦身决定。
+
+上界依据对官方端点池的直投实测：19.6 MB HTML 的 body 两端点均正常出图
+（10.8 / 19.8 秒），另加宿主固定注入约 2.9 MB（桥不可控也不可观测）。预算低
+于约 12 MB 时，两张 5 MB 照片的卡面即整页降级为文本——那是可用性回退，不是
+载荷改善。残余边界：预算用满时 body 可达约 27 MB，该尾部未被实测覆盖。
 """
 INLINE_MAX_FILE_BYTES = 8 * 1024 * 1024
-"""单个媒体文件的内联上限（原始文件字节）"""
+"""单个媒体文件的内联上限（原始文件字节）。"""
 INLINE_DEGRADE_THRESHOLD = 2
-"""允许降级为占位图的媒体数上限，超过即整页降级为文本。
+"""允许**内容**媒体降级的张数上限，超过即整页降级为文本。
 
 预算按 base64 后字节计，预算用尽等于剩余媒体全部缺图；缺 1~2 张图卡片仍
 可读，缺 3 张以上应整体降级，而不是发一张「一半是灰块」且毫无提示的卡。
+装饰位（头像、平台 logo 的 1×1 透明占位）不在此计数内——它们肉眼不可见，
+混进来会让「作者没头像 + 一张大图放不下」的正常卡片整页发不出去。
 """
 
 
@@ -87,39 +99,63 @@ def base64_size(raw_size: int) -> int:
 
 
 class InlineBudget:
-    """单次渲染的 base64 内联字节预算（每次渲染独立实例，防跨请求串账）。"""
+    """单次渲染的 base64 内联字节预算与降级计数（每次渲染独立实例，防跨请求串账）。
 
-    __slots__ = ("_degraded_paths", "used")
+    整页降级判据只由**内容**缺图驱动：``degraded`` 计正文媒体的缺失/超预算/结构性
+    失败，每一项在卡面上都是一个真实的洞。头像、平台 logo 这类装饰位回退成 1×1
+    透明占位，肉眼不可见，只累加 ``decoration_misses`` 供日志读数——把它们混进阈值
+    会让「作者没头像 + 一张大图放不下」这类正常卡片整页降级为纯文本（实测 4 张
+    照片的卡面即因此被拒：1 张超预算贡献 2 个键、装饰位头像再贡献 1 个，凑满
+    3 > 阈值 2）。
+    """
+
+    __slots__ = ("_degraded_keys", "decoration_misses", "used")
 
     def __init__(self) -> None:
         self.used = 0
-        self._degraded_paths: set[str] = set()
+        self.decoration_misses = 0
+        self._degraded_keys: set[str] = set()
 
     @property
     def degraded(self) -> int:
-        """因超预算/超单文件上限而降级为占位图的媒体数（按文件去重）。
+        """内容类降级数（整页降级判据的分子）。
 
-        按路径去重而非按调用次数：同一张媒体可在主卡面/转发卡面被多次取源
-        （get_path / get_base / get_cover_path 等），按次数计会让阈值随
-        取源次数漂移。
+        键可以是媒体文件路径（一张图被多个槽位取用只算一次），也可以是
+        ``reason:type:method`` 折叠键（结构性失败按类折叠，见 _resolve_src）。
         """
-        return len(self._degraded_paths)
+        return len(self._degraded_keys)
 
     def try_charge(self, size: int) -> bool:
-        """预算内则记账并返回 True；超预算不记账返回 False。"""
+        """预算内则记账并返回 True；超预算不记账返回 False。
+
+        按取源调用记账。一张内容图通常只取源一次（数据层算好 URI，模板把同一
+        个值插进多个槽位），所以本预算 ≈ 卡面里整图字节的总量；同一文件真被多
+        个取源面各算一次时偏保守，是刻意取舍。
+        """
         if self.used + size > INLINE_BUDGET_BYTES:
             return False
         self.used += size
         return True
 
-    def note_degraded(self, path: str) -> None:
-        """记一个「因预算降级为占位图」的媒体路径（见 build_html 的整页降级判据）。"""
-        self._degraded_paths.add(path)
+    def note_degraded(self, key: str) -> None:
+        """记一个内容类降级（按文件路径或折叠键，同一集合去重）。"""
+        self._degraded_keys.add(key)
 
 
 Theme = Literal["light", "dark"]
 
 TEMPLATES_DIR = SyncPath(__file__).resolve().parent.parent / "templates"
+
+_JINJA_ENV = Environment(
+    loader=FileSystemLoader(TEMPLATES_DIR), enable_async=True, autoescape=False
+)
+"""卡面模板环境（进程级单例）：模板是入库的生成工件，运行期不变，每次渲染新建
+Environment 等于把 32KB 模板重复解析编译一遍。
+
+autoescape=False 是数据层单点转义设计的组成部分而非缺口：正文已在 _escape_html
+转义恰好一次，此处再开会双转义（守护见 test_render_smoke 的
+escapes_attacker_controlled_html / escapes_title_exactly_once）。
+"""
 
 _MUSIC_PLATFORMS = frozenset({"kugou", "netease", "kuwo", "qsmusic", "qqmusic"})
 """镜像上游 render/theme.py ``MUSIC_PLATFORMS``（Theme API v1 模板选择规则）。"""
@@ -128,11 +164,14 @@ _THEME_SCHEMA_VERSION = 1
 """Theme 数据面契约版本（镜像上游 render/theme.py ``THEME_SCHEMA_VERSION``）。"""
 
 
+@lru_cache(maxsize=1)
 def _theme_manifest() -> dict[str, Any]:
     """内置主题清单（templates/theme.json，模板数据面逐字节快照产物）。
 
     ``data.theme_id`` 从这里取值而非硬编码：上游改主题清单 id 时随 roll
-    自动跟随（与渲染参数注入层同一「按源取值」纪律）。
+    自动跟随（与渲染参数注入层同一「按源取值」纪律）。清单是入库工件、运行期
+    不变，缓存掉每次渲染的读盘与解析；lazily 读取使缺文件仍报在渲染期而非
+    插件加载期。
     """
     manifest_text = (TEMPLATES_DIR / "theme.json").read_text(encoding="utf-8")
     return cast(dict[str, Any], json.loads(manifest_text))
@@ -199,6 +238,81 @@ def _inline_css_sync(html: str) -> str:
     return html + _T2I_VIEWPORT_PATCH
 
 
+_DECORATIVE_IMG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_DECORATIVE_BLUR_RE = re.compile(r"\b(?:[\w-]+:)*blur-\[[^\]]+\]")
+"""装饰层识别判据：卡面模板只用带任意值的 ``blur-[...]`` 类画环境光与光晕
+（macros.jinja 的 ``MEDIA_GLOW_CLASS`` 与 ``render_ambient`` 的 cover 层），
+正文前景图与头像不带 blur。识别落在 HTML 面而非模板/数据面：模板本体逐字节
+来自上游提取（scripts/extract_render_templates.py），桥改不了模板。"""
+_DATA_URI_SRC_RE = re.compile(r'src="(data:image/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+)"')
+_DECORATIVE_SLIM_MIN_BYTES = 32 * 1024
+"""装饰层 data URI 的瘦身门槛（编码后字节）：图标与头像级小图缩完省不下几百
+字节，不值得为此解码一次。"""
+_DECORATIVE_SLIM_MAX_SIDE = 320
+"""装饰层缩略图边长上限（px）：光晕层自带 28~80px 模糊，320px 已是过剩精度。"""
+_DECORATIVE_SLIM_JPEG_QUALITY = 50
+
+
+def _slim_decorative_images_sync(html: str) -> str:
+    """把模糊装饰层里的整图 data URI 换成缩略图。
+
+    一张照片在卡面 HTML 里出现 3 次（环境光 cover、光晕 glow、正文前景），而
+    POST 给远程 t2i 的就是这份 HTML——装饰层被 28~80px 模糊吃掉细节，按整图
+    内联等于白送三分之二的载荷（实测 1 张 2MB 照片产出 8.8MB HTML、11.7MB
+    body；2 张 14.5MB）。公共端点会在这份 body 上抛
+    ``request body read timed out``，重复内联正是它的放大器。
+
+    正文前景图一律不动（判据是标签 class 命中 ``blur-[...]``）；缩略图生成
+    失败、或没有比整图更小，就原样保留——瘦身是载荷优化，反过来弄坏卡面不可
+    接受。同一 URI 只解码一次（cover 与 glow 共用一张 URI）。
+    """
+    cache: dict[str, str | None] = {}
+
+    def _thumb_uri(uri: str) -> str | None:
+        if uri not in cache:
+            cache[uri] = _make_thumb(uri)
+        return cache[uri]
+
+    def _make_thumb(uri: str) -> str | None:
+        head, sep, encoded = uri.partition(";base64,")
+        mime = head.partition(":")[2] if head.startswith("data:") else ""
+        if not sep:
+            return None
+        try:
+            with Image.open(BytesIO(base64.b64decode(encoded))) as im:
+                im.thumbnail((_DECORATIVE_SLIM_MAX_SIDE, _DECORATIVE_SLIM_MAX_SIDE))
+                buf = BytesIO()
+                if mime == "image/jpeg":
+                    im.convert("RGB").save(
+                        buf, format="JPEG", quality=_DECORATIVE_SLIM_JPEG_QUALITY
+                    )
+                    thumb_mime = "image/jpeg"
+                else:
+                    # 非 JPEG（含带 alpha 的 PNG）保格式重编码：转 RGB 会把透明
+                    # 区填成黑块，光晕层上就是两块不该出现的暗斑
+                    im.save(buf, format=im.format or "PNG", optimize=True)
+                    thumb_mime = "image/png"
+        except Exception as exc:
+            logger.warning("装饰层缩略图生成失败，按整图保留: %r", exc)
+            return None
+        thumb = f"data:{thumb_mime};base64,{base64.b64encode(buf.getvalue()).decode()}"
+        return thumb if len(thumb) < len(uri) else None
+
+    def _sub(m: re.Match[str]) -> str:
+        tag = m.group(0)
+        if not _DECORATIVE_BLUR_RE.search(tag):
+            return tag
+        src_m = _DATA_URI_SRC_RE.search(tag)
+        if src_m is None or len(src_m.group(1)) < _DECORATIVE_SLIM_MIN_BYTES:
+            return tag
+        thumb = _thumb_uri(src_m.group(1))
+        if thumb is None:
+            return tag
+        return tag[: src_m.start(1)] + thumb + tag[src_m.end(1) :]
+
+    return _DECORATIVE_IMG_RE.sub(_sub, html)
+
+
 def get_theme() -> Theme:
     """根据配置的白天时间范围返回当前主题（与上游逻辑一致）。"""
     start, end = pconfig.day_range_minutes
@@ -214,11 +328,12 @@ def get_theme() -> Theme:
 
 
 def _inline_image_sync(path_str: str, budget: InlineBudget) -> str | None:
-    """本地文件 → base64 data URI；非图片/超预算返回 None 交给调用方降级。
+    """本地文件 → base64 data URI；非图片/读失败/超上限/超预算返回 None。
 
-    同步实现：由 _resolve_src 经 to_thread 调用，读文件+编码（单文件上限 8MB）
-    不占事件循环。记账口径为 base64 后的字节，且「读成功后才记账」——若先
-    记账后读文件，读失败会漏账虚耗预算。
+    同步实现：由 _resolve_src 经 to_thread 调用，读文件+编码（单文件上限
+    INLINE_MAX_FILE_BYTES）不占事件循环。只记账、**不记降级**——降级计数统一
+    由 _resolve_src 按角色记一次，两处都记会让一张放不下的图在整页降级判据里
+    占两个名额。记账在「读成功后」：先记账后读失败会漏账虚耗预算。
     """
     path = SyncPath(path_str)
     mime = mimetypes.guess_type(path.name)[0]
@@ -227,14 +342,12 @@ def _inline_image_sync(path_str: str, budget: InlineBudget) -> str | None:
     try:
         size = path.stat().st_size
         if size > INLINE_MAX_FILE_BYTES:
-            budget.note_degraded(path_str)
             return None
         raw = path.read_bytes()
     except OSError:
         # 读失败（竞态删除/权限）不计账：预算不该被未产出的 data URI 占用
         return None
     if not budget.try_charge(base64_size(len(raw))):
-        budget.note_degraded(path_str)
         return None
     return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
 
@@ -248,6 +361,7 @@ async def _resolve_src(
     method: str = "get_path",
     *,
     budget: InlineBudget,
+    role: str = "content",
     return_none_on_fail: bool = False,
 ) -> str | None:
     """safe_src 的内联镜像（上游 render/context.py@main 数据层，Theme API v1）。
@@ -258,45 +372,55 @@ async def _resolve_src(
     base64 data URI；失败回退形态与上游同构（PLACEHOLDER_IMAGE 或 None）。
 
     桥侧记账纪律（桥自有约定，独立于上游语义）：
-    - fail 为 PLACEHOLDER 时是**可见灰块**，必须计入整页降级判据——否则
-      「方法缺失/异常/None src」的灰块卡会被当成功缓存（灰块永久卡）；
-    - 去重键按 reason:type:method 折叠不同对象，是刻意取舍：占位图为 1×1
-      透明 GIF（非可见灰块），评论头像/回复头像不带 return_none_on_fail——
-      逐对象计数会让多条无头像评论的正常卡片误触整页降级。内容图的预算类
-      降级按文件路径逐张计数（_inline_image），不受此折叠影响；结构性失败
-      （vendor 改名等）同时命中多个不同 (type, method) 组合，折叠后仍能触发
-      阈值；
+    - **降级只在本函数记一次**：_inline_image 只管字节记账。两处都记会让一张
+      放不下的图在整页降级判据里占两个名额；
+    - ``role`` 决定这类缺口的可见性：``content``（正文图/视频封面）计入整页
+      降级判据——卡面上是一个真实的洞；``decoration``（作者头像、平台 logo）
+      只留档不判据——回退成 1×1 透明占位，肉眼不可见，没有资格顶掉整张卡；
+    - 内容图的内联失败按**文件路径**记（同一张图被多个槽位取用只占一个名额）；
+      结构性失败（方法缺失/不可调用/None src/异常）按 ``reason:type:method``
+      折叠——评论头像与回复头像不带 return_none_on_fail，逐对象计数会让多条
+      无头像评论的正常卡片误触整页降级；
+    - ``return_none_on_fail=True`` 的槽位（贴纸、音乐图标、转发卡）失败时整段
+      缺席、不留占位，因此完全不计数；
     - 异常就地 logger.warning（与上游同处一致）：「卡片上几张图变灰块」这类
       事故需要在日志里有定位线索；结构性失败则靠计数超阈触发整页降级告警。
     """
     fail = None if return_none_on_fail else PLACEHOLDER_IMAGE
 
-    def _note_placeholder(reason: str) -> None:
-        if fail is not None:
-            budget.note_degraded(f"{reason}:{type(obj).__name__}:{method}")
+    def _note(reason: str) -> None:
+        if fail is None:
+            return
+        if role == "decoration":
+            budget.decoration_misses += 1
+            return
+        budget.note_degraded(f"{reason}:{type(obj).__name__}:{method}")
 
     try:
         if obj is None or not hasattr(obj, method):
-            _note_placeholder("obj-none" if obj is None else "no-method")
+            _note("obj-none" if obj is None else "no-method")
             return fail
         attr = getattr(obj, method)
         if not callable(attr):
-            _note_placeholder("not-callable")
+            _note("not-callable")
             return fail
         src = attr()
         if hasattr(src, "__await__"):
             src = await src
         if src is None:
-            _note_placeholder("src-none")
+            _note("src-none")
             return fail
         inlined = await _inline_image(str(src), budget)
         if inlined:
             return inlined
-        _note_placeholder("inline-miss")
+        if role == "decoration":
+            _note("inline-miss")
+        else:
+            budget.note_degraded(str(src))
         return fail
     except Exception as error:
         logger.warning("safe_src(%s) 处理 %s 时失败: %r", method, type(obj).__name__, error)
-        _note_placeholder("error")
+        _note("error")
         return fail
 
 
@@ -351,7 +475,7 @@ async def _serialize_author(author: Any, *, budget: InlineBudget) -> dict[str, A
         "id": author.id,
         "description": author.description,
         "location": author.location,
-        "avatar": await _resolve_src(author, "get_avatar_path", budget=budget),
+        "avatar": await _resolve_src(author, "get_avatar_path", budget=budget, role="decoration"),
     }
 
 
@@ -514,7 +638,9 @@ async def _serialize_result(
         "platform": {
             "id": str(result.platform.name),
             "name": result.platform.display_name,
-            "logo": await _resolve_src(result.platform, "get_logo_path", budget=budget),
+            "logo": await _resolve_src(
+                result.platform, "get_logo_path", budget=budget, role="decoration"
+            ),
         },
         "author": await _serialize_author(result.author, budget=budget),
         "content": content,
@@ -628,30 +754,28 @@ async def build_html(result: ParseResult, theme: Theme) -> str:
     树，模板唯一根变量 ``data``。autoescape=False 与上游一致——转义责任
     全量在数据层（_escape_html），模板裸插值，开启 autoescape 会二次转义
     卡片正文。本地媒体由 _resolve_src 内联为 base64 data URI（远程 t2i
-    读不到本地 file://），每次渲染独立内联预算。样式表同样内联
-    （_inline_css_sync），并以此覆盖上游的 _inject_fallback_icon_css：
-    内置模板自带 icon.css/tailwind.css link，替换后已在 ``<style>`` 内，
-    无需再注入重复副本。
+    读不到本地 file://），每次渲染独立内联预算。样式表同样内联，装饰层
+    （模糊光晕）的整图 data URI 在收尾面换成缩略图——两步都在
+    ``_post_process_sync`` 这唯一的 HTML 面接缝上完成：卡面模板逐字节来自
+    上游，桥不改模板本体，只改产出字节。CSS 内联以此覆盖上游的
+    _inject_fallback_icon_css：内置模板自带 icon.css/tailwind.css link，
+    替换后已在 ``<style>`` 内，无需再注入重复副本。
     """
-    from jinja2 import Environment, FileSystemLoader
-
     budget = InlineBudget()
     data = await build_theme_data(result, color_scheme=theme, budget=budget)
-    # autoescape=False 是数据层单点转义设计的组成部分而非缺口：正文已在
-    # _escape_html 转义恰好一次，此处再开会双转义（守护见 test_render_smoke
-    # 的 escapes_attacker_controlled_html / escapes_title_exactly_once）
-    env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), enable_async=True, autoescape=False)
-    template = env.get_template(_select_template(result))
+    template = _JINJA_ENV.get_template(_select_template(result))
     rendered = await template.render_async(data=data)
     if budget.degraded > INLINE_DEGRADE_THRESHOLD:
         # 缺图不再静默：超阈值的降级意味着卡片大面积缺图，整页降级为文本
         # 比发一张「一半是灰块」的卡更诚实
         logger.warning(
-            "内联降级媒体 %d 张（阈值 %d，预算 %d 字节，已用 %d）：整页降级为文本",
+            "内联降级内容媒体 %d 张（阈值 %d，预算 %d 字节，已用 %d，另有装饰位 %d 处不计入判据）"
+            "：整页降级为文本",
             budget.degraded,
             INLINE_DEGRADE_THRESHOLD,
             INLINE_BUDGET_BYTES,
             budget.used,
+            budget.decoration_misses,
         )
         # 异常消息保持 ASCII：CJK 诊断只走上一条日志——桥运行时模块的用户
         # 可见 CJK 文案必须经 texts.py 注入层（tests/test_user_texts.py 的
@@ -659,30 +783,54 @@ async def build_html(result: ParseResult, theme: Theme) -> str:
         raise InlineBudgetExceeded(
             f"inline degraded media {budget.degraded} > threshold {INLINE_DEGRADE_THRESHOLD}"
         )
-    return await to_thread.run_sync(_inline_css_sync, rendered)
+    return await to_thread.run_sync(_post_process_sync, rendered)
 
 
-_T2I_IMAGE_MAGICS = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
-"""t2i 产物可接受的图片魔数：PNG（桥请求的 ``type``）与 JPEG。
+def _post_process_sync(html: str) -> str:
+    """模板产物收尾（HTML 面的单点后处理）：CSS 内联 + 装饰层瘦身。
 
-判定按字节而非按文件名——宿主 ``download_image_by_url`` 不校验响应状态码与
-内容类型，``save_temp_img`` 又把任何响应字节一律写成 ``.jpg`` 文件名，
-扩展名不承载格式信息，错误页也会以「渲染成功的路径」回到这里。
-"""
-
-
-async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> bytes:
-    """渲染结果卡片长图，返回 t2i 产出的图片字节（上游 render_image 等价）。
-
-    两阶段渲染：桥内 jinja2（build_html）产出完整 HTML，再交给 AstrBot
-    html_render 截图——远端 t2i 只接收最终 HTML 字符串（``{{ html }}``
-    变量注入），渲染编排全在桥侧。renderer 为插件实例（Star 基类提供
-    html_render 方法）。
-
-    产物字节先过形态校验，非图片即抛 ``RenderArtifactError``（由调用方降级
-    路径接管），不留给转换环节抛无信息的 UnidentifiedImageError。
+    两步都是纯字节改写，合并为一次 to_thread 调用；顺序无关（CSS 内联换的是
+    ``<link>``，瘦身换的是带 blur 类的 ``<img>`` src）。
     """
-    html = await build_html(result, theme)
+    return _slim_decorative_images_sync(_inline_css_sync(html))
+
+
+_ARTIFACT_HEAD_MAX_CHARS = 200
+"""非图片产物的头部摘要长度：远端错误体（``{"code":1,"message":"..."}`` 或 502
+页）就是给人看的文本，原样带上即可，不必按 JSON 解一遍；日志行必须封住上界。"""
+T2I_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+"""远端 t2i 产物的读取上限。产物来自公共渲染端点，属不可信输入：无上限的
+read_bytes 加 PIL 解码能把一次恶意响应变成内存事故（PIL 只在 2×MAX_IMAGE_PIXELS
+才硬报错）。正常卡面长图是 MB 级，上界留一个数量级余量。"""
+
+
+def _artifact_problem(data: bytes) -> str | None:
+    """产物不是图片时返回形态描述，是图片返回 None。
+
+    远端渲染服务把业务错误直接落成 ``.jpg``（宿主不校验状态码与 Content-Type），
+    所以形态判据比文件名与状态码可信。描述只进日志、不进异常消息：异常 repr 会被
+    ``plite_verbose_error`` 端给用户，远端自由文本不该出现在会话里。
+    """
+    if not data:
+        return "empty"
+    if data.startswith(b"\x89PNG\r\n\x1a\n") or data.startswith(_JPEG_MAGIC):
+        return None
+    return f"head={data[:_ARTIFACT_HEAD_MAX_CHARS].decode('utf-8', 'replace')!r}"
+
+
+async def render_html(html: str, renderer: Any) -> bytes:
+    """把已成形的卡面 HTML 交给远端 t2i 截图，校验并返回产物字节。
+
+    与 build_html 分开，是为了让重试只重发 POST：HTML 构建（读媒体、base64、
+    PIL 缩略图、模板编译）是确定性的，重试一次就重建一次纯属白烧 CPU 与内存。
+    renderer 为插件实例（Star 基类提供 html_render 方法），远端 t2i 只接收最终
+    HTML 字符串（``{{ html }}`` 变量注入）。
+
+    产物字节先过体积上限与形态校验，非图片即抛 ``RenderArtifactError``（由调用方
+    的重试与降级路径接管），不留给转换环节抛无信息的 UnidentifiedImageError。
+    异常消息只带 ASCII，远端自由文本走日志（见 _artifact_problem）。
+    """
+    started = time.monotonic()
 
     image_path = await renderer.html_render(
         "{{ html }}",
@@ -692,24 +840,99 @@ async def render_image(result: ParseResult, renderer: Any, *, theme: Theme) -> b
     )
 
     # 读图为 anyio.Path 异步（内部 to_thread），不阻塞事件循环
-    data = await Path(str(image_path)).read_bytes()
-    if not data.startswith(_T2I_IMAGE_MAGICS):
+    artifact = Path(str(image_path))
+    size = (await artifact.stat()).st_size
+    if size > T2I_ARTIFACT_MAX_BYTES:
         logger.warning(
-            "t2i 产物不是可识别图片（len=%d head=%r），拒绝当作渲染成功: %s",
+            "t2i 产物 %d 字节超上限 %d，拒绝读取: %s", size, T2I_ARTIFACT_MAX_BYTES, image_path
+        )
+        raise RenderArtifactError(f"t2i artifact too large: {size} bytes")
+    data = await artifact.read_bytes()
+    problem = _artifact_problem(data)
+    if problem is not None:
+        logger.warning(
+            "t2i 产物不可用（%s html=%d 字节 产物=%d 字节 耗时=%.1fs），拒绝当作渲染成功: %s",
+            problem,
+            len(html.encode("utf-8")),
             len(data),
-            data[:64],
+            time.monotonic() - started,
             image_path,
         )
-        raise RenderArtifactError("t2i artifact is not a recognizable image")
+        raise RenderArtifactError(f"t2i artifact unusable: not-an-image bytes={len(data)}")
     return data
 
 
-RENDER_CACHE_REV = "4"
+T2I_RENDER_BACKOFF_SECONDS = (1.5, 4.0)
+"""t2i 渲染重试前的等待秒数序列（累计上界 5.5 秒）。
+
+公共端点的抖动是秒级（实测同一载荷 3~19 秒，端点池仅 2 个且宿主每次调用
+重新洗牌），重试一次等于再掷一次硬币；媒体上传抖动是几十秒~分钟量级，
+不在本处覆盖（见 bridge/sender.py 的退避理由）。
+"""
+T2I_RENDER_ATTEMPTS = len(T2I_RENDER_BACKOFF_SECONDS) + 1
+"""总尝试次数（含首次）。由退避序列长度推导——两个常量各改一半会在取退避
+秒数时抛 IndexError，而且只在失败路径上抛，正常测试看不见。"""
+T2I_RENDER_DEADLINE_SECONDS = 60.0
+"""重试的累计耗时上界：只拦「还要不要再等一次」，不切断在途请求。
+
+单次 html_render 实测最长约 19 秒，三次加退避的最坏路径约 65 秒，而这段
+代码跑在消息处理器里（🔨 表情与会话锁一并挂住）。超上界即放弃剩余尝试，
+让调用方按既有的降级文本路径收场。
+"""
+
+
+async def _render_image_with_retry(
+    result: ParseResult,
+    renderer: Any,
+    *,
+    theme: Theme,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bytes:
+    """卡面构建一次 → t2i POST 有限重试。
+
+    只重试「换个时刻/换个端点可能就好」的失败：产物形态非法（远端业务错误、
+    502 页、空响应）与 html_render 自身抛错。``build_html`` 在循环外：卡面自身
+    超预算（``InlineBudgetExceeded``）是确定性失败，重发也不会变，且 HTML 构建
+    本身（读媒体、base64、PIL 缩略图、模板编译）重建一次纯属白烧 CPU 与内存。
+    """
+    html = await build_html(result, theme)
+    started = time.monotonic()
+    last: Exception | None = None
+    for attempt in range(1, T2I_RENDER_ATTEMPTS + 1):
+        if attempt > 1:
+            elapsed = time.monotonic() - started
+            if elapsed > T2I_RENDER_DEADLINE_SECONDS:
+                logger.warning(
+                    "t2i 渲染不再重试：已耗时 %.1fs 超 %.0fs 上界（消息处理器内不长等）",
+                    elapsed,
+                    T2I_RENDER_DEADLINE_SECONDS,
+                )
+                break
+            await sleep(T2I_RENDER_BACKOFF_SECONDS[attempt - 2])
+        try:
+            data = await render_html(html, renderer)
+        except Exception as exc:
+            last = exc
+            logger.warning("t2i 渲染失败（第 %d/%d 次）：%r", attempt, T2I_RENDER_ATTEMPTS, exc)
+            continue
+        if attempt > 1:
+            logger.warning(
+                "t2i 渲染第 %d 次尝试送达（累计 %.1fs）",
+                attempt,
+                time.monotonic() - started,
+            )
+        return data
+    assert last is not None, "retry loop exited without a failure: attempts bound broken"
+    raise last
+
+
+RENDER_CACHE_REV = "5"
 """桥本地渲染行为版本：桥侧渲染管线变更（如 zoom 缩放补丁）
 时递增，使旧键缓存整体失效——上游模板变更走注入的 RENDER_TEMPLATE_VERSION，
 桥自身变更走这里，两把钥匙互不覆盖。当前值对应 Theme API v1 数据面：
-post/meta 嵌套、数据层单点转义、QR 键位 post.qrcode、JPEG 转换走桥内 PIL——
-凡改变转义/形状/键位语义的桥侧变更都须 bump，否则旧缓存产物会按过时语义复用。"""
+post/meta 嵌套、数据层单点转义、QR 键位 post.qrcode、JPEG 转换走桥内 PIL、
+装饰层（模糊光晕）内联缩略图而非整图——凡改变转义/形状/键位/内联形态的桥侧
+变更都须 bump，否则旧缓存产物会按过时语义复用。"""
 
 
 MAX_COMMENTS_LIMIT = 100
@@ -803,13 +1026,22 @@ async def _cache_artifact_usable(path: Path) -> bool:
         return False
 
 
-async def cache_or_render_image(result: ParseResult, renderer: Any) -> Path:
+async def cache_or_render_image(
+    result: ParseResult,
+    renderer: Any,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> Path:
     """上游 cache_or_render_image 等价移植：命中渲染缓存直接复用。
 
     以模板族版本+桥渲染行为版本+主题+渲染相关配置态摘要+结果 URL 为稳定键
     生成缓存文件名：产物存在且为合法 JPEG 即复用不重渲（跨重启可复用）；
-    否则渲染，并把 PNG 转 JPEG（体积约为原图 1/8，多数场景落回图片段而非
-    5MB 文件段，与上游发送语义一致）后原子落盘，并复验产物可用。
+    否则渲染（失败按 _render_image_with_retry 的有限退避重试），并把 PNG 转
+    JPEG（体积约为原图 1/8，多数场景落回图片段而非 5MB 文件段，与上游发送
+    语义一致）后原子落盘，并复验产物可用。
+
+    ``sleep`` 是退避的注入口（与 bridge/sender.py 同构）：不注入就得在单元
+    测试里真等数秒，而失败路径恰恰是最常跑的那条。
     """
     theme = get_theme()
     cache_dir = await CacheManager.ensure_dir(CacheManager.RENDER)
@@ -821,10 +1053,12 @@ async def cache_or_render_image(result: ParseResult, renderer: Any) -> Path:
     key = render_cache_key(result, theme)
     dest = cache_dir / f"{uuid.uuid5(uuid.NAMESPACE_URL, key)}.jpeg"
     if not await _cache_artifact_usable(dest):
-        jpeg = await _png_to_jpeg(await render_image(result, renderer, theme=theme))
+        jpeg = await _png_to_jpeg(
+            await _render_image_with_retry(result, renderer, theme=theme, sleep=sleep)
+        )
         if not _is_jpeg(jpeg):
             logger.warning(
-                "渲染产物非 JPEG 或为空（len=%d），拒绝写入缓存：%s", len(jpeg or b""), dest.name
+                "渲染产物非 JPEG 或为空（len=%d），拒绝写入缓存：%s", len(jpeg), dest.name
             )
             raise RenderArtifactError("render artifact is not JPEG (png conversion failed?)")
         temp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")

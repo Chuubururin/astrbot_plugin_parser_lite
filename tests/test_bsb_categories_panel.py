@@ -117,7 +117,7 @@ def test_init_normalizes_categories_before_handing_them_to_vendor(monkeypatch) -
     monkeypatch.setattr(main_mod, "configure", _capture_configure)
     monkeypatch.setattr(main_mod, "sync_import_time_config", lambda: None)
     monkeypatch.setattr(main_mod, "Parser", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "set_video_file_threshold_mb", lambda _mb: None)
+    monkeypatch.setattr(main_mod, "set_video_file_threshold_mb", lambda _mb: 100)
     monkeypatch.setattr(main_mod, "apply_vendor_patches", lambda: None)
     monkeypatch.setattr(main_mod, "install_ssrf_guard", lambda: None)
 

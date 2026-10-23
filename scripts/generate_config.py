@@ -56,7 +56,7 @@ BRIDGE_FIELDS: dict[str, dict[str, Any]] = {
         "default": True,
     },
     "plite_video_file_threshold_mb": {
-        "description": "视频改用文件消息发送的大小阈值（MB）",
+        "description": "视频改用文件消息发送的大小阈值（MB，有效范围 1-100，超出范围按边界值处理）",
         "type": "int",
         "default": 100,
     },

@@ -93,7 +93,9 @@ class _OriginServer(ThreadingHTTPServer):
 @pytest.fixture()
 def origin() -> Iterator[_OriginServer]:
     server = _OriginServer()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # poll_interval 默认 0.5s，shutdown() 要等满一个轮询周期：本地服务
+    # 的拆除每条用例白等半秒
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     yield server
     server.shutdown()

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import subprocess
@@ -78,16 +79,25 @@ def checker() -> ModuleType:
 
 @pytest.fixture(scope="module")
 def collected_nodes() -> set[str]:
-    """真实套件的全部 node id（参数化归并到基名）。"""
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    nodes = {line.strip().split("[")[0] for line in result.stdout.splitlines() if "::" in line}
-    assert nodes, "测试收集失败：" + (result.stdout + result.stderr)[-2000:]
+    """真实套件的全部 node id（参数化归并到基名）。
+
+    用 AST 读 ``tests/test_*.py`` 而不是再起一次 ``pytest --collect-only``：
+    后者要把整套导入链（含 astrbot 与它的 provider 依赖）重新跑一遍，实测
+    9.7s；判据只需要「文件::函数名」这一层。node id 形态与 pytest 一致
+    （正斜杠、参数化归并到基名），套件里没有测试类，模块级 ``test_*``
+    函数就是全部可收集节点。
+    """
+    nodes: set[str] = set()
+    for path in sorted((REPO_ROOT / "tests").glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        nodes.update(
+            f"{relative}::{item.name}"
+            for item in tree.body
+            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+            and item.name.startswith("test_")
+        )
+    assert nodes, "tests/ 下没解析出任何用例（AST 判据失效）"
     return nodes
 
 

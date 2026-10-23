@@ -301,6 +301,36 @@ def test_ffmpeg_hls_blocks_loopback_url(tmp_path: Path) -> None:
         asyncio.run(FFmpeg.download_hls_to_mp4("http://127.0.0.1/x.m3u8", tmp_path / "a.mp4"))
 
 
+def test_ffmpeg_hls_guard_pre_validates_playlist_urls(tmp_path: Path, monkeypatch) -> None:
+    """守卫必须把播放列表交给预校验，并带上 vendor 传下来的 headers。
+
+    入口 URL 校验挡不住列表里嵌套的子列表/分片地址——ffmpeg 会照列表继续
+    出站，那条路才是内网读取代理的口子。
+    """
+    vendor_patches.apply_vendor_patches()
+    calls: list[tuple[str, Any]] = []
+
+    async def fake_playlist(url: str, headers: Any = None) -> None:
+        calls.append((url, headers))
+        raise ssrf.UrlBlockedError("stop before ffmpeg runs")
+
+    monkeypatch.setattr(
+        ssrf, "validate_url", lambda url: ssrf.ValidatedUrl(host="h", port=80, ips=["1.2.3.4"])
+    )
+    monkeypatch.setattr(ssrf, "validate_hls_playlist", fake_playlist)
+
+    with pytest.raises(ssrf.UrlBlockedError):
+        asyncio.run(
+            FFmpeg.download_hls_to_mp4(
+                "https://cdn.example.com/index.m3u8",
+                tmp_path / "a.mp4",
+                headers={"Referer": "https://example.com"},
+            )
+        )
+
+    assert calls == [("https://cdn.example.com/index.m3u8", {"Referer": "https://example.com"})]
+
+
 def test_ffmpeg_hls_guard_is_applied_once() -> None:
     vendor_patches.apply_vendor_patches()
     guarded = FFmpeg.download_hls_to_mp4.__func__
