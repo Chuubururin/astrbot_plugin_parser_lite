@@ -72,8 +72,15 @@ AstrBot 4.28 的插件配置面板对 int 字段不做范围校验（`minimum`/`
 """
 
 VIDEO_FILE_THRESHOLD_DEFAULT_MB = 100
-"""视频转文件发送阈值的默认值（MB）：模块初值、非法配置回落、main.py
-入口解析兜底共用（单点定义）。"""
+"""视频转文件发送阈值的默认值（MB）：模块初值与非法配置回落共用（单点定义）。"""
+
+VIDEO_FILE_THRESHOLD_MAX_MB = 100
+"""视频转文件发送阈值上界（MB）。
+
+调高它等于让更多视频走 Video 组件，而 base64 分支会把整段视频（编码后约
+1.3×、解码峰值约 2.3× 体积）驻留内存；面板不校验 int 范围（见
+FORWARD_TEXT_THRESHOLD_MAX），上界只能由运行期钳制兜住。
+"""
 
 _video_file_threshold_mb: int = VIDEO_FILE_THRESHOLD_DEFAULT_MB
 """当前生效阈值；main.py 在配置桥时注入，测试可直接覆写"""
@@ -121,13 +128,30 @@ def _sync_path(path: Any) -> SyncPath:
     return SyncPath(str(path))
 
 
-def set_video_file_threshold_mb(mb: int) -> None:
+def set_video_file_threshold_mb(mb: Any) -> int:
+    """写入视频分流阈值，返回实际生效值：非法值回落默认，越界按边界钳制（两者
+    都告警）。
+
+    钳制与告警都收在这一处——入口（main.py 配置桥）只负责把原始配置值递进来，
+    两层各写一遍判据迟早会漂。
+    """
     global _video_file_threshold_mb
     try:
-        _video_file_threshold_mb = max(1, int(mb))
+        value = int(mb)
     except (TypeError, ValueError):
         # WebUI/陈旧配置可能给到 str/None；回落默认而非炸加载
+        logger.warning(
+            "plite_video_file_threshold_mb 非法(%r)，回落默认 %s",
+            mb,
+            VIDEO_FILE_THRESHOLD_DEFAULT_MB,
+        )
         _video_file_threshold_mb = VIDEO_FILE_THRESHOLD_DEFAULT_MB
+        return _video_file_threshold_mb
+    clamped = max(1, min(VIDEO_FILE_THRESHOLD_MAX_MB, value))
+    if clamped != value:
+        logger.warning("plite_video_file_threshold_mb 越界(%s)，钳制为 %s", value, clamped)
+    _video_file_threshold_mb = clamped
+    return clamped
 
 
 class _SenderFilter(SessionFilter):
@@ -211,9 +235,14 @@ async def _ask_lazy_download(event: AstrMessageEvent) -> bool:
 
 
 async def _to_base64(path: SyncPath, raw: bytes | None = None) -> str:
-    """线程内读文件并 base64 编码：阻塞 IO 不占事件循环（大视频可达数十 MB）。"""
-    data = await anyio.to_thread.run_sync(lambda: raw if raw is not None else path.read_bytes())
-    return base64.b64encode(data).decode()
+    """线程内读文件并 base64 编码：两者都不占事件循环（大视频可达数十 MB，
+    编码是与文件同量级的纯 CPU 活，留在循环上会挂住整条消息处理链）。"""
+
+    def _encode() -> str:
+        data = raw if raw is not None else path.read_bytes()
+        return base64.b64encode(data).decode()
+
+    return await anyio.to_thread.run_sync(_encode)
 
 
 def _ensure_readable(path: SyncPath) -> SyncPath:
@@ -308,7 +337,6 @@ async def _mediafile_to_comp_strict(mf: MediaFile) -> Comp.BaseMessageComponent:
 
 async def _handle_immediate_media(
     cont: MediaContent,
-    event: AstrMessageEvent,
 ) -> AsyncGenerator[list[Comp.BaseMessageComponent]]:
     """即时媒体（视频/音频）→ 逐条 yield 消息链。
 
@@ -684,7 +712,7 @@ async def send_result(
     )
     for cont in media_contents:
         try:
-            async for msg_chain in _handle_immediate_media(cont, event):
+            async for msg_chain in _handle_immediate_media(cont):
                 yield msg_chain
         except SizeLimitException:
             yield [Comp.Plain(texts.OVERSIZED_HINT.format(result.platform.display_name))]

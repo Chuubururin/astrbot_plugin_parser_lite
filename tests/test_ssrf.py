@@ -521,6 +521,29 @@ def clean_resolve_table():
         ssrf._CURL_RESOLVE_ENTRIES.clear()
 
 
+def test_resolve_table_is_bounded_and_keeps_the_current_host(clean_resolve_table):
+    """RESOLVE 表必须有容量上界，且淘汰只碰别的 host。
+
+    表按 host:port 累积、没有自然过期：群里贴过的每个新域名都永久留一条，
+    而每次请求还要把整表重新序列化一遍。当前请求链每一跳在发起前都会重新校验
+    并写入自己那条，所以它必须始终在表里。
+    """
+    cap = ssrf._CURL_RESOLVE_MAX_ENTRIES
+    for index in range(cap + 5):
+        ssrf._publish_resolve_entries(
+            ssrf.ValidatedUrl(host=f"h{index}.example.com", port=443, ips=["93.184.216.34"])
+        )
+    assert len(ssrf._CURL_RESOLVE_ENTRIES) == cap, "RESOLVE 表超出容量上界仍在增长"
+
+    entries = ssrf._publish_resolve_entries(
+        ssrf.ValidatedUrl(host="current.example.com", port=443, ips=["93.184.216.34"])
+    )
+    assert any(entry.startswith("current.example.com:443:") for entry in entries), (
+        "本次请求的钉扎被淘汰了"
+    )
+    assert len(ssrf._CURL_RESOLVE_ENTRIES) == cap
+
+
 @contextlib.contextmanager
 def _local_http_server(redirect_to: str | None = None):
     """本地 HTTP 服务：/redir 返回 302（Location 可配），/secret 返回敏感串。"""
@@ -544,7 +567,9 @@ def _local_http_server(redirect_to: str | None = None):
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # poll_interval 默认 0.5s，shutdown() 要等满一个轮询周期：本地服务
+    # 的拆除每条用例白等半秒
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     try:
         yield server, hits
@@ -593,9 +618,7 @@ def _pin_host_to_local(monkeypatch, host: str, port: int) -> list[str]:
     def fake_validate(url: str) -> ssrf.ValidatedUrl:
         calls.append(url)
         if url.startswith(f"http://{host}:") or url.startswith(f"http://{host}/"):
-            return ssrf.ValidatedUrl(
-                url=url, scheme="http", host=host, port=port, ips=["127.0.0.1"]
-            )
+            return ssrf.ValidatedUrl(host=host, port=port, ips=["127.0.0.1"])
         return real_validate(url)
 
     monkeypatch.setattr(ssrf, "validate_url", fake_validate)
@@ -808,8 +831,6 @@ def test_curl_guard_manual_redirect_follows_and_validates(monkeypatch, clean_res
 
                 parts = urlsplit(url)
                 return ssrf.ValidatedUrl(
-                    url=url,
-                    scheme=parts.scheme,
                     host=parts.hostname or "hop.example.com",
                     port=parts.port or 80,
                     ips=["127.0.0.1"],
@@ -909,3 +930,94 @@ def test_pin_existing_httpx_wraps_custom_mount_backend():
         assert isinstance(pool._network_backend, ssrf._PinnedNetworkBackend)
     finally:
         _run(client.aclose())
+
+
+# ---------------------------------------------------------------- HLS 列表预校验
+
+
+@contextlib.contextmanager
+def _playlist_server(body: str):
+    """本地 HLS 列表服务：任何路径都返回同一份播放列表。"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+async def test_hls_playlist_nested_urls_are_validated(monkeypatch):
+    """播放列表里嵌套的地址也要过 SSRF 校验。
+
+    ffmpeg 照着列表继续出站（子进程不经钉扎通道），只校验入口 URL 等于把
+    「机器人当内网读取代理」的口子留在列表内容里。
+    """
+    body = (
+        "#EXTM3U\n"
+        '#EXT-X-KEY:METHOD=AES-128,URI="http://10.0.0.7/key.bin"\n'
+        "#EXTINF:2.0,\nseg-0001.ts\n"
+    )
+    checked: list[str] = []
+
+    def fake_validate(url: str) -> ssrf.ValidatedUrl:
+        checked.append(url)
+        if "10.0.0.7" in url:
+            raise ssrf.UrlBlockedError("域名解析到被拒绝的地址 10.0.0.7")
+        return ssrf.ValidatedUrl(host="127.0.0.1", port=80, ips=["127.0.0.1"])
+
+    monkeypatch.setattr(ssrf, "validate_url", fake_validate)
+    with _playlist_server(body) as server, pytest.raises(ssrf.UrlBlockedError):
+        await ssrf.validate_hls_playlist(f"http://127.0.0.1:{server.server_port}/i.m3u8")
+
+    assert any("10.0.0.7" in url for url in checked), f"列表里的内网地址未被校验：{checked}"
+
+
+async def test_hls_playlist_validates_each_host_once(monkeypatch):
+    """同主机分片只校验一次：数百条分片不该变成数百次 DNS 解析。"""
+    body = "#EXTM3U\n#EXTINF:2.0,\nseg-0001.ts\n#EXTINF:2.0,\nseg-0002.ts\n#EXTINF:2.0,\nseg-3.ts\n"
+    checked: list[str] = []
+
+    def fake_validate(url: str) -> ssrf.ValidatedUrl:
+        checked.append(url)
+        return ssrf.ValidatedUrl(host="127.0.0.1", port=80, ips=["127.0.0.1"])
+
+    monkeypatch.setattr(ssrf, "validate_url", fake_validate)
+    with _playlist_server(body) as server:
+        await ssrf.validate_hls_playlist(f"http://127.0.0.1:{server.server_port}/i.m3u8")
+
+    assert len(checked) == 1, f"同主机分片被逐条校验：{checked}"
+
+
+async def test_hls_playlist_fetch_failure_does_not_block_the_download(monkeypatch):
+    """列表拉不下来只告警放行：桥客户端与 ffmpeg 的 TLS/代理行为可能不同，
+    一律拦会误伤正常视频；入口 URL 的校验仍由守卫负责。"""
+    checked: list[str] = []
+
+    def fake_validate(url: str) -> ssrf.ValidatedUrl:
+        checked.append(url)
+        return ssrf.ValidatedUrl(host="h", port=80, ips=["1.2.3.4"])
+
+    monkeypatch.setattr(ssrf, "validate_url", fake_validate)
+
+    async def _boom(*_a: Any, **_k: Any) -> Any:
+        raise httpx.ConnectError("no route")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _boom)
+    # 不抛即通过：拉不到列表不得升级成下载失败
+    await ssrf.validate_hls_playlist("https://cdn.example.com/index.m3u8")
+    assert checked == [], f"列表没拉到却校验了地址：{checked}"

@@ -38,6 +38,21 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # 依赖清单全部入库，哈希即稳定键：命中后 pip 只解包不下载。
+          # host-provided.txt 不匹配 setup-python 的默认 requirements 通配，
+          # 故三份清单显式列出。
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/host-provided.txt
+            tests/requirements-test.txt
+      # pre-commit 的钩子环境（ruff wheel、zizmor 二进制）冷建数十秒，而它只随
+      # 配置文件变化：按配置哈希缓存，命中即跳过建环境。
+      - name: 缓存 pre-commit 钩子环境
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('config/.pre-commit-config.yaml') }}
       # pre-commit 的 actionlint 钩子是 language: system —— 二进制必须自备。
       # 开发机上它在 ~/.local/bin（用户级安装），干净 runner 上并不存在。
       # 版本与校验和固定，与仓库其余 action 的 SHA 钉扎策略一致。
@@ -68,6 +83,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # 依赖清单全部入库，哈希即稳定键：命中后 pip 只解包不下载。
+          # host-provided.txt 不匹配 setup-python 的默认 requirements 通配，
+          # 故三份清单显式列出。
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/host-provided.txt
+            tests/requirements-test.txt
       # 依赖安装统一走复合 action（.github/actions/setup-env）：单一来源，
       # 杜绝多处 Install deps 手抄漂移（任一处漏装依赖 = 门禁以环境缺失误红，
       # 把提权通道锁死）。
@@ -110,6 +133,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # 依赖清单全部入库，哈希即稳定键：命中后 pip 只解包不下载。
+          # host-provided.txt 不匹配 setup-python 的默认 requirements 通配，
+          # 故三份清单显式列出。
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/host-provided.txt
+            tests/requirements-test.txt
       # 依赖安装统一走复合 action（.github/actions/setup-env）。
       # astrbot 以 --no-deps 装（避开 63 个声明依赖），但其 core/__init__ 在导入期
       # 即建库 / 初始化 logger，导入闭包仍需一批第三方包 —— 由

@@ -22,10 +22,13 @@ kuwo ``music_id`` 参数尾随空格缺陷已由上游修复（#307 / 740e6c7）
 桥内安全加固（超出上游姿态，与 ssrf.py 四层钉扎同策略）：HLS 视频
 由 ffmpeg 子进程直连 URL 出站，不经过任何 Python HTTP 客户端，绕过
 _PinnedTransport/_PinnedNetworkBackend——对 FFmpeg.download_hls_to_mp4
-入口前置 ssrf.validate_url 校验（复用既有接口，拒绝经 vendor 调用点的
-except Exception 包装为 DownloadException，走 sender 下载失败降级）。
+入口前置 ssrf.validate_url，并用 ssrf.validate_hls_playlist 把播放列表里
+嵌套的子列表与分片地址一并校验（ffmpeg 会照着列表继续出站，只校验入口
+等于把内网地址的口子留在列表内容里）。拒绝抛 UrlBlockedError，它是
+BaseException：vendor 调用点的 except Exception 包不住，安全拒绝直达
+插件入口（main 的 except UrlBlockedError），不与普通下载失败混淆。
 局限：校验与 ffmpeg 实际解析存在 DNS TOCTOU 窗口（子进程无法钉扎 IP），
-为子进程出站的行业尽力而为做法。
+列表预校验在拉不到列表时只告警放行，为子进程出站的行业尽力而为做法。
 
 挂载契约：模块属性 setattr 永远成功，上游改名/改
 形态时补丁会静默失效而源码字符串哨兵（字符串仍在）测不出——每次挂载前经
@@ -246,6 +249,12 @@ def _build_hls_guard(original: Any, ssrf_module: Any) -> Any:
         # 调用点的 except Exception 包不住它，安全拒绝直达插件入口
         # （main 的 except UrlBlockedError），不与普通下载失败混淆。
         await to_thread.run_sync(ssrf_module.validate_url, url)
+        # 入口校验挡不住列表里嵌套的地址：ffmpeg 会照着播放列表继续去取子列表
+        # 与分片，那里才是「把机器人当内网读取代理」的口子
+        headers = kwargs.get("headers")
+        if headers is None and len(args) > 1:
+            headers = args[1]
+        await ssrf_module.validate_hls_playlist(url, headers)
         return await original(url, *args, **kwargs)
 
     guarded._ssrf_guarded = True  # type: ignore[attr-defined]

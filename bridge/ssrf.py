@@ -47,9 +47,11 @@ import contextvars
 import functools
 import inspect
 import ipaddress
+import re
 import socket
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -135,8 +137,6 @@ def _ip_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 @dataclass(slots=True)
 class ValidatedUrl:
-    url: str
-    scheme: str
     host: str
     port: int
     ips: list[str]
@@ -211,7 +211,7 @@ def _validate_url(url: str) -> ValidatedUrl:
     except ValueError:
         ips = _resolve_and_validate(trimmed)
 
-    return ValidatedUrl(url=url, scheme=scheme, host=hostname, port=port, ips=ips)
+    return ValidatedUrl(host=hostname, port=port, ips=ips)
 
 
 def _resolve_pinned_fallback(host: str) -> list[str]:
@@ -225,6 +225,69 @@ def _resolve_pinned_fallback(host: str) -> list[str]:
     except (UrlBlockedError, UrlResolveError) as exc:
         logger.warning("SSRF 拒绝拨号目标（无预验证上下文）: host=%s 原因=%s", host, exc)
         raise
+
+
+_PLAYLIST_URI_ATTR_RE = re.compile(r'\bURI="([^"]+)"')
+_PLAYLIST_MAX_URLS = 500
+"""单次 HLS 预校验遍历的 URI 上限：正常 VOD 列表就是数百条分片，超出即视为异常
+列表并停止遍历（已校验过的部分仍然有效）。"""
+_PLAYLIST_MAX_DEPTH = 2
+"""子列表递归深度上限：主列表 → 码率变体 → 媒体列表，再深不是 HLS 的正常形态。"""
+
+
+def _playlist_uris(text: str) -> Iterator[str]:
+    """HLS 列表里的 URI：非注释行（分片/子列表）与标签的 ``URI="..."`` 属性
+    （EXT-X-KEY / EXT-X-MAP / EXT-X-MEDIA）。"""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            yield from _PLAYLIST_URI_ATTR_RE.findall(stripped)
+        else:
+            yield stripped
+
+
+async def validate_hls_playlist(url: str, headers: dict[str, str] | None = None) -> None:
+    """把 HLS 播放列表里的每个 URI 都过一遍 SSRF 校验，任一被拒即抛。
+
+    只校验入口 URL 挡不住嵌套：ffmpeg 按列表内容去取子列表与分片，子进程出站
+    不经任何 Python 客户端（绕过 _PinnedTransport），列表里写
+    ``http://127.0.0.1:6379/`` 就把机器人变成内网读取代理——取到的字节还会被
+    合进 mp4 发回群里。这里用桥自己的（已钉扎的）httpx 客户端先把列表拉下来
+    逐个校验，再交给 ffmpeg。
+
+    尽力而为：列表拉不下来只告警不拦（桥客户端与 ffmpeg 的 TLS/代理行为可能
+    不同，一律拦会误伤正常视频），入口 URL 的校验照旧生效。校验按 netloc 去重
+    ——分片数百条而主机通常只有一个，不该为每条分片各解析一次 DNS。
+    """
+    hosts: set[str] = set()
+    pending: list[tuple[str, int]] = [(url, 0)]
+    seen = 0
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=15.0) as client:
+        while pending:
+            current, depth = pending.pop()
+            try:
+                response = await client.get(current)
+                response.raise_for_status()
+            except Exception as exc:
+                logger.warning("HLS 列表预校验拉取失败，按入口校验放行: %r", exc)
+                continue
+            base = str(response.url)
+            for raw in _playlist_uris(response.text):
+                target = urljoin(base, raw)
+                seen += 1
+                if seen > _PLAYLIST_MAX_URLS:
+                    logger.warning("HLS 列表 URI 超过 %d 条，停止预校验遍历", _PLAYLIST_MAX_URLS)
+                    return
+                netloc = urlsplit(target).netloc
+                if netloc not in hosts:
+                    hosts.add(netloc)
+                    await anyio.to_thread.run_sync(validate_url, target)
+                if depth < _PLAYLIST_MAX_DEPTH and urlsplit(target).path.lower().endswith(
+                    (".m3u8", ".m3u")
+                ):
+                    pending.append((target, depth + 1))
 
 
 _MAX_FAILOVER_IPS = 4
@@ -358,19 +421,27 @@ _MAX_CURL_REDIRECTS = 30
 """curl 通道手动跟随重定向的跳数上限（与 libcurl 默认一致，防循环）。"""
 
 
+_CURL_RESOLVE_MAX_ENTRIES = 256
+"""RESOLVE 表容量上界：条目按 ``host:port`` 累积且没有自然过期，不设上界就是
+一条随「群里贴过多少个不同域名」增长的内存泄漏，且每次请求都要把整表重新序列
+化一遍。淘汰最旧条目不削弱钉扎：libcurl 只按 host:port 匹配，当前请求链上的每
+一跳都在发起前重新校验并写入自己那条（因此它总是最新的、不会被淘汰）。"""
+
+
 def _publish_resolve_entries(validated: ValidatedUrl) -> list[str]:
     """把本次校验结果并入模块级 RESOLVE 表，返回 libcurl 可用的条目列表。"""
     # libcurl 规定地址为 IPv6 字面量时必须写在 [] 内，否则冒号与
     # HOST:PORT:ADDRESS 的分隔符歧义，curl 直接报格式错误——IPv6 优先
     # 环境下表现为 curl 后端整体下载失败
-    fresh = {
-        f"{validated.host}:{validated.port}": [
-            (f"[{ip}]" if ":" in ip else ip) for ip in validated.ips[:_MAX_FAILOVER_IPS]
-        ]
-    }
+    key = f"{validated.host}:{validated.port}"
+    addrs = [(f"[{ip}]" if ":" in ip else ip) for ip in validated.ips[:_MAX_FAILOVER_IPS]]
     with _CURL_OPTIONS_LOCK:
-        _CURL_RESOLVE_ENTRIES.update(fresh)
-        return [f"{key}:{addr}" for key, addrs in _CURL_RESOLVE_ENTRIES.items() for addr in addrs]
+        # 先摘再插：让本次的键落到表尾，容量淘汰只会碰到别的 host
+        _CURL_RESOLVE_ENTRIES.pop(key, None)
+        _CURL_RESOLVE_ENTRIES[key] = addrs
+        while len(_CURL_RESOLVE_ENTRIES) > _CURL_RESOLVE_MAX_ENTRIES:
+            _CURL_RESOLVE_ENTRIES.pop(next(iter(_CURL_RESOLVE_ENTRIES)))
+        return [f"{k}:{addr}" for k, entry in _CURL_RESOLVE_ENTRIES.items() for addr in entry]
 
 
 def _wrap_curl_session(session: Any) -> None:

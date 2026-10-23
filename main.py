@@ -35,9 +35,8 @@ os.environ.setdefault(
 from .bridge import render_params, texts
 from .bridge.config_sync import rearm_runtime, sync_import_time_config
 from .bridge.gen_config import BRIDGE_DEFAULTS, BRIDGE_FIELDS, VENDOR_FIELDS
-from .bridge.render import cache_or_render_image
+from .bridge.render import MAX_COMMENTS_LIMIT, cache_or_render_image
 from .bridge.sender import (
-    VIDEO_FILE_THRESHOLD_DEFAULT_MB,
     ask_lazy_download,
     is_direct_send_media,
     send_media_chain_with_retry,
@@ -53,10 +52,9 @@ from .vendor.nonebot_plugin_parser_lite.exception import ParseException, TipExce
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'，。；！？】》（【]+", re.IGNORECASE)
 
-# pconfig.max_comments 的入口钳制上界：vendor 模板/配置面无上界，超大值
-# 会把分页拉成 OOM；与 vendor Config.MAX_COMMENTS_LIMIT 同口径（render.py
-# 已有同名常量做发送面钳制，此处在 configure 入口先兜一层）。
-_MAX_COMMENTS_HARD_CAP = 100
+# pconfig.max_comments 的入口钳制：vendor 配置面无上界，超大值会把评论分页拉成
+# OOM。上界与渲染面共用 render.MAX_COMMENTS_LIMIT（vendor Config 同口径），
+# 入口先兜一层，渲染面再兜一层——两层各护一条路径，数字只有一个来源。
 
 # 空降分类名的服务端形态（`SponsorBlockServer` parseParams.ts 的 validateString）：
 # 只放行小写字母/数字/下划线/连字符，且**校验是 all-or-nothing**——一个带空格或大写的
@@ -212,6 +210,27 @@ def _upstream_status_detail(exc: httpx.HTTPStatusError) -> str:
     return f"{request.url.host}{path} {request.method} HTTP {exc.response.status_code}"
 
 
+def _config_error_summary(exc: BaseException) -> str:
+    """配置异常的可日志摘要（仅日志）：类型名 + 出错字段名，不含任何输入值。
+
+    pydantic 的 ValidationError 在 ``errors()`` 里同时给出 ``loc`` 与 ``input``，
+    ``%r`` 会把 input 一并 repr 出来——而 vendor 配置面携带 linuxdo/zhihu
+    cookie，凭据不得落日志。只取 loc，字段名足以定位是哪一项配错。
+    """
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        try:
+            fields = sorted(
+                {".".join(str(part) for part in item.get("loc", ())) for item in errors()}
+            )
+        except Exception:
+            # 摘要本身不得成为新的失败点：拿不到字段名就只留类型名
+            fields = []
+        if fields:
+            return f"{type(exc).__name__} fields={fields}"
+    return type(exc).__name__
+
+
 class ParserLitePlugin(star.Star):
     """nonebot-plugin-parser-lite（vendored snapshot）的 AstrBot 桥。"""
 
@@ -232,7 +251,7 @@ class ParserLitePlugin(star.Star):
             if isinstance(raw, bool) or not isinstance(raw, int):
                 vendor_cfg["plite_max_comments"] = 0
             else:
-                vendor_cfg["plite_max_comments"] = max(0, min(_MAX_COMMENTS_HARD_CAP, raw))
+                vendor_cfg["plite_max_comments"] = max(0, min(MAX_COMMENTS_LIMIT, raw))
         if "plite_bsb_categories" in vendor_cfg:
             kept, dropped = _sanitize_bsb_categories(vendor_cfg["plite_bsb_categories"])
             if dropped:
@@ -249,8 +268,10 @@ class ParserLitePlugin(star.Star):
         try:
             configure(**vendor_cfg)
         except Exception as e:
-            # configure 失败不应阻断插件加载：vendor 落默认配置继续运行
-            self.logger.warning("vendor configure 失败，使用默认配置: %r", e)
+            # configure 失败不应阻断插件加载：vendor 落默认配置继续运行。
+            # 摘要只含类型名与出错字段：%r 会把输入值一并 repr 出来，而
+            # vendor_cfg 携带 linuxdo/zhihu cookie——凭据不得落日志。
+            self.logger.warning("vendor configure 失败，使用默认配置: %s", _config_error_summary(e))
         # vendor 类体在导入期快照的配置点（MAX_RETRIES / 两平台 cookies）
         # 在上游环境中导入时配置已就绪；桥的 configure 晚于导入，须回写
         sync_import_time_config()
@@ -262,20 +283,9 @@ class ParserLitePlugin(star.Star):
         )
         if stale:
             self.logger.warning("以下配置键已不被上游识别（可能已随上游同步改名或移除）：%s", stale)
-        raw_threshold = self._cfg("plite_video_file_threshold_mb")
-        try:
-            threshold_mb = int(raw_threshold)
-        except (TypeError, ValueError):
-            default_mb = BRIDGE_DEFAULTS["plite_video_file_threshold_mb"]
-            threshold_mb = (
-                default_mb
-                if isinstance(default_mb, int) and not isinstance(default_mb, bool)
-                else VIDEO_FILE_THRESHOLD_DEFAULT_MB
-            )
-            self.logger.warning(
-                "plite_video_file_threshold_mb 非法(%r)，回落默认 %s", raw_threshold, threshold_mb
-            )
-        set_video_file_threshold_mb(threshold_mb)
+        # 解析、钳制与告警都在 set_video_file_threshold_mb 内（单点判据），
+        # 入口只把原始配置值递进去，取回实际生效值用于就绪日志
+        threshold_mb = set_video_file_threshold_mb(self._cfg("plite_video_file_threshold_mb"))
         self._parser = Parser()
         try:
             install_ssrf_guard()
@@ -364,7 +374,9 @@ class ParserLitePlugin(star.Star):
                 self.logger.warning("解析被 SSRF 守卫拒绝: %s", exc)
                 await self._fail(event)
                 if self._cfg("plite_verbose_error"):
-                    yield event.plain_result(f"请求被安全策略拒绝：{exc}")
+                    # 会话侧只给固定判词：异常文本含解析到的内网地址与端口判据，
+                    # 端出去等于给群里一个内网拓扑探测 oracle；细节留上一条日志
+                    yield event.plain_result("请求被安全策略拒绝：目标地址不允许访问")
                 return
             except TipException as exc:
                 # 上游 matcher：提示性异常（如 up 主黑名单）的 message 必达用户，
