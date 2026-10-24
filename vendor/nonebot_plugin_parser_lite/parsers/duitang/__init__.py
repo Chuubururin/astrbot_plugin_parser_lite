@@ -103,7 +103,7 @@ class DuiTangParser(BaseParser):
         :raise ValueError: 当接口返回 message 不为 "success" 时抛出
         """
         response = await self.httpx.get(
-            "https://www.duitang.com/napi/vienna/atlas/detail/",
+            "https://xapi.duitang.com/napi/vienna/atlas/detail/",
             params={"atlas_id": atlas_id},
         )
         response.raise_for_status()
@@ -124,7 +124,7 @@ class DuiTangParser(BaseParser):
         :raise ValueError: 当接口返回 message 不为 "success" 时抛出
         """
         response = await self.httpx.get(
-            "https://www.duitang.com/napi/blog/with_instance_tag/detail/",
+            "https://xapi.duitang.com/napi/blog/with_instance_tag/detail/",
             params={
                 "blog_id": blog_id,
                 "include_fields": (
@@ -155,7 +155,7 @@ class DuiTangParser(BaseParser):
         :raise ValueError: 当接口返回 message 不为 "success" 时抛出
         """
         response = await self.httpx.get(
-            "https://www.duitang.com/napi/vienna/comment/list/",
+            "https://xapi.duitang.com/napi/vienna/comment/list/",
             params={
                 "start": 0,
                 "limit": limit,
